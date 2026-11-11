@@ -14,3 +14,4 @@ C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\ai
 C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\refint\aimLOCK.dll
 C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.pdb
 C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\ref\aimLOCK.dll
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.sourcelink.json

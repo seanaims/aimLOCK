@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("aimLOCK")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1177d4a357f3f0ca0a9bfd67c0c2f80a4c0606f8")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3c3feafaa152b9b89e9867387850da40e382a6ad")]
 [assembly: System.Reflection.AssemblyProductAttribute("aimLOCK")]
 [assembly: System.Reflection.AssemblyTitleAttribute("aimLOCK")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
