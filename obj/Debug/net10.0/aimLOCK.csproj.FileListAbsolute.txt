@@ -1,0 +1,16 @@
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.AssemblyInfoInputs.cache
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.AssemblyInfo.cs
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.csproj.CoreCompileInputs.cache
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\bin\Debug\net10.0\aimLOCK.deps.json
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\bin\Debug\net10.0\aimLOCK.dll
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\bin\Debug\net10.0\aimLOCK.pdb
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\bin\Debug\net10.0\DeadworksManaged.Api.dll
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\bin\Debug\net10.0\Google.Protobuf.dll
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\bin\Debug\net10.0\DeadworksManaged.Api.xml
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.csproj.AssemblyReference.cache
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.csproj.Up2Date
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.dll
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\refint\aimLOCK.dll
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\aimLOCK.pdb
+C:\Users\breez\OneDrive\Desktop\aimLOCK development\aimLOCK\obj\Debug\net10.0\ref\aimLOCK.dll
