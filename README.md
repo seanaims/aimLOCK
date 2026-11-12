@@ -1,4 +1,4 @@
-#aimLOCK - An open source deadlock vamp plugin
+# aimLOCK - An open source deadlock vamp plugin
 
 (Nov. 10,  2026)
 I deadass hate doing this but it's a new learning experience.  
