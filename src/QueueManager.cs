@@ -21,7 +21,7 @@ public class QueueManager
         this.server = server;
     }
 
-    public void JoinQueue(Caller caller)
+    public void JoinQueue(Caller caller, MatchQueueType queueType)
     {
         var controller = caller.Player;
 
@@ -31,22 +31,30 @@ public class QueueManager
             return;
         }
 
-        if (server.queue.Any(x =>
-            StringComparer.OrdinalIgnoreCase.Equals(
+        bool alreadyQueued = server.RankedQueue
+            .Concat(server.UnrankedQueue)
+            .Any(x => StringComparer.OrdinalIgnoreCase.Equals(
                 x.PlayerName,
-                controller.PlayerName)))
+                controller.PlayerName));
+
+        if (alreadyQueued)
         {
-            caller.Reply("You are already in the queue.");
+            caller.Reply("You are already in a queue. Use /leave first.");
             return;
         }
 
-        server.queue.Add(new QueueEntry(controller.PlayerName));
+        var queue = GetQueue(queueType);
+        queue.Add(new QueueEntry(controller.PlayerName));
+
+        var bot = Players.GetAll().FirstOrDefault(player => player.IsBot);
+        if (bot != null)
+            MoveBotToQueue(bot.PlayerName, queueType);
 
         server.UIManager.RefreshHud();
 
-        TryStartMatch();
+        TryStartMatch(queueType);
 
-        caller.Reply("You have been added to the queue.");
+        caller.Reply($"You have joined the {queueType.ToString().ToLowerInvariant()} queue.");
 
         Sounds.Play(
             "Damage.Send.Crit",
@@ -54,8 +62,23 @@ public class QueueManager
         );
 
         Console.WriteLine(
-            $"{controller.PlayerName} has joined the queue."
+            $"{controller.PlayerName} has joined the {queueType} queue."
         );
+    }
+
+    public void MoveBotToQueue(string botName, MatchQueueType queueType)
+    {
+        server.BotQueuePreference = queueType;
+
+        if (server.ActiveMatches.ContainsKey(botName))
+            return;
+
+        server.RankedQueue.RemoveAll(entry =>
+            StringComparer.OrdinalIgnoreCase.Equals(entry.PlayerName, botName));
+        server.UnrankedQueue.RemoveAll(entry =>
+            StringComparer.OrdinalIgnoreCase.Equals(entry.PlayerName, botName));
+
+        GetQueue(queueType).Add(new QueueEntry(botName));
     }
 
     public void LeaveQueue(Caller caller)
@@ -65,18 +88,27 @@ public class QueueManager
         if (controller == null)
             return;
 
-        var player = server.queue.FirstOrDefault(x =>
+        var player = server.RankedQueue.FirstOrDefault(x =>
             StringComparer.OrdinalIgnoreCase.Equals(
-                x.PlayerName,
-                controller.PlayerName));
+                x.PlayerName, controller.PlayerName));
 
-        if (player == null)
+        if (player != null)
         {
-            caller.Reply("You are not currently in the queue.");
-            return;
+            server.RankedQueue.Remove(player);
         }
+        else
+        {
+            player = server.UnrankedQueue.FirstOrDefault(x =>
+                StringComparer.OrdinalIgnoreCase.Equals(
+                    x.PlayerName, controller.PlayerName));
+            if (player == null)
+            {
+                caller.Reply("You are not currently in a queue.");
+                return;
+            }
 
-        server.queue.Remove(player);
+            server.UnrankedQueue.Remove(player);
+        }
 
         server.UIManager.RefreshHud();
 
@@ -87,36 +119,130 @@ public class QueueManager
         );
     }
 
-    public void TryStartMatch()
+    public void TryStartMatches()
     {
-        Console.WriteLine($"Queue Count: {server.queue.Count}");
+        TryStartMatch(MatchQueueType.Ranked);
+        TryStartMatch(MatchQueueType.Unranked);
+    }
 
-        if (server.queue.Count < 2)
+    public void TryStartMatch(MatchQueueType queueType)
+    {
+        var queue = GetQueue(queueType);
+
+        if (queue.Count < 2)
             return;
 
-        var player1 = Players.GetAll()
-            .FirstOrDefault(p =>
-                p.PlayerName == server.queue[0].PlayerName);
+        var playersByName = Players.GetAll()
+            .GroupBy(player => player.PlayerName, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() == 1)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Single(),
+                StringComparer.OrdinalIgnoreCase
+            );
+        var queuedPlayers = queue
+            .Select((entry, index) => new QueuedPlayer(
+                entry,
+                index,
+                playersByName.TryGetValue(entry.PlayerName, out var player)
+                    ? player
+                    : null
+            ))
+            .Where(item => item.Player != null)
+            .ToArray();
 
-        var player2 = Players.GetAll()
-            .FirstOrDefault(p =>
-                p.PlayerName == server.queue[1].PlayerName);
+        int selectedFirstIndex = -1;
+        int selectedSecondIndex = -1;
+        CCitadelPlayerController? player1 = null;
+        CCitadelPlayerController? player2 = null;
+        DateTimeOffset selectedOldestEntry = DateTimeOffset.MaxValue;
+        long selectedPingDifference = long.MaxValue;
+        int selectedIndexSum = int.MaxValue;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
 
-        if (player1 == null || player2 == null)
+        for (int first = 0; first < queuedPlayers.Length; first++)
         {
-            Console.WriteLine("Player lookup failed.");
-            return;
+            var firstQueued = queuedPlayers[first];
+            for (int second = first + 1; second < queuedPlayers.Length; second++)
+            {
+                var secondQueued = queuedPlayers[second];
+                var firstPlayer = firstQueued.Player!;
+                var secondPlayer = secondQueued.Player!;
+                long pingDifference = 0;
+
+                if (!firstPlayer.IsBot && !secondPlayer.IsBot)
+                {
+                    if (!server.PingManager.TryGetPing(firstPlayer, out int firstPing)
+                        || !server.PingManager.TryGetPing(secondPlayer, out int secondPing))
+                    {
+                        continue;
+                    }
+
+                    pingDifference = Math.Abs((long)firstPing - secondPing);
+                    DateTimeOffset oldestEntry = firstQueued.Entry.EnqueuedAt
+                        <= secondQueued.Entry.EnqueuedAt
+                            ? firstQueued.Entry.EnqueuedAt
+                            : secondQueued.Entry.EnqueuedAt;
+                    int allowedDifference = GetAllowedPingDifference(
+                        Math.Max(0d, (now - oldestEntry).TotalSeconds)
+                    );
+                    if (pingDifference > allowedDifference)
+                        continue;
+                }
+
+                DateTimeOffset pairOldestEntry = firstQueued.Entry.EnqueuedAt
+                    <= secondQueued.Entry.EnqueuedAt
+                        ? firstQueued.Entry.EnqueuedAt
+                        : secondQueued.Entry.EnqueuedAt;
+                int indexSum = firstQueued.QueueIndex + secondQueued.QueueIndex;
+                bool isBetter = pairOldestEntry < selectedOldestEntry
+                    || (pairOldestEntry == selectedOldestEntry
+                        && pingDifference < selectedPingDifference)
+                    || (pairOldestEntry == selectedOldestEntry
+                        && pingDifference == selectedPingDifference
+                        && indexSum < selectedIndexSum);
+                if (!isBetter)
+                    continue;
+
+                selectedFirstIndex = firstQueued.QueueIndex;
+                selectedSecondIndex = secondQueued.QueueIndex;
+                player1 = firstPlayer;
+                player2 = secondPlayer;
+                selectedOldestEntry = pairOldestEntry;
+                selectedPingDifference = pingDifference;
+                selectedIndexSum = indexSum;
+            }
         }
+
+        if (selectedFirstIndex < 0 || player1 == null || player2 == null)
+            return;
+
+        string[] matchFoundLines =
+        {
+            "  [MATCH FOUND]",
+            GetMatchFoundPlayerLine(player1, queueType),
+            GetMatchFoundPingLine(player1),
+            "                 VS",
+            GetMatchFoundPlayerLine(player2, queueType),
+            GetMatchFoundPingLine(player2)
+        };
+        int matchFoundWidth = matchFoundLines.Max(line => line.Length);
+        string matchFoundMessage = string.Join(
+            "\n",
+            matchFoundLines.Select(line =>
+                line.PadLeft((matchFoundWidth + line.Length) / 2))
+        );
+        Chat.PrintToChatAll(matchFoundMessage);
 
         Console.WriteLine(
             $"Starting match: {player1.PlayerName} vs {player2.PlayerName}"
         );
 
-        player1.ChangeTeam(2);
-        player2.ChangeTeam(3);
-
-        server.ScheduleOnce(0.25.Seconds(), () =>
+        server.ScheduleOnce(2.Seconds(), () =>
         {
+            player1.ChangeTeam(2);
+            player2.ChangeTeam(3);
+
             var pawn1 = player1.GetHeroPawn();
             var pawn2 = player2.GetHeroPawn();
 
@@ -203,6 +329,7 @@ public class QueueManager
             {
                 Player1 = player1.PlayerName,
                 Player2 = player2.PlayerName,
+                QueueType = queueType,
                 ArenaPosition = arena,
                 Score1 = 0,
                 Score2 = 0
@@ -212,17 +339,108 @@ public class QueueManager
             server.ActiveMatches[player2.PlayerName] = match;
 
             server.UIManager.ShowMatchHud(match);
+            StartCountdown(match);
 
-            server.UIManager.HideQueuePanel(player1, player2);
+            server.UIManager.RefreshHud();
 
             Console.WriteLine(
                 $"Match Found! {player1.PlayerName} vs {player2.PlayerName}"
             );
         });
 
-        server.queue.RemoveAt(1);
-        server.queue.RemoveAt(0);
+        queue.RemoveAt(selectedSecondIndex);
+        queue.RemoveAt(selectedFirstIndex);
 
         server.UIManager.RefreshHud();
+    }
+
+    private static int GetAllowedPingDifference(double oldestWaitSeconds)
+    {
+        if (oldestWaitSeconds >= 120)
+            return int.MaxValue;
+
+        int wideningSteps = (int)(oldestWaitSeconds / 15);
+        return Math.Min(60, 6 + wideningSteps * 3);
+    }
+
+    private sealed record QueuedPlayer(
+        QueueEntry Entry,
+        int QueueIndex,
+        CCitadelPlayerController? Player
+    );
+
+    private List<QueueEntry> GetQueue(MatchQueueType queueType) =>
+        queueType switch
+        {
+            MatchQueueType.Ranked => server.RankedQueue,
+            MatchQueueType.Unranked => server.UnrankedQueue,
+            _ => throw new ArgumentOutOfRangeException(nameof(queueType))
+        };
+
+    private string GetMatchFoundPlayerLine(
+        CCitadelPlayerController player,
+        MatchQueueType queueType)
+    {
+        if (queueType == MatchQueueType.Ranked)
+        {
+            RankedEloStats stats = server.RankedElo.GetStats(
+                server.PlayerManager.GetRankedEloId(player),
+                player.PlayerName
+            );
+            int games = stats.Wins + stats.Losses;
+            float winRate = games > 0
+                ? (float)stats.Wins / games * 100f
+                : 0f;
+
+            return $"{player.PlayerName} | {stats.Rating} Elo | " +
+                $"{stats.Wins}-{stats.Losses} | {winRate:F1}% WR";
+        }
+
+        PlayerRecord record = server.PlayerManager.GetRecord(player);
+        int unrankedGames = record.Wins + record.Losses;
+        float unrankedWinRate = unrankedGames > 0
+            ? (float)record.Wins / unrankedGames * 100f
+            : 0f;
+
+        return $"{player.PlayerName} | {record.Wins}-{record.Losses} | " +
+            $"{unrankedWinRate:F1}% WR";
+    }
+
+    private string GetMatchFoundPingLine(CCitadelPlayerController player) =>
+        server.PingManager.TryGetPing(player, out int pingMs)
+            ? $"      Ping: {pingMs} ms"
+            : "           Ping: N/A";
+
+    public void StartCountdown(DuelMatch match)
+    {
+        match.CountdownActive = true;
+
+        var player1 = Players.GetAll()
+            .FirstOrDefault(x => x.PlayerName == match.Player1);
+        var player2 = Players.GetAll()
+            .FirstOrDefault(x => x.PlayerName == match.Player2);
+
+        var pawn1 = player1?.GetHeroPawn();
+        var pawn2 = player2?.GetHeroPawn();
+
+        pawn1?.AddModifier("modifier_citadel_disarmed");
+        pawn2?.AddModifier("modifier_citadel_disarmed");
+
+        Chat.PrintToChatAll("[DUEL] 3...");
+
+        server.ScheduleOnce(1.Seconds(), () =>
+            Chat.PrintToChatAll("[DUEL] 2..."));
+
+        server.ScheduleOnce(2.Seconds(), () =>
+            Chat.PrintToChatAll("[DUEL] 1..."));
+
+        server.ScheduleOnce(3.Seconds(), () =>
+        {
+            pawn1?.RemoveModifier("modifier_citadel_disarmed");
+            pawn2?.RemoveModifier("modifier_citadel_disarmed");
+
+            Chat.PrintToChatAll("[DUEL] FIGHT!");
+            match.CountdownActive = false;
+        });
     }
 }
