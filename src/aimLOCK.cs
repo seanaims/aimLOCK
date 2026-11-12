@@ -135,6 +135,10 @@ public sealed class DuelMatch
     public int Score2;
 
     public Vector3 ArenaPosition;
+
+    // we do this because we don't want duplicate timers, if both players trade out, we get duplicates
+    public bool RespawnPending;
+    public bool Finished;
 }
 
 /* Queue Data */

@@ -99,22 +99,28 @@ public class PlayerManager
 
         server.UIManager.UpdateMatchHud(match);
 
-        if (
-            match.Score1 >= aimLOCK.WIN_SCORE ||
-            match.Score2 >= aimLOCK.WIN_SCORE
-        )
+        if (match.Finished || match.RespawnPending)
+            return HookResult.Continue;
+
+        if (match.Score1 >= aimLOCK.WIN_SCORE ||
+            match.Score2 >= aimLOCK.WIN_SCORE)
         {
+            match.Finished = true;
+
             server.ScheduleOnce(3.Seconds(), () =>
             {
-                RespawnIntoArena(match);
+                FinishMatch(match);
             });
 
             return HookResult.Continue;
         }
 
+        match.RespawnPending = true;
+
         server.ScheduleOnce(2.Seconds(), () =>
         {
             RespawnIntoArena(match);
+            match.RespawnPending = false;
         });
 
         return HookResult.Continue;
