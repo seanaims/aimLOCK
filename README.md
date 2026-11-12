@@ -1,4 +1,4 @@
-# aimLOCK - An open source deadlock vamp plugin
+# aimLOCK - An open source Deadlock Vamp plugin
 
 Queue commands: `/join ranked`, `/join unranked`, and `/leave`.
 Ranked and unranked queues pair players using server-reported ping from the server-console `status` command. `/ping` displays your latest server-reported ping. The system uses the median of up to three recent readings, requires unique player names to map status rows to controllers, and starts with a 6 ms maximum difference. That window widens by 3 ms every 15 seconds, up to 60 ms; after two minutes it permits any ping difference to avoid leaving players queued indefinitely. Bot matches are not filtered by ping.
