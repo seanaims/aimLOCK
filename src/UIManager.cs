@@ -33,20 +33,27 @@ public class UIManager
         if (controller == null)
             return;
 
+        ReconcileHud(controller);
+        server.ScheduleOnce(0.25.Seconds(), () =>
+            ReconcileHud(controller));
+    }
+
+    private void ReconcileHud(CCitadelPlayerController controller)
+    {
+        if (!controller.IsValid)
+            return;
+
         if (
-            !server.ActiveMatches.TryGetValue(
-                controller.PlayerName,
-                out var match
-            ) ||
-            match.Finished
+            server.PlayerManager.TryGetActiveMatch(controller, out var match) &&
+            !match.Finished
         )
         {
-            HideMatchHud(controller);
-            ShowServerInfo(controller);
+            ShowMatchHud(match);
             return;
         }
 
-        ShowMatchHud(match);
+        HideMatchHud(controller);
+        ShowServerInfo(controller);
     }
 
     /* Server Information HUD */
@@ -84,9 +91,9 @@ public class UIManager
                         UI.Label("servertitle", "aimlock")
                             .WithStyle("font-size", "26px")
                             .WithStyle("font-weight", "bold")
-                            .WithStyle("color", "#FF8A00"),
+                            .WithStyle("color", "#FFFFFF"),
 
-                        UI.Label("serverdomain", ".gg")
+                        UI.Label("serverdomain", ".xyz")
                             .WithStyle("font-size", "26px")
                             .WithStyle("font-weight", "bold")
                             .WithStyle("color", "#555555")
@@ -152,7 +159,7 @@ public class UIManager
         foreach (var controller in Players.GetAll())
         {
             if (
-                server.ActiveMatches.ContainsKey(controller.PlayerName) ||
+                server.PlayerManager.TryGetActiveMatch(controller, out _) ||
                 hiddenServerInfo.Contains(controller.PlayerSteamId)
             )
             {
@@ -188,14 +195,51 @@ public class UIManager
         foreach (string key in staleMatchKeys)
             server.ActiveMatches.Remove(key);
 
-        foreach (var controller in Players.GetAll())
+        void RestoreParticipants()
         {
-            if (server.ActiveMatches.ContainsKey(controller.PlayerName))
-                continue;
+            foreach (string playerName in new[] { match.Player1, match.Player2 })
+            {
+                var controller = server.PlayerManager.FindMatchParticipant(
+                    playerName
+                );
+                if (
+                    controller == null ||
+                    server.PlayerManager.TryGetActiveMatch(controller, out _)
+                )
+                {
+                    continue;
+                }
 
-            HideMatchHud(controller);
-            ShowServerInfo(controller);
+                hiddenServerInfo.Remove(controller.PlayerSteamId);
+            }
+
+            foreach (var controller in Players.GetAll())
+                ReconcileHud(controller);
         }
+
+        RestoreParticipants();
+        server.ScheduleOnce(0.5.Seconds(), RestoreParticipants);
+        server.ScheduleOnce(1.5.Seconds(), RestoreParticipants);
+        server.ScheduleOnce(3.Seconds(), RestoreParticipants);
+    }
+
+    public void RestoreServerInfoAfterSpawn(CCitadelPlayerController player)
+    {
+        void Restore()
+        {
+            if (
+                !player.IsValid ||
+                server.PlayerManager.TryGetActiveMatch(player, out _)
+            )
+                return;
+
+            hiddenServerInfo.Remove(player.PlayerSteamId);
+            HideMatchHud(player);
+            ShowServerInfo(player);
+        }
+
+        Restore();
+        server.ScheduleOnce(0.5.Seconds(), Restore);
     }
 
     public void SetServerInfoVisibility(
@@ -251,7 +295,10 @@ public class UIManager
         var panel = UI.Panel("queuepanel");
         if (
             hiddenServerInfo.Contains((ulong)player.PlayerSteamId) ||
-            server.ActiveMatches.ContainsKey(player.PlayerName)
+            (
+                player is CBasePlayerController controller &&
+                server.PlayerManager.TryGetActiveMatch(controller, out _)
+            )
         )
         {
             panel.DestroyLayout(player.Recipients);
@@ -266,11 +313,8 @@ public class UIManager
 
     public void ShowMatchHud(DuelMatch match)
     {
-        var p1 = Players.GetAll()
-            .FirstOrDefault(x => x.PlayerName == match.Player1);
-
-        var p2 = Players.GetAll()
-            .FirstOrDefault(x => x.PlayerName == match.Player2);
+        var p1 = server.PlayerManager.FindMatchParticipant(match.Player1);
+        var p2 = server.PlayerManager.FindMatchParticipant(match.Player2);
 
         if (p1 == null || p2 == null)
             return;
@@ -278,7 +322,9 @@ public class UIManager
         HideQueuePanel(p1, p2);
         HideMatchHud(p1, p2);
 
-        string title = $"{match.Player1} vs {match.Player2}";
+        string title =
+            $"{FormatMatchPlayerName(p1)} vs " +
+            $"{FormatMatchPlayerName(p2)}";
         string score = $"{match.Score1} - {match.Score2}";
 
         var layout = UI.Vertical()
@@ -310,15 +356,18 @@ public class UIManager
         UI.Panel("duelhud").BuildLayout(p2.Recipients, layout);
     }
 
+    private string FormatMatchPlayerName(
+        CCitadelPlayerController player
+    ) =>
+        server.PlayerManager.GetPracticeBotDisplayName(player) ??
+        server.GuildManager.FormatPlayerName(player);
+
     public void UpdateMatchHud(DuelMatch match)
     {
         string score = $"{match.Score1} - {match.Score2}";
 
-        var p1 = Players.GetAll()
-            .FirstOrDefault(x => x.PlayerName == match.Player1);
-
-        var p2 = Players.GetAll()
-            .FirstOrDefault(x => x.PlayerName == match.Player2);
+        var p1 = server.PlayerManager.FindMatchParticipant(match.Player1);
+        var p2 = server.PlayerManager.FindMatchParticipant(match.Player2);
 
         if (p1 != null)
         {

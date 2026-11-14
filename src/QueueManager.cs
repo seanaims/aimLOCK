@@ -31,6 +31,12 @@ public class QueueManager
             return;
         }
 
+        if (server.PlayerManager.IsSpectating(controller))
+        {
+            caller.Reply("Leave spectating before joining a queue.");
+            return;
+        }
+
         bool alreadyQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
             .Any(x => StringComparer.OrdinalIgnoreCase.Equals(
@@ -46,10 +52,6 @@ public class QueueManager
         var queue = GetQueue(queueType);
         queue.Add(new QueueEntry(controller.PlayerName));
 
-        var bot = Players.GetAll().FirstOrDefault(player => player.IsBot);
-        if (bot != null)
-            MoveBotToQueue(bot.PlayerName, queueType);
-
         server.UIManager.RefreshHud();
 
         TryStartMatch(queueType);
@@ -64,21 +66,6 @@ public class QueueManager
         Console.WriteLine(
             $"{controller.PlayerName} has joined the {queueType} queue."
         );
-    }
-
-    public void MoveBotToQueue(string botName, MatchQueueType queueType)
-    {
-        server.BotQueuePreference = queueType;
-
-        if (server.ActiveMatches.ContainsKey(botName))
-            return;
-
-        server.RankedQueue.RemoveAll(entry =>
-            StringComparer.OrdinalIgnoreCase.Equals(entry.PlayerName, botName));
-        server.UnrankedQueue.RemoveAll(entry =>
-            StringComparer.OrdinalIgnoreCase.Equals(entry.PlayerName, botName));
-
-        GetQueue(queueType).Add(new QueueEntry(botName));
     }
 
     public void LeaveQueue(Caller caller)
@@ -117,6 +104,62 @@ public class QueueManager
         Console.WriteLine(
             $"{controller.PlayerName} has left the queue."
         );
+    }
+
+    public bool StartBotMatch(
+        Caller caller,
+        CCitadelPlayerController bot,
+        Vector3 arena
+    )
+    {
+        var player = caller.Player;
+        if (player == null)
+        {
+            caller.Reply("You must be a player to start a bot match.");
+            return false;
+        }
+
+        return StartBotMatch(
+            player,
+            bot,
+            arena,
+            message => caller.Reply(message)
+        );
+    }
+
+    public bool StartBotMatch(
+        CCitadelPlayerController player,
+        CCitadelPlayerController bot,
+        Vector3 arena,
+        Action<string> reply
+    )
+    {
+        if (server.ActiveMatches.ContainsKey(player.PlayerName))
+        {
+            reply("You are already in a match.");
+            return false;
+        }
+
+        if (server.ActiveMatches.ContainsKey(bot.PlayerName))
+        {
+            reply("The practice bot is already in a match.");
+            return false;
+        }
+
+        bool alreadyQueued = server.RankedQueue
+            .Concat(server.UnrankedQueue)
+            .Any(entry => StringComparer.OrdinalIgnoreCase.Equals(
+                entry.PlayerName,
+                player.PlayerName));
+        if (alreadyQueued)
+        {
+            reply("Leave your current queue with /leave before starting a bot match.");
+            return false;
+        }
+
+        StartMatch(player, bot, MatchQueueType.Unranked, arena);
+        reply("Bot match found. Teleporting to a random duel arena.");
+        return true;
     }
 
     public void TryStartMatches()
@@ -169,8 +212,15 @@ public class QueueManager
                 var firstPlayer = firstQueued.Player!;
                 var secondPlayer = secondQueued.Player!;
                 long pingDifference = 0;
+                bool usePingMatching =
+                    server.PlayerManager.IsPingBasedMatchmakingEnabled(firstPlayer) &&
+                    server.PlayerManager.IsPingBasedMatchmakingEnabled(secondPlayer);
 
-                if (!firstPlayer.IsBot && !secondPlayer.IsBot)
+                if (
+                    !firstPlayer.IsBot &&
+                    !secondPlayer.IsBot &&
+                    usePingMatching
+                )
                 {
                     if (!server.PingManager.TryGetPing(firstPlayer, out int firstPing)
                         || !server.PingManager.TryGetPing(secondPlayer, out int secondPing))
@@ -217,6 +267,21 @@ public class QueueManager
         if (selectedFirstIndex < 0 || player1 == null || player2 == null)
             return;
 
+        StartMatch(player1, player2, queueType);
+
+        queue.RemoveAt(selectedSecondIndex);
+        queue.RemoveAt(selectedFirstIndex);
+
+        server.UIManager.RefreshHud();
+    }
+
+    private void StartMatch(
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2,
+        MatchQueueType queueType,
+        Vector3? selectedArena = null
+    )
+    {
         string[] matchFoundLines =
         {
             "  [MATCH FOUND]",
@@ -232,13 +297,93 @@ public class QueueManager
             matchFoundLines.Select(line =>
                 line.PadLeft((matchFoundWidth + line.Length) / 2))
         );
-        Chat.PrintToChatAll(matchFoundMessage);
+        if (!player1.IsBot)
+            Chat.PrintToChat(player1, matchFoundMessage);
+        if (!player2.IsBot)
+            Chat.PrintToChat(player2, matchFoundMessage);
 
         Console.WriteLine(
             $"Starting match: {player1.PlayerName} vs {player2.PlayerName}"
         );
 
-        server.ScheduleOnce(2.Seconds(), () =>
+        Vector3 arena = selectedArena ?? server.DuelLocations[
+            server.random.Next(server.DuelLocations.Length)
+        ];
+
+        var match = new DuelMatch
+        {
+            Player1 = player1.PlayerName,
+            Player2 = player2.PlayerName,
+            Player1HadBulletLifestealItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_vampire"
+                ) != null,
+            Player2HadBulletLifestealItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_vampire"
+                ) != null,
+            Player1HadBlitzBulletsItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_blitz_bullets"
+                ) != null,
+            Player2HadBlitzBulletsItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_blitz_bullets"
+                ) != null,
+            Player1HadInfiniteRoundsItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_infinite_rounds"
+                ) != null,
+            Player2HadInfiniteRoundsItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_infinite_rounds"
+                ) != null,
+            Player1HadCardioCalibratorItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_cardio_calibrator"
+                ) != null,
+            Player2HadCardioCalibratorItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_cardio_calibrator"
+                ) != null,
+            Player1HadBurstFireItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_burst_fire"
+                ) != null,
+            Player2HadBurstFireItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_burst_fire"
+                ) != null,
+            Player1HadHealthItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_health"
+                ) != null,
+            Player2HadHealthItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_health"
+                ) != null,
+            QueueType = queueType,
+            ArenaPosition = arena,
+            Score1 = 0,
+            Score2 = 0
+        };
+
+        server.PendingRespawns.Remove(player1.PlayerName);
+        server.PendingRespawns.Remove(player2.PlayerName);
+        server.ActiveMatches[player1.PlayerName] = match;
+        server.ActiveMatches[player2.PlayerName] = match;
+        server.UIManager.ShowMatchHud(match);
+
+        var preTeleportPawn1 = player1.GetHeroPawn();
+        var preTeleportPawn2 = player2.GetHeroPawn();
+        var respawnEffect1 = preTeleportPawn1 is { IsValid: true }
+            ? server.PlayerManager.BeginRespawnEffect(preTeleportPawn1)
+            : null;
+        var respawnEffect2 = preTeleportPawn2 is { IsValid: true }
+            ? server.PlayerManager.BeginRespawnEffect(preTeleportPawn2)
+            : null;
+
+        void InitializeMatchInArena()
         {
             player1.ChangeTeam(2);
             player2.ChangeTeam(3);
@@ -249,109 +394,94 @@ public class QueueManager
             if (pawn1 == null || pawn2 == null)
             {
                 Console.WriteLine("A player pawn is null.");
+                server.PlayerManager.EndRespawnEffect(respawnEffect1);
+                server.PlayerManager.EndRespawnEffect(respawnEffect2);
+                server.UIManager.RestoreHudAfterMatch(match);
                 return;
             }
 
-            Vector3 arena =
-                server.DuelLocations[
-                    server.random.Next(server.DuelLocations.Length)
-                ];
+            pawn1.RemoveModifier("modifier_speed_boost");
+            pawn2.RemoveModifier("modifier_speed_boost");
 
+            Vector3 arenaCenter =
+                server.PlayerManager.GetDuelArenaCenter(arena);
             pawn1.Teleport(
-                arena + new Vector3(-200f, 0f, 0f),
+                arenaCenter + new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
                 new Vector3(0f, 45f, 0f),
                 null
             );
 
             pawn2.Teleport(
-                arena + new Vector3(200f, 0f, 0f),
+                arenaCenter + new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
                 new Vector3(0f, 180f, 0f),
                 null
             );
-
-            // Lifesteal
-            pawn1.AddModifier(
-                "upgrade_vampire/modifier_intrinsic_base",
-                abilityValues: new()
-                {
-                    ["BulletLifestealPercent"] = aimLOCK.DUEL_LIFESTEAL
-                }
-            );
-
-            pawn2.AddModifier(
-                "upgrade_vampire/modifier_intrinsic_base",
-                abilityValues: new()
-                {
-                    ["BulletLifestealPercent"] = aimLOCK.DUEL_LIFESTEAL
-                }
-            );
-
-            // Bonus Health
-            pawn1.AddModifier(
-                "upgrade_health/modifier_intrinsic_base",
-                abilityValues: new()
-                {
-                    ["BonusHealth"] = aimLOCK.DUEL_BONUS_HEALTH
-                }
-            );
-
-            pawn2.AddModifier(
-                "upgrade_health/modifier_intrinsic_base",
-                abilityValues: new()
-                {
-                    ["BonusHealth"] = aimLOCK.DUEL_BONUS_HEALTH
-                }
-            );
-
-            // Glass Cannon
-            pawn1.AddModifier(
-                "upgrade_glass_cannon/modifier_glass_cannon_intrinstic",
-                new System.Collections.Generic.Dictionary<string, float>
-                {
-                    ["MaxHealthLossPercent"] = aimLOCK.DUEL_GLASS_CANNON_HEALTH_LOSS,
-                    ["BaseAttackDamagePercent"] = aimLOCK.DUEL_GLASS_CANNON_DAMAGE
-                }
-            );
-
-            pawn2.AddModifier(
-                "upgrade_glass_cannon/modifier_glass_cannon_intrinstic",
-                new System.Collections.Generic.Dictionary<string, float>
-                {
-                    ["MaxHealthLossPercent"] = aimLOCK.DUEL_GLASS_CANNON_HEALTH_LOSS,
-                    ["BaseAttackDamagePercent"] = aimLOCK.DUEL_GLASS_CANNON_DAMAGE
-                }
-            );
-
-            pawn1.AddItem("upgrade_infinite_rounds");
-            pawn2.AddItem("upgrade_infinite_rounds");
-
-            var match = new DuelMatch
-            {
-                Player1 = player1.PlayerName,
-                Player2 = player2.PlayerName,
-                QueueType = queueType,
-                ArenaPosition = arena,
-                Score1 = 0,
-                Score2 = 0
-            };
-
-            server.ActiveMatches[player1.PlayerName] = match;
-            server.ActiveMatches[player2.PlayerName] = match;
-
+            server.PlayerManager.ConfigurePracticeBotStrafe(pawn1, pawn2);
             server.UIManager.ShowMatchHud(match);
-            StartCountdown(match);
+            server.ScheduleOnce(1.5.Seconds(), () =>
+            {
+                server.PlayerManager.EndRespawnEffect(respawnEffect1);
+                server.PlayerManager.EndRespawnEffect(respawnEffect2);
+            });
 
-            server.UIManager.RefreshHud();
+            server.PlayerManager.ApplyDuelHealthItem(pawn1);
+            server.PlayerManager.ApplyDuelHealthItem(pawn2);
+            match.SharedMaxHealth =
+                Math.Min(pawn1.GetMaxHealth(), pawn2.GetMaxHealth())
+                + (int)aimLOCK.DUEL_BONUS_HEALTH;
+            server.PlayerManager.ApplyDuelMatchModifiers(
+                pawn1,
+                match.SharedMaxHealth
+            );
+            server.PlayerManager.ApplyDuelMatchModifiers(
+                pawn2,
+                match.SharedMaxHealth
+            );
+            server.PlayerManager.ApplyDuelBulletLifesteal(pawn1);
+            server.PlayerManager.ApplyDuelBulletLifesteal(pawn2);
+            foreach (var pawn in new[] { pawn1, pawn2 })
+            {
+                if (
+                    pawn.AbilityComponent?.FindAbilityByName(
+                        "upgrade_infinite_rounds"
+                    ) == null
+                )
+                {
+                    pawn.AddItem("upgrade_infinite_rounds");
+                }
+
+                if (
+                    pawn.AbilityComponent?.FindAbilityByName(
+                        "upgrade_cardio_calibrator"
+                    ) == null
+                )
+                {
+                    pawn.AddItem("upgrade_cardio_calibrator");
+                }
+            }
+            foreach (var pawn in new[] { pawn1, pawn2 })
+            {
+                if (
+                    pawn.AbilityComponent?.FindAbilityByName(
+                        "upgrade_burst_fire"
+                    ) == null
+                )
+                {
+                    pawn.AddItem("upgrade_burst_fire");
+                }
+
+                server.PlayerManager.ApplyDuelBlitzBullets(pawn);
+            }
+
+            match.ArenaInitialized = true;
+            StartCountdown(match);
 
             Console.WriteLine(
                 $"Match Found! {player1.PlayerName} vs {player2.PlayerName}"
             );
-        });
+        }
 
-        queue.RemoveAt(selectedSecondIndex);
-        queue.RemoveAt(selectedFirstIndex);
-
-        server.UIManager.RefreshHud();
+        server.ScheduleOnce(2.Seconds(), InitializeMatchInArena);
     }
 
     private static int GetAllowedPingDifference(double oldestWaitSeconds)
@@ -381,6 +511,7 @@ public class QueueManager
         CCitadelPlayerController player,
         MatchQueueType queueType)
     {
+        string displayName = server.GuildManager.FormatPlayerName(player);
         if (queueType == MatchQueueType.Ranked)
         {
             RankedEloStats stats = server.RankedElo.GetStats(
@@ -392,7 +523,7 @@ public class QueueManager
                 ? (float)stats.Wins / games * 100f
                 : 0f;
 
-            return $"{player.PlayerName} | {stats.Rating} Elo | " +
+            return $"{displayName} | {stats.Rating} Elo | " +
                 $"{stats.Wins}-{stats.Losses} | {winRate:F1}% WR";
         }
 
@@ -402,7 +533,7 @@ public class QueueManager
             ? (float)record.Wins / unrankedGames * 100f
             : 0f;
 
-        return $"{player.PlayerName} | {record.Wins}-{record.Losses} | " +
+        return $"{displayName} | {record.Wins}-{record.Losses} | " +
             $"{unrankedWinRate:F1}% WR";
     }
 
@@ -413,34 +544,81 @@ public class QueueManager
 
     public void StartCountdown(DuelMatch match)
     {
+        if (
+            match.Finished ||
+            match.CountdownActive ||
+            !match.ArenaInitialized
+        )
+            return;
+
         match.CountdownActive = true;
+        match.CombatActive = false;
+        int countdownGeneration = ++match.CountdownGeneration;
 
-        var player1 = Players.GetAll()
-            .FirstOrDefault(x => x.PlayerName == match.Player1);
-        var player2 = Players.GetAll()
-            .FirstOrDefault(x => x.PlayerName == match.Player2);
+        server.PlayerManager.SetMatchDisarmed(match, true);
 
-        var pawn1 = player1?.GetHeroPawn();
-        var pawn2 = player2?.GetHeroPawn();
-
-        pawn1?.AddModifier("modifier_citadel_disarmed");
-        pawn2?.AddModifier("modifier_citadel_disarmed");
-
-        Chat.PrintToChatAll("[DUEL] 3...");
+        PrintCountdownMessage(match, "[DUEL] 3...");
 
         server.ScheduleOnce(1.Seconds(), () =>
-            Chat.PrintToChatAll("[DUEL] 2..."));
+        {
+            if (IsCurrentCountdown(match, countdownGeneration))
+                PrintCountdownMessage(match, "[DUEL] 2...");
+        });
 
         server.ScheduleOnce(2.Seconds(), () =>
-            Chat.PrintToChatAll("[DUEL] 1..."));
+        {
+            if (IsCurrentCountdown(match, countdownGeneration))
+                PrintCountdownMessage(match, "[DUEL] 1...");
+        });
 
         server.ScheduleOnce(3.Seconds(), () =>
         {
-            pawn1?.RemoveModifier("modifier_citadel_disarmed");
-            pawn2?.RemoveModifier("modifier_citadel_disarmed");
+            if (!IsCurrentCountdown(match, countdownGeneration))
+                return;
 
-            Chat.PrintToChatAll("[DUEL] FIGHT!");
+            var player1 = server.PlayerManager.FindMatchParticipant(
+                match.Player1
+            );
+            var player2 = server.PlayerManager.FindMatchParticipant(
+                match.Player2
+            );
+            var pawn1 = player1?.GetHeroPawn();
+            var pawn2 = player2?.GetHeroPawn();
+            if (
+                pawn1 is not { IsValid: true, IsAlive: true } ||
+                pawn2 is not { IsValid: true, IsAlive: true }
+            )
+            {
+                match.CountdownActive = false;
+                server.PlayerManager.SetMatchDisarmed(match, true);
+                return;
+            }
+
+            pawn1.RemoveModifier("modifier_citadel_disarmed");
+            pawn2.RemoveModifier("modifier_citadel_disarmed");
+            PrintCountdownMessage(match, "[DUEL] FIGHT!");
             match.CountdownActive = false;
+            match.CombatActive = true;
         });
     }
+
+    private void PrintCountdownMessage(DuelMatch match, string message)
+    {
+        foreach (string participantName in new[] { match.Player1, match.Player2 })
+        {
+            var participant = server.PlayerManager.FindMatchParticipant(
+                participantName
+            );
+            if (participant is { IsValid: true, IsBot: false })
+                Chat.PrintToChat(participant, message);
+        }
+    }
+
+    private static bool IsCurrentCountdown(
+        DuelMatch match,
+        int countdownGeneration
+    ) =>
+        !match.Finished &&
+        match.CountdownActive &&
+        match.CountdownGeneration == countdownGeneration;
 }

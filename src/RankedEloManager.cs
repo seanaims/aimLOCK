@@ -41,13 +41,14 @@ public sealed class RankedEloManager
         lock (syncRoot)
         {
             if (players.TryGetValue(playerId, out var player))
-                return ToStats(player);
+                return ToStats(playerId, player);
 
             return new RankedEloStats(
                 playerName,
                 InitialRating,
                 0,
-                0
+                0,
+                ulong.Parse(playerId, CultureInfo.InvariantCulture)
             );
         }
     }
@@ -62,12 +63,113 @@ public sealed class RankedEloManager
                 .Where(player => player.Key != ulong.MaxValue.ToString(
                     CultureInfo.InvariantCulture
                 ))
-                .Select(player => ToStats(player.Value))
+                .Select(player => ToStats(player.Key, player.Value))
                 .OrderByDescending(player => player.Rating)
                 .ThenByDescending(player => player.Wins + player.Losses)
                 .ThenBy(player => player.PlayerName, StringComparer.OrdinalIgnoreCase)
                 .Take(limit)
                 .ToArray();
+        }
+    }
+
+    public IReadOnlyList<string> FindPlayerIdsByName(string playerName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(playerName);
+
+        lock (syncRoot)
+        {
+            return players
+                .Where(player =>
+                    player.Key != ulong.MaxValue.ToString(
+                        CultureInfo.InvariantCulture
+                    ) &&
+                    string.Equals(
+                        player.Value.PlayerName,
+                        playerName,
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                )
+                .Select(player => player.Key)
+                .ToArray();
+        }
+    }
+
+    public IReadOnlyList<string> FindPlayerIdsStartingWith(string namePrefix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(namePrefix);
+
+        lock (syncRoot)
+        {
+            return players
+                .Where(player =>
+                    player.Key != ulong.MaxValue.ToString(
+                        CultureInfo.InvariantCulture
+                    ) &&
+                    player.Value.PlayerName.StartsWith(
+                        namePrefix,
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                )
+                .Select(player => player.Key)
+                .ToArray();
+        }
+    }
+
+    public void ResetRating(
+        string steamId64,
+        string playerName)
+    {
+        string playerId = ValidateSteamId(steamId64, nameof(steamId64));
+        ArgumentException.ThrowIfNullOrWhiteSpace(playerName);
+
+        lock (syncRoot)
+        {
+            players.TryGetValue(playerId, out var existingPlayer);
+            var updatedPlayers = new Dictionary<string, StoredPlayer>(
+                players,
+                StringComparer.Ordinal
+            )
+            {
+                [playerId] = new StoredPlayer
+                {
+                    PlayerName = playerName,
+                    Rating = InitialRating,
+                    Wins = 0,
+                    Losses = 0
+                }
+            };
+
+            SavePlayers(updatedPlayers);
+            players = updatedPlayers;
+        }
+    }
+
+    public void ResetRecord(
+        string steamId64,
+        string playerName)
+    {
+        string playerId = ValidateSteamId(steamId64, nameof(steamId64));
+        ArgumentException.ThrowIfNullOrWhiteSpace(playerName);
+
+        lock (syncRoot)
+        {
+            players.TryGetValue(playerId, out var existingPlayer);
+            var updatedPlayers = new Dictionary<string, StoredPlayer>(
+                players,
+                StringComparer.Ordinal
+            )
+            {
+                [playerId] = new StoredPlayer
+                {
+                    PlayerName = playerName,
+                    Rating = existingPlayer?.Rating ?? InitialRating,
+                    Wins = 0,
+                    Losses = 0
+                }
+            };
+
+            SavePlayers(updatedPlayers);
+            players = updatedPlayers;
         }
     }
 
@@ -239,8 +341,17 @@ public sealed class RankedEloManager
         return parsedId.ToString(CultureInfo.InvariantCulture);
     }
 
-    private static RankedEloStats ToStats(StoredPlayer player) =>
-        new(player.PlayerName, player.Rating, player.Wins, player.Losses);
+    private static RankedEloStats ToStats(
+        string playerId,
+        StoredPlayer player
+    ) =>
+        new(
+            player.PlayerName,
+            player.Rating,
+            player.Wins,
+            player.Losses,
+            ulong.Parse(playerId, CultureInfo.InvariantCulture)
+        );
 
     private sealed class StoredPlayer
     {
@@ -255,7 +366,8 @@ public sealed record RankedEloStats(
     string PlayerName,
     int Rating,
     int Wins,
-    int Losses
+    int Losses,
+    ulong SteamId = 0
 );
 
 public sealed record EloMatchResult(
