@@ -202,15 +202,14 @@ public class UIManager
                 var controller = server.PlayerManager.FindMatchParticipant(
                     playerName
                 );
-                if (
-                    controller == null ||
-                    server.PlayerManager.TryGetActiveMatch(controller, out _)
-                )
+                if (controller == null)
                 {
                     continue;
                 }
 
                 hiddenServerInfo.Remove(controller.PlayerSteamId);
+                HideMatchHud(controller);
+                ShowServerInfo(controller);
             }
 
             foreach (var controller in Players.GetAll())

@@ -18,6 +18,12 @@ namespace aimLOCK;
 
 public class PlayerManager
 {
+    private const string FixationAbilityName = "ability_stacking_damage";
+    private const string FixationModifierName =
+        "ability_stacking_damage/modifier_passive_haze_stacking_damage";
+    private const float FixationMaxStacks = 999f;
+    private const int InitialAbilityCurrencyGrant = 30;
+
     // Keep the test bot's Elo entry separate from real Steam accounts.
     private const ulong BotRankedEloId = ulong.MaxValue;
     private const int InjectedSoulsBalance = 1_000_000_000;
@@ -66,7 +72,7 @@ public class PlayerManager
     private const float DuelArenaCourtHalfSize = 250f;
     private const float DuelArenaCourtHeight = 200f;
     private const float DuelArenaPlayerMargin = 48f;
-    private const float DuelArenaBarrierExpansion = 100f;
+    private const float DuelArenaBarrierExpansion = 200f;
     private const float DuelArenaRadiusMarkerWidth = 2f;
     private const int DuelArenaCircleSegments = 48;
     private static readonly float DuelArenaSphereRadius = MathF.Sqrt(
@@ -75,13 +81,22 @@ public class PlayerManager
     ) + DuelArenaPlayerMargin * 2f + DuelArenaBarrierExpansion;
     private static readonly Color DuelArenaCircleColor =
         Color.FromArgb(128, 255, 255, 255);
-    private const float DuelBulletLifestealPercent = 100f;
+    private const float DuelBulletLifestealPercent = 65f;
     private const float DefaultBulletLifestealPercent = 28f;
     private const float DefaultBlitzBulletsFireRatePercent = 22f;
     private const float DuelBlitzBulletsFireRatePercent =
         DefaultBlitzBulletsFireRatePercent / 2f;
     private const float DefaultUpgradeHealthBonus = 160f;
     private const float DefaultUpgradeHealthAttackDamagePercent = 6f;
+    private static readonly string[] DuelItemStack =
+    {
+        "upgrade_blitz_bullets",
+        "upgrade_pristine_emblem",
+        "upgrade_fleetfoot_boots",
+        "upgrade_titan_round",
+        "upgrade_cardio_calibrator",
+        "upgrade_burst_fire",
+    };
     private const string MatchTeleportEffect =
         "particles/items/gold_received_coins_player.vpcf";
     private const string RespawnTeleportEffect =
@@ -130,12 +145,14 @@ public class PlayerManager
     private readonly HashSet<uint> initialHeroSelectionIssued = new();
     private readonly HashSet<uint> initialHeroSelectionCompleted = new();
     private readonly HashSet<uint> initialHeroHazeSelectionStarted = new();
+    private readonly HashSet<uint> initialAbilityCurrenciesGranted = new();
     private readonly Dictionary<uint, uint> initialHeroPawnInitializationHandles =
         new();
     private bool initialSpawnRecoverySweepStarted;
     private string? practiceBotName;
     private string? practiceBotBaseName;
     private string? practiceBotTargetName;
+    private string practiceBotDifficultyName = "Hard";
     private uint? practiceBotControllerHandle;
     private bool practiceBotPreviousAiEnabled;
     private PracticeBotDifficultyProfile practiceBotDifficulty = HardBotProfile;
@@ -172,6 +189,7 @@ public class PlayerManager
                 ENetworkDisconnectionReason.NetworkDisconnectKicked
             );
         }
+
     }
 
     public void StartPracticeBotMatch(
@@ -408,6 +426,7 @@ public class PlayerManager
             "medium" => "Medium",
             _ => "Hard"
         };
+        practiceBotDifficultyName = difficultyName;
         practiceBotBaseName ??= botController.PlayerName;
         botController.PlayerName =
             $"{practiceBotBaseName} ({difficultyName})";
@@ -760,6 +779,13 @@ public class PlayerManager
             ? practiceBotName
             : null;
 
+    public string GetPracticeBotDifficultyName(
+        CCitadelPlayerController bot
+    ) =>
+        practiceBotControllerHandle == bot.EntityHandle
+            ? practiceBotDifficultyName
+            : "Hard";
+
     public CCitadelPlayerController? FindMatchParticipant(
         string participantName
     )
@@ -816,6 +842,24 @@ public class PlayerManager
             IsSpectating(attacker);
     }
 
+    public HookResult ApplyDuelBulletDamage(TakeDamageEvent args)
+    {
+        if (
+            args.Info.CitadelDamageType == ECitadelDamageType.Bullet &&
+            args.Entity is CCitadelPlayerPawn victimPawn &&
+            victimPawn.Controller is { } victim &&
+            TryGetActiveMatch(victim, out var match) &&
+            !match.Finished &&
+            match.CombatActive
+        )
+        {
+            args.Info.Damage *=
+                aimLOCK.DUEL_BULLET_DAMAGE / aimLOCK.BASE_DUEL_BULLET_DAMAGE;
+        }
+
+        return HookResult.Continue;
+    }
+
     public void ApplyDuelBulletLifesteal(
         CCitadelPlayerPawn pawn
     )
@@ -823,11 +867,6 @@ public class PlayerManager
         if (pawn.IsBot)
         {
             return;
-        }
-
-        if (pawn.AbilityComponent?.FindAbilityByName("upgrade_vampire") == null)
-        {
-            pawn.AddItem("upgrade_vampire");
         }
 
         pawn.RemoveModifier("upgrade_vampire/modifier_intrinsic_base");
@@ -846,19 +885,16 @@ public class PlayerManager
     )
     {
         pawn.RemoveModifier("upgrade_vampire/modifier_intrinsic_base");
-        if (hadItemBeforeMatch)
-        {
-            pawn.AddModifier(
-                "upgrade_vampire/modifier_intrinsic_base",
-                abilityValues: new()
-                {
-                    ["BulletLifestealPercent"] = DefaultBulletLifestealPercent,
-                }
-            );
+        if (!hadItemBeforeMatch)
             return;
-        }
 
-        pawn.RemoveItem("upgrade_vampire");
+        pawn.AddModifier(
+            "upgrade_vampire/modifier_intrinsic_base",
+            abilityValues: new()
+            {
+                ["BulletLifestealPercent"] = DefaultBulletLifestealPercent,
+            }
+        );
     }
 
     public void ApplyDuelBlitzBullets(CCitadelPlayerPawn pawn)
@@ -918,37 +954,50 @@ public class PlayerManager
         }
     }
 
-    public void ApplyDuelHealthItem(CCitadelPlayerPawn pawn)
+    public void ApplyDuelHealthModifier(CCitadelPlayerPawn pawn)
     {
-        if (
-            pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null
-        )
-        {
-            pawn.AddItem("upgrade_health");
-        }
+        pawn.RemoveModifier("upgrade_health/modifier_intrinsic_base");
+        pawn.AddModifier(
+            "upgrade_health/modifier_intrinsic_base",
+            abilityValues: new()
+            {
+                ["BonusHealth"] = DefaultUpgradeHealthBonus,
+                ["BaseAttackDamagePercent"] =
+                    DefaultUpgradeHealthAttackDamagePercent,
+                ["BonusHealthRegen"] = 0f,
+            }
+        );
     }
 
-    public void RestoreDuelHealthItem(
+    public void ApplyDuelItemStack(CCitadelPlayerPawn pawn)
+    {
+        foreach (string itemName in DuelItemStack)
+        {
+            if (pawn.AbilityComponent?.FindAbilityByName(itemName) == null)
+                pawn.AddItem(itemName);
+        }
+
+        ApplyDuelBlitzBullets(pawn);
+    }
+
+    public void RestoreDuelHealthModifier(
         CCitadelPlayerPawn pawn,
         bool hadItemBeforeMatch
     )
     {
         pawn.RemoveModifier("upgrade_health/modifier_intrinsic_base");
-        if (hadItemBeforeMatch)
-        {
-            pawn.AddModifier(
-                "upgrade_health/modifier_intrinsic_base",
-                abilityValues: new()
-                {
-                    ["BonusHealth"] = DefaultUpgradeHealthBonus,
-                    ["BaseAttackDamagePercent"] =
-                        DefaultUpgradeHealthAttackDamagePercent,
-                }
-            );
+        if (!hadItemBeforeMatch)
             return;
-        }
 
-        pawn.RemoveItem("upgrade_health");
+        pawn.AddModifier(
+            "upgrade_health/modifier_intrinsic_base",
+            abilityValues: new()
+            {
+                ["BonusHealth"] = DefaultUpgradeHealthBonus,
+                ["BaseAttackDamagePercent"] =
+                    DefaultUpgradeHealthAttackDamagePercent,
+            }
+        );
     }
 
     public void ProcessPracticeBotUsercmds(ProcessUsercmdsEvent args)
@@ -1347,7 +1396,7 @@ public class PlayerManager
         GetDuelArenaSphereCenter(arena);
 
     private float GetArenaSphereRadius(int arenaIndex) =>
-        DuelArenaSphereRadius - (arenaIndex == 2 ? 40f : 0f);
+        DuelArenaSphereRadius;
 
     private int FindArenaIndex(Vector3 arenaPosition)
     {
@@ -1617,6 +1666,7 @@ public class PlayerManager
         practiceBotName = null;
         practiceBotBaseName = null;
         practiceBotTargetName = null;
+        practiceBotDifficultyName = "Hard";
         practiceBotControllerHandle = null;
         practiceBotPreviousAiEnabled = false;
         practiceBotLookAt = Vector3.Zero;
@@ -1632,9 +1682,79 @@ public class PlayerManager
         int sharedMaxHealth
     )
     {
-        ApplyDuelHealthItem(pawn);
+        ApplyFixation(pawn);
+        ApplyDuelHealthModifier(pawn);
         ApplyDuelGlassCannon(pawn);
         NormalizeDuelPawnHealth(pawn, sharedMaxHealth, force: true);
+    }
+
+    private void ApplyFixation(CCitadelPlayerPawn pawn)
+    {
+        if (!pawn.IsValid)
+            return;
+
+        var fixation = pawn.AbilityComponent?.FindAbilityByName(FixationAbilityName);
+        var signature3Ability = pawn.GetAbilityBySlot(EAbilitySlot.Signature3);
+        if (fixation == null || fixation.EntityHandle != signature3Ability?.EntityHandle)
+        {
+            if (
+                fixation != null
+                && !pawn.RemoveAbility(fixation)
+            )
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not move Fixation to Signature3 for {pawn.Controller?.PlayerName ?? "player"}."
+                );
+                return;
+            }
+
+            if (pawn.AddAbility(FixationAbilityName, (ushort)EAbilitySlot.Signature3) == null)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not add Fixation to {pawn.Controller?.PlayerName ?? "player"}."
+                );
+                return;
+            }
+        }
+
+        pawn.RemoveModifier(FixationModifierName);
+        pawn.AddModifier(
+            FixationModifierName,
+            abilityValues: new()
+            {
+                ["MaxStacks"] = FixationMaxStacks,
+            }
+        );
+    }
+
+    private void GrantInitialAbilityCurrencies(
+        CCitadelPlayerController controller,
+        CCitadelPlayerPawn pawn
+    )
+    {
+        uint controllerHandle = controller.EntityHandle;
+        if (
+            !controller.IsValid ||
+            !pawn.IsValid ||
+            initialAbilityCurrenciesGranted.Contains(controllerHandle)
+        )
+            return;
+
+        int abilityPoints = pawn.GetCurrency(ECurrencyType.EAbilityPoints);
+        int abilityUnlocks = pawn.GetCurrency(ECurrencyType.EAbilityUnlocks);
+        pawn.SetCurrency(
+            ECurrencyType.EAbilityPoints,
+            abilityPoints > int.MaxValue - InitialAbilityCurrencyGrant
+                ? int.MaxValue
+                : abilityPoints + InitialAbilityCurrencyGrant
+        );
+        pawn.SetCurrency(
+            ECurrencyType.EAbilityUnlocks,
+            abilityUnlocks > int.MaxValue - InitialAbilityCurrencyGrant
+                ? int.MaxValue
+                : abilityUnlocks + InitialAbilityCurrencyGrant
+        );
+        initialAbilityCurrenciesGranted.Add(controllerHandle);
     }
 
     private void NormalizeDuelPawnHealth(
@@ -1691,6 +1811,15 @@ public class PlayerManager
             NormalizeDuelPawnHealth(pawn1, match.SharedMaxHealth);
         if (pawn2 is { IsValid: true })
             NormalizeDuelPawnHealth(pawn2, match.SharedMaxHealth);
+    }
+
+    public void PrepareDuelMatchHealth(DuelMatch match)
+    {
+        if (match.Finished)
+            return;
+
+        NormalizeDuelMatchHealth(match);
+        ResetDuelCurrentHealth(match);
     }
 
     public void PlayRespawnTeleportEffect(CCitadelPlayerPawn pawn)
@@ -1787,6 +1916,7 @@ public class PlayerManager
         initialHeroSelectionIssued.Remove(controllerHandle);
         initialHeroSelectionCompleted.Remove(controllerHandle);
         initialHeroHazeSelectionStarted.Remove(controllerHandle);
+        initialAbilityCurrenciesGranted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
         MarkInitialHeroSelectionPending(controller);
         server.ScheduleOnce(0.5.Seconds(), () =>
@@ -1826,6 +1956,7 @@ public class PlayerManager
         initialHeroSelectionIssued.Remove(controllerHandle);
         initialHeroSelectionCompleted.Remove(controllerHandle);
         initialHeroHazeSelectionStarted.Remove(controllerHandle);
+        initialAbilityCurrenciesGranted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
         playersInsidePracticeBotZones.Remove(controller.PlayerName);
         duelArenaBoundaryStates.Remove(controller.PlayerName);
@@ -1848,6 +1979,19 @@ public class PlayerManager
             return;
 
         initialSpawnRecoverySweepStarted = true;
+        foreach (var controller in Players.GetAll().Where(player => !player.IsBot).ToArray())
+        {
+            if (!controller.IsValid)
+                continue;
+
+            var pawn = controller.GetHeroPawn();
+            if (pawn is { IsValid: true })
+            {
+                ApplyFixation(pawn);
+                GrantInitialAbilityCurrencies(controller, pawn);
+            }
+        }
+
         RecoverInitialSpawns();
     }
 
@@ -2114,6 +2258,8 @@ public class PlayerManager
         initialHeroHazeSelectionStarted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
         pawn.Teleport(aimLOCK.MidtownSpawnPosition, null, null);
+        ApplyFixation(pawn);
+        GrantInitialAbilityCurrencies(controller, pawn);
         ClearInjectedSouls(controller, SoulsCleanupRetries);
         server.PlayerTagManager.RefreshPlayerTag(controller);
         server.UIManager.SetServerInfoVisibility(controller, true);
@@ -2215,7 +2361,9 @@ public class PlayerManager
         }
 
         if (scoreRound)
+        {
             server.UIManager.UpdateMatchHud(match);
+        }
 
         if (
             scoreRound &&
@@ -2279,6 +2427,19 @@ public class PlayerManager
         {
             server.ScheduleOnce(0.25.Seconds(), () =>
                 WaitForInitialHazeSpawn(connectingPlayer, 4));
+        }
+
+        if (controller is CCitadelPlayerController fixationPlayer)
+        {
+            server.ScheduleOnce(0.25.Seconds(), () =>
+            {
+                if (!fixationPlayer.IsValid)
+                    return;
+
+                var pawn = fixationPlayer.GetHeroPawn();
+                if (pawn is { IsValid: true })
+                    ApplyFixation(pawn);
+            });
         }
 
         string participantName = GetMatchParticipantName(controller);
@@ -2362,7 +2523,8 @@ public class PlayerManager
         ApplyDuelGlassCannon(pawn);
         NormalizeDuelMatchHealth(match);
         ApplyDuelBulletLifesteal(pawn);
-        ApplyDuelBlitzBullets(pawn);
+        ApplyDuelItemStack(pawn);
+        pawn.RemoveAbility("upgrade_infinite_rounds");
 
         if (string.Equals(
             playerName,
@@ -2453,7 +2615,12 @@ public class PlayerManager
             : match.Player1;
         var loserController = FindMatchParticipant(loserName);
 
-        if (winnerController != null && loserController != null)
+        if (
+            winnerController != null &&
+            loserController != null &&
+            !winnerController.IsBot &&
+            !loserController.IsBot
+        )
         {
             if (match.QueueType == MatchQueueType.Ranked)
             {
@@ -2492,19 +2659,20 @@ public class PlayerManager
         server.ActiveMatches.Remove(match.Player2);
         server.PendingRespawns.Remove(match.Player1);
         server.PendingRespawns.Remove(match.Player2);
+        server.RestoreMatchInfiniteAmmoIfIdle();
 
         var pawn1 = player1?.GetHeroPawn();
         var pawn2 = player2?.GetHeroPawn();
         if (pawn1 != null)
         {
-            server.PlayerManager.RestoreDuelHealthItem(
+            server.PlayerManager.RestoreDuelHealthModifier(
                 pawn1,
                 match.Player1HadHealthItem
             );
         }
         if (pawn2 != null)
         {
-            server.PlayerManager.RestoreDuelHealthItem(
+            server.PlayerManager.RestoreDuelHealthModifier(
                 pawn2,
                 match.Player2HadHealthItem
             );
@@ -2541,8 +2709,18 @@ public class PlayerManager
         {
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn1,
-                "upgrade_infinite_rounds",
-                match.Player1HadInfiniteRoundsItem
+                "upgrade_pristine_emblem",
+                match.Player1HadOpeningRoundsItem
+            );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn1,
+                "upgrade_fleetfoot_boots",
+                match.Player1HadFleetfootItem
+            );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn1,
+                "upgrade_titan_round",
+                match.Player1HadTitanicMagazineItem
             );
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn1,
@@ -2559,8 +2737,18 @@ public class PlayerManager
         {
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn2,
-                "upgrade_infinite_rounds",
-                match.Player2HadInfiniteRoundsItem
+                "upgrade_pristine_emblem",
+                match.Player2HadOpeningRoundsItem
+            );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn2,
+                "upgrade_fleetfoot_boots",
+                match.Player2HadFleetfootItem
+            );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn2,
+                "upgrade_titan_round",
+                match.Player2HadTitanicMagazineItem
             );
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn2,
@@ -2617,6 +2805,7 @@ public class PlayerManager
         player1?.ChangeTeam(2);
         player2?.ChangeTeam(2);
 
+        server.UIManager.HideMatchHud(player1, player2);
         server.PlayerManager.OnDuelMatchFinished(match);
         server.UIManager.RestoreHudAfterMatch(match);
         ReturnMatchSpectators(match);
@@ -2747,6 +2936,16 @@ public class PlayerManager
 
         record.LastKnownName = player.PlayerName;
         return record;
+    }
+
+    public void ResetPracticeBotRecord(CCitadelPlayerController bot)
+    {
+        ulong steamId = bot.PlayerSteamId;
+        if (!server.PlayerRecords.Remove(steamId, out var record))
+            return;
+
+        if (!SaveRecords())
+            server.PlayerRecords[steamId] = record;
     }
 
     public bool IsPingBasedMatchmakingEnabled(CCitadelPlayerController player)

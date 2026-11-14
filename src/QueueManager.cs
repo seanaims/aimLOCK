@@ -158,7 +158,121 @@ public class QueueManager
         }
 
         StartMatch(player, bot, MatchQueueType.Unranked, arena);
-        reply("Bot match found. Teleporting to a random duel arena.");
+        reply(
+            $"Starting Bot ({server.PlayerManager.GetPracticeBotDifficultyName(bot)}) match..."
+        );
+        return true;
+    }
+
+    public bool StartDuelMatch(
+        CCitadelPlayerController initiator,
+        string targetName,
+        Action<string> reply
+    )
+    {
+        if (string.IsNullOrWhiteSpace(targetName))
+        {
+            reply("Use /duel <player name>.");
+            return false;
+        }
+
+        if (server.PlayerManager.TryGetActiveMatch(initiator, out _))
+        {
+            reply("You are already in a match.");
+            return false;
+        }
+
+        if (server.PlayerManager.IsSpectating(initiator))
+        {
+            reply("Stop spectating before starting a duel.");
+            return false;
+        }
+
+        if (string.Equals(
+            initiator.PlayerName,
+            targetName,
+            StringComparison.OrdinalIgnoreCase
+        ))
+        {
+            reply("You cannot duel yourself.");
+            return false;
+        }
+
+        var onlinePlayers = Players.GetAll()
+            .Where(player =>
+                !player.IsBot &&
+                player.EntityHandle != initiator.EntityHandle
+            )
+            .ToArray();
+        var exactMatches = onlinePlayers
+            .Where(player => string.Equals(
+                player.PlayerName,
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            ))
+            .ToArray();
+        var matches = exactMatches.Length > 0
+            ? exactMatches
+            : onlinePlayers
+                .Where(player => player.PlayerName.StartsWith(
+                    targetName,
+                    StringComparison.OrdinalIgnoreCase
+                ))
+                .ToArray();
+
+        if (matches.Length == 0)
+        {
+            reply($"No online player matches \"{targetName}\".");
+            return false;
+        }
+
+        if (matches.Length > 1)
+        {
+            reply("That player name is ambiguous; use the full player name.");
+            return false;
+        }
+
+        var target = matches[0];
+        if (server.PlayerManager.TryGetActiveMatch(target, out _))
+        {
+            reply($"{target.PlayerName} is already in a match.");
+            return false;
+        }
+
+        if (server.PlayerManager.IsSpectating(target))
+        {
+            reply($"{target.PlayerName} must stop spectating before starting a duel.");
+            return false;
+        }
+
+        bool eitherQueued = server.RankedQueue
+            .Concat(server.UnrankedQueue)
+            .Any(entry =>
+                StringComparer.OrdinalIgnoreCase.Equals(
+                    entry.PlayerName,
+                    initiator.PlayerName
+                ) ||
+                StringComparer.OrdinalIgnoreCase.Equals(
+                    entry.PlayerName,
+                    target.PlayerName
+                )
+            );
+        if (eitherQueued)
+        {
+            reply("Both players must leave their queues before starting a duel.");
+            return false;
+        }
+
+        if (
+            initiator.GetHeroPawn() is not { IsValid: true, IsAlive: true } ||
+            target.GetHeroPawn() is not { IsValid: true, IsAlive: true }
+        )
+        {
+            reply("Both players must have a living hero to start a duel.");
+            return false;
+        }
+
+        StartMatch(initiator, target, MatchQueueType.Unranked);
         return true;
     }
 
@@ -282,25 +396,31 @@ public class QueueManager
         Vector3? selectedArena = null
     )
     {
-        string[] matchFoundLines =
+        if (player1.IsBot)
+            server.PlayerManager.ResetPracticeBotRecord(player1);
+        if (player2.IsBot)
+            server.PlayerManager.ResetPracticeBotRecord(player2);
+
+        if (!player1.IsBot && !player2.IsBot)
         {
-            "  [MATCH FOUND]",
-            GetMatchFoundPlayerLine(player1, queueType),
-            GetMatchFoundPingLine(player1),
-            "                 VS",
-            GetMatchFoundPlayerLine(player2, queueType),
-            GetMatchFoundPingLine(player2)
-        };
-        int matchFoundWidth = matchFoundLines.Max(line => line.Length);
-        string matchFoundMessage = string.Join(
-            "\n",
-            matchFoundLines.Select(line =>
-                line.PadLeft((matchFoundWidth + line.Length) / 2))
-        );
-        if (!player1.IsBot)
+            string[] matchFoundLines =
+            {
+                "  [MATCH FOUND]",
+                GetMatchFoundPlayerLine(player1, queueType),
+                GetMatchFoundPingLine(player1),
+                "                 VS",
+                GetMatchFoundPlayerLine(player2, queueType),
+                GetMatchFoundPingLine(player2)
+            };
+            int matchFoundWidth = matchFoundLines.Max(line => line.Length);
+            string matchFoundMessage = string.Join(
+                "\n",
+                matchFoundLines.Select(line =>
+                    line.PadLeft((matchFoundWidth + line.Length) / 2))
+            );
             Chat.PrintToChat(player1, matchFoundMessage);
-        if (!player2.IsBot)
             Chat.PrintToChat(player2, matchFoundMessage);
+        }
 
         Console.WriteLine(
             $"Starting match: {player1.PlayerName} vs {player2.PlayerName}"
@@ -330,13 +450,29 @@ public class QueueManager
                 player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
                     "upgrade_blitz_bullets"
                 ) != null,
-            Player1HadInfiniteRoundsItem =
+            Player1HadOpeningRoundsItem =
                 player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_infinite_rounds"
+                    "upgrade_pristine_emblem"
                 ) != null,
-            Player2HadInfiniteRoundsItem =
+            Player2HadOpeningRoundsItem =
                 player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_infinite_rounds"
+                    "upgrade_pristine_emblem"
+                ) != null,
+            Player1HadFleetfootItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_fleetfoot_boots"
+                ) != null,
+            Player2HadFleetfootItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_fleetfoot_boots"
+                ) != null,
+            Player1HadTitanicMagazineItem =
+                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_titan_round"
+                ) != null,
+            Player2HadTitanicMagazineItem =
+                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
+                    "upgrade_titan_round"
                 ) != null,
             Player1HadCardioCalibratorItem =
                 player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
@@ -424,10 +560,10 @@ public class QueueManager
                 server.PlayerManager.EndRespawnEffect(respawnEffect2);
             });
 
-            server.PlayerManager.ApplyDuelHealthItem(pawn1);
-            server.PlayerManager.ApplyDuelHealthItem(pawn2);
+            server.PlayerManager.ApplyDuelHealthModifier(pawn1);
+            server.PlayerManager.ApplyDuelHealthModifier(pawn2);
             match.SharedMaxHealth =
-                Math.Min(pawn1.GetMaxHealth(), pawn2.GetMaxHealth())
+                Math.Max(pawn1.GetMaxHealth(), pawn2.GetMaxHealth())
                 + (int)aimLOCK.DUEL_BONUS_HEALTH;
             server.PlayerManager.ApplyDuelMatchModifiers(
                 pawn1,
@@ -441,40 +577,21 @@ public class QueueManager
             server.PlayerManager.ApplyDuelBulletLifesteal(pawn2);
             foreach (var pawn in new[] { pawn1, pawn2 })
             {
-                if (
-                    pawn.AbilityComponent?.FindAbilityByName(
-                        "upgrade_infinite_rounds"
-                    ) == null
-                )
-                {
-                    pawn.AddItem("upgrade_infinite_rounds");
-                }
-
-                if (
-                    pawn.AbilityComponent?.FindAbilityByName(
-                        "upgrade_cardio_calibrator"
-                    ) == null
-                )
-                {
-                    pawn.AddItem("upgrade_cardio_calibrator");
-                }
-            }
-            foreach (var pawn in new[] { pawn1, pawn2 })
-            {
-                if (
-                    pawn.AbilityComponent?.FindAbilityByName(
-                        "upgrade_burst_fire"
-                    ) == null
-                )
-                {
-                    pawn.AddItem("upgrade_burst_fire");
-                }
-
-                server.PlayerManager.ApplyDuelBlitzBullets(pawn);
+                server.PlayerManager.ApplyDuelItemStack(pawn);
+                pawn.RemoveAbility("upgrade_infinite_rounds");
             }
 
             match.ArenaInitialized = true;
-            StartCountdown(match);
+            server.PlayerManager.SetMatchDisarmed(match, true);
+            server.ScheduleOnce(0.25.Seconds(), () =>
+            {
+                if (match.Finished)
+                    return;
+
+                server.PlayerManager.PrepareDuelMatchHealth(match);
+                server.EnableMatchInfiniteAmmo();
+                StartCountdown(match);
+            });
 
             Console.WriteLine(
                 $"Match Found! {player1.PlayerName} vs {player2.PlayerName}"
@@ -512,6 +629,9 @@ public class QueueManager
         MatchQueueType queueType)
     {
         string displayName = server.GuildManager.FormatPlayerName(player);
+        if (player.IsBot)
+            return displayName;
+
         if (queueType == MatchQueueType.Ranked)
         {
             RankedEloStats stats = server.RankedElo.GetStats(

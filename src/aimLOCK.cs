@@ -9,6 +9,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Numerics;
 
 using DeadworksManaged.Api;
@@ -18,6 +19,7 @@ namespace aimLOCK;
 public class aimLOCK : DeadworksPluginBase
 {
     public override string Name => "aimLOCK";
+    private const int EntityRemovalSweepIntervalSeconds = 1;
 
     private static readonly HashSet<string> EntityDesignerNamesToRemove = new(StringComparer.Ordinal)
     {
@@ -29,11 +31,23 @@ public class aimLOCK : DeadworksPluginBase
         "npc_trooper_boss",
         "npc_trooper"
     };
+    private static readonly string[] StartupForceKillCommands =
+    [
+        "citadel_force_kill walkers",
+        "citadel_force_kill shrines",
+        "citadel_force_kill guardians",
+        "citadel_force_kill troopers",
+        "citadel_force_kill haunts"
+    ];
+    private readonly HashSet<string> _missingNpcSpawnConVarsLogged =
+        new(StringComparer.Ordinal);
 
     private readonly Queue<uint> _pendingEntityRemovals = new();
     private bool _entityRemovalSweepRunning;
     private bool _rutgerForceFieldCastScheduled;
     private bool _rutgerForceFieldCastAttempted;
+    private int? _previousSvInfiniteAmmo;
+    private bool _missingSvInfiniteAmmoLogged;
 
     public readonly Dictionary<string, DuelMatch> ActiveMatches = new();
     public readonly List<QueueEntry> RankedQueue = new();
@@ -46,7 +60,14 @@ public class aimLOCK : DeadworksPluginBase
 
     public readonly Vector3[] DuelLocations =
     {
-        new Vector3(-5121f, -1867f, 351f),
+        new Vector3(-3642f, 5979f, 508f),
+        new Vector3(-6442f, -4817f, 476f),
+        new Vector3(-5248f, 5063f, 516f),
+        new Vector3(5767f, -5225f, 500f),
+        new Vector3(-3661f, 163f, 89f),
+        new Vector3(-32f, 88f, 346f),
+        new Vector3(-6958f, 1895f, 333f),
+        new Vector3(-8584f, 4053f, 684f),
         new Vector3(-2592f, 2580f, 10f),
         new Vector3(156f, 75f, -745f),
         new Vector3(1486f, 3697f, 468f),
@@ -59,11 +80,12 @@ public class aimLOCK : DeadworksPluginBase
     private static readonly Vector3 RutgerForceFieldPosition =
         new(-1238f, -3606f, -472f);
 
-    public const float DUEL_BONUS_HEALTH = 1000f;
+    public const float DUEL_BONUS_HEALTH = 1200f;
 
-    public const float DUEL_GLASS_CANNON_DAMAGE = 500f;
+    public const float DUEL_GLASS_CANNON_DAMAGE = 300f;
     public const float DUEL_GLASS_CANNON_HEALTH_LOSS = -1f;
-    public const float DUEL_BULLET_DAMAGE = 25f;
+    public const float BASE_DUEL_BULLET_DAMAGE = 25f;
+    public const float DUEL_BULLET_DAMAGE = 40f;
     public const float DUEL_BULLET_VELOCITY = 100f;
 
     public readonly Random random = new();
@@ -90,7 +112,7 @@ public class aimLOCK : DeadworksPluginBase
         RankedElo = new RankedEloManager();
         PingManager = new PingManager(this);
         PlayerTagManager = new PlayerTagManager(this);
-        GuildManager = new GuildManager();
+        GuildManager = new GuildManager(RankedElo);
         PlayerManager.LoadRecords();
         LeaderboardManager = new LeaderboardManager(this);
         UIManager.RefreshHud();
@@ -101,6 +123,8 @@ public class aimLOCK : DeadworksPluginBase
     {
         DisableNpcSpawning("citadel_trooper_spawn_enabled");
         DisableNpcSpawning("citadel_npc_spawn_enabled");
+        Timer.Once(3.Seconds(), RunStartupForceKillCommands);
+
         var maxRespawnTime = ConVar.Find(
             "citadel_player_spawn_time_max_respawn_time"
         );
@@ -138,6 +162,23 @@ public class aimLOCK : DeadworksPluginBase
         PingManager.Start();
     }
 
+    private static void RunStartupForceKillCommands()
+    {
+        foreach (string command in StartupForceKillCommands)
+        {
+            Console.WriteLine($"[aimLOCK] Running startup cleanup command: {command}");
+            Server.ExecuteCommand(command, output =>
+            {
+                string result = string.IsNullOrWhiteSpace(output)
+                    ? "<no console output>"
+                    : output.Trim();
+                Console.WriteLine(
+                    $"[aimLOCK] Startup cleanup result for {command}: {result}"
+                );
+            });
+        }
+    }
+
     public override void OnUnload()
     {
         PlayerManager.RemoveDuelArenaRadiusMarkers();
@@ -151,25 +192,50 @@ public class aimLOCK : DeadworksPluginBase
         if (_entityRemovalSweepRunning)
             return;
 
+        DisableNpcSpawning("citadel_trooper_spawn_enabled");
+        DisableNpcSpawning("citadel_npc_spawn_enabled");
+
         _entityRemovalSweepRunning = true;
         int queued = 0;
-        foreach (var entity in Entities.All)
+        foreach (var entity in Entities.ByClass<CAI_BaseNPC>())
         {
-            if (entity.IsValid && EntityDesignerNamesToRemove.Contains(entity.DesignerName))
+            if (ShouldRemoveEnemyNpc(entity))
             {
                 _pendingEntityRemovals.Enqueue(entity.EntityHandle);
                 queued++;
             }
         }
 
-        Console.WriteLine($"[aimLOCK] Queued {queued} matching NPCs/objectives for staggered removal.");
+        if (queued > 0)
+            Console.WriteLine($"[aimLOCK] Queued {queued} enemy NPCs/objectives for staggered removal.");
         if (_pendingEntityRemovals.Count > 0)
             Timer.NextTick(RemoveNextQueuedEntity);
         else
         {
             _entityRemovalSweepRunning = false;
-            Timer.Once(10.Seconds(), QueueExistingEntityRemovalSweep);
+            Timer.Once(
+                EntityRemovalSweepIntervalSeconds.Seconds(),
+                QueueExistingEntityRemovalSweep
+            );
         }
+    }
+
+    private static bool ShouldRemoveEnemyNpc(CBaseEntity entity)
+    {
+        if (
+            !entity.IsValid ||
+            entity is CPointWorldText ||
+            entity is CCitadelPlayerBotNPCBrain
+        )
+            return false;
+
+        if (EntityDesignerNamesToRemove.Contains(entity.DesignerName))
+            return true;
+
+        if (entity is CAI_CitadelNPC citadelNpc)
+            return !citadelNpc.IsMinion && citadelNpc.Summoner == null;
+
+        return entity is CAI_BaseNPC;
     }
 
     private void RemoveNextQueuedEntity()
@@ -178,33 +244,84 @@ public class aimLOCK : DeadworksPluginBase
             return;
 
         var entity = CBaseEntity.FromHandle(entityHandle);
-        if (entity != null
-            && entity.IsValid
-            && EntityDesignerNamesToRemove.Contains(entity.DesignerName))
-        {
+        if (entity != null && ShouldRemoveEnemyNpc(entity))
             entity.Remove();
-        }
 
         if (_pendingEntityRemovals.Count > 0)
             Timer.NextTick(RemoveNextQueuedEntity);
         else
         {
             _entityRemovalSweepRunning = false;
-            Timer.Once(10.Seconds(), QueueExistingEntityRemovalSweep);
+            Timer.Once(
+                EntityRemovalSweepIntervalSeconds.Seconds(),
+                QueueExistingEntityRemovalSweep
+            );
         }
     }
 
-    private static void DisableNpcSpawning(string conVarName)
+    private void DisableNpcSpawning(string conVarName)
     {
         var conVar = ConVar.Find(conVarName);
         if (conVar == null)
         {
-            Console.WriteLine($"[aimLOCK] Could not find {conVarName}; NPC spawning was not disabled.");
+            if (_missingNpcSpawnConVarsLogged.Add(conVarName))
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not find {conVarName}; NPC spawning was not disabled."
+                );
+            }
             return;
         }
 
+        if (conVar.GetInt() == 0)
+            return;
+
         conVar.SetInt(0);
         Console.WriteLine($"[aimLOCK] Set {conVarName} to 0.");
+    }
+
+    public void EnableMatchInfiniteAmmo()
+    {
+        var conVar = ConVar.Find("sv_infinite_ammo");
+        if (conVar == null)
+        {
+            if (!_missingSvInfiniteAmmoLogged)
+            {
+                _missingSvInfiniteAmmoLogged = true;
+                Console.WriteLine(
+                    "[aimLOCK] Could not find sv_infinite_ammo; infinite ammo was not enabled."
+                );
+            }
+            return;
+        }
+
+        _previousSvInfiniteAmmo ??= conVar.GetInt();
+        if (conVar.GetInt() != 1)
+            conVar.SetInt(1);
+    }
+
+    public void RestoreMatchInfiniteAmmoIfIdle()
+    {
+        foreach (var match in ActiveMatches.Values)
+        {
+            if (!match.Finished)
+                return;
+        }
+
+        if (_previousSvInfiniteAmmo is not int previousValue)
+            return;
+
+        var conVar = ConVar.Find("sv_infinite_ammo");
+        if (conVar == null)
+        {
+            Console.WriteLine(
+                "[aimLOCK] Could not find sv_infinite_ammo; its previous value could not be restored."
+            );
+            return;
+        }
+
+        conVar.SetInt(previousValue);
+        _previousSvInfiniteAmmo = null;
     }
 
     /* Timer, might be blocking, test with multiple player one day*/
@@ -366,7 +483,7 @@ public class aimLOCK : DeadworksPluginBase
     {
         return PlayerManager.BlockPracticeBotDamage(args)
             ? HookResult.Stop
-            : HookResult.Continue;
+            : PlayerManager.ApplyDuelBulletDamage(args);
     }
 
     public override void OnProcessUsercmds(ProcessUsercmdsEvent args)
@@ -433,10 +550,11 @@ public class aimLOCK : DeadworksPluginBase
         else if (page == 3)
         {
             caller.Reply("aimLOCK server commands (page 3/3):");
+            caller.Reply("/duel <player name> - Start an unranked duel with an online player.");
             caller.Reply("/bot [easy|medium|hard] - Start a bot match (default: hard).");
             caller.Reply("/botspeed <units/sec> - Set the practice bot's strafe speed (100-2500; default 2500).");
             caller.Reply("/arena [number] - List arenas or teleport to a configured arena.");
-            caller.Reply("/spectate list | <player name> - List matches or spectate one until it ends.");
+            caller.Reply("/spectate (/spec) list | <player name> - List matches or spectate one until it ends.");
             caller.Reply("/tp <player name|arena number> - Teleport to a player or arena (permission required).");
             caller.Reply("/spawn - Return to Midtown spawn after a 2-second countdown; forfeits an active duel.");
             caller.Reply("/scoreboard <on|off> - Show or hide the server info UI.");
@@ -465,7 +583,30 @@ public class aimLOCK : DeadworksPluginBase
     }
 
     [Command(
+        "duel",
+        Description = "Start an unranked duel with an online player: duel <player name>.",
+        SuppressChat = true
+    )]
+    public void DuelCommand(Caller caller, params string[] arguments)
+    {
+        var player = caller.Player;
+        if (player == null)
+        {
+            caller.Reply("You must be a player to start a duel.");
+            return;
+        }
+
+        string targetName = string.Join(" ", arguments).Trim();
+        Queue.StartDuelMatch(
+            player,
+            targetName,
+            message => caller.Reply(message)
+        );
+    }
+
+    [Command(
         "spectate",
+        "spec",
         Description = "List active matches or spectate a player: spectate <list|player name>.",
         SuppressChat = true
     )]
@@ -779,8 +920,11 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        if (ActiveMatches.ContainsKey(player.PlayerName))
+        if (ActiveMatches.TryGetValue(player.PlayerName, out var activeMatch))
         {
+            bool isBotMatch =
+                PlayerManager.FindMatchParticipant(activeMatch.Player1)?.IsBot == true ||
+                PlayerManager.FindMatchParticipant(activeMatch.Player2)?.IsBot == true;
             var matchPawn = player.GetHeroPawn();
             var matchRespawnEffect = matchPawn is { IsValid: true }
                 ? PlayerManager.BeginRespawnEffect(matchPawn)
@@ -805,7 +949,8 @@ public class aimLOCK : DeadworksPluginBase
                 )
                 {
                     UIManager.RestoreServerInfoAfterSpawn(player);
-                    caller.Reply("Forfeit recorded as a loss. The match has ended.");
+                    if (!isBotMatch)
+                        caller.Reply("Forfeit recorded as a loss. The match has ended.");
                 }
                 else
                 {
@@ -1410,8 +1555,12 @@ public sealed class DuelMatch
     public bool Player2HadBulletLifestealItem;
     public bool Player1HadBlitzBulletsItem;
     public bool Player2HadBlitzBulletsItem;
-    public bool Player1HadInfiniteRoundsItem;
-    public bool Player2HadInfiniteRoundsItem;
+    public bool Player1HadOpeningRoundsItem;
+    public bool Player2HadOpeningRoundsItem;
+    public bool Player1HadFleetfootItem;
+    public bool Player2HadFleetfootItem;
+    public bool Player1HadTitanicMagazineItem;
+    public bool Player2HadTitanicMagazineItem;
     public bool Player1HadCardioCalibratorItem;
     public bool Player2HadCardioCalibratorItem;
     public bool Player1HadBurstFireItem;

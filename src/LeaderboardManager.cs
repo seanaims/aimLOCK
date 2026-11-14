@@ -483,6 +483,7 @@ public sealed class LeaderboardManager
     private LeaderboardPanelContent BuildGuildEloMessage()
     {
         var leaders = server.GuildManager.GetLeaderboardEntries()
+            .Where(guild => guild.MemberSteamIds.Length >= 4)
             .Select(guild => new
             {
                 Guild = guild,
@@ -501,7 +502,7 @@ public sealed class LeaderboardManager
         {
             return new LeaderboardPanelContent(
                 "TOP GUILD ELO",
-                new[] { "No guilds created yet." }
+                new[] { "No guilds with 4+ members yet." }
             );
         }
 

@@ -21,10 +21,11 @@ Commands are entered in chat with a leading `/`. `/help [page]` and `/commands [
 | `/join <ranked\|unranked>` or `/queue <ranked\|unranked>` | Join ranked or unranked matchmaking. |
 | `/leave` | Leave your current queue. |
 | `/pbmm <on\|off>` | Toggle ping-based matchmaking for your queue matches. |
+| `/duel <player name>` | Immediately start an unranked duel with an online player. Both players must be available, unqueued, and not spectating. Exact names or unique prefixes are accepted. |
 | `/bot [easy\|medium\|hard]` | Start a practice-bot duel. Difficulty defaults to `hard`. |
 | `/botspeed <units/sec>` | Set the practice bot's strafe speed from 100 to 2500 units/sec. |
-| `/spectate list` | List active duels and their scores. |
-| `/spectate <player name>` | Spectate the active duel containing that player. Spectators are disarmed; they return to spawn when the match ends or when they use `/spawn`. |
+| `/spectate list` or `/spec list` | List active duels and their scores. |
+| `/spectate <player name>` or `/spec <player name>` | Spectate the active duel containing that player. Spectators are disarmed; they return to spawn when the match ends or when they use `/spawn`. |
 | `/arena` | List configured arena numbers and coordinates. |
 | `/arena <number>` | Teleport to a configured arena. |
 | `/tp <player name>` | Teleport to an online player. Requires `aimlock.teleport`. |

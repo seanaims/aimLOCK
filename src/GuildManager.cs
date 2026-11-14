@@ -23,10 +23,12 @@ public sealed class GuildManager
             "aimlock_guilds.json"
         )
     );
+    private readonly RankedEloManager rankedElo;
     private List<GuildData> guilds;
 
-    public GuildManager()
+    public GuildManager(RankedEloManager rankedElo)
     {
+        this.rankedElo = rankedElo;
         guilds = LoadGuilds();
     }
 
@@ -543,8 +545,17 @@ public sealed class GuildManager
                     string.Join(", ", members);
 
             string access = guild.IsOpen ? "Open" : "Invite-only";
+            int averageElo = (int)Math.Round(
+                guild.Members.Average(member =>
+                    (double)rankedElo.GetStats(
+                        member.SteamId.ToString(CultureInfo.InvariantCulture),
+                        member.LastKnownName
+                    ).Rating),
+                MidpointRounding.AwayFromZero
+            );
             return $"[{guild.Tag}] {guild.Name}\n" +
                 $"Access: {access} | Members: {members.Length}\n" +
+                $"Guild ELO: {averageElo}\n" +
                 $"Members: {string.Join(", ", members)}";
         }
     }
