@@ -10,6 +10,9 @@
   <Reference Include="DeadworksManaged.Api">
     <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Deadlock\game\bin\win64\managed\DeadworksManaged.Api.dll</HintPath>
   </Reference>
+  <Reference Include="DeadworksManaged.Game">
+    <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Deadlock\game\bin\win64\managed\DeadworksManaged.Game.dll</HintPath>
+  </Reference>
   <Reference Include="Google.Protobuf">
     <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Deadlock\game\bin\win64\managed\Google.Protobuf.dll</HintPath>
   </Reference>
