@@ -969,6 +969,9 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
+        if (!CanTeleportOutOfDuel(caller, player))
+            return;
+
         var pawn = player.GetHeroPawn();
         if (pawn is not { IsValid: true })
         {
@@ -987,6 +990,23 @@ public class aimLOCK : DeadworksPluginBase
         caller.Reply(
             $"Teleported to arena {arenaIndex + 1} ({DuelArenaNames[arenaIndex]})."
         );
+    }
+
+    private bool CanTeleportOutOfDuel(Caller caller, CCitadelPlayerController player)
+    {
+        if (PlayerManager.TryGetActiveMatch(player, out _))
+        {
+            caller.Reply("You cannot teleport during a match. Use /spawn to forfeit.");
+            return false;
+        }
+
+        if (PlayerManager.IsSpectating(player))
+        {
+            caller.Reply("You cannot teleport while spectating. Use /spawn to stop.");
+            return false;
+        }
+
+        return true;
     }
 
     [Command(
@@ -1011,6 +1031,9 @@ public class aimLOCK : DeadworksPluginBase
             );
             return;
         }
+
+        if (!CanTeleportOutOfDuel(caller, player))
+            return;
 
         var sourcePawn = player.GetHeroPawn();
         if (sourcePawn is not { IsValid: true })
@@ -1310,6 +1333,8 @@ public class aimLOCK : DeadworksPluginBase
                     return;
 
                 if (
+                    PlayerManager.TryGetActiveMatch(player, out var currentMatch) &&
+                    ReferenceEquals(currentMatch, activeMatch) &&
                     PlayerManager.ForfeitMatch(
                         PlayerManager.GetMatchParticipantName(player)
                     )
@@ -1340,6 +1365,12 @@ public class aimLOCK : DeadworksPluginBase
         {
             if (!player.IsValid || !pawn.IsValid)
                 return;
+
+            if (PlayerManager.TryGetActiveMatch(player, out _))
+            {
+                caller.Reply("You joined a match; /spawn was cancelled.");
+                return;
+            }
 
             PlayerManager.StopSpectating(player);
             player.ChangeTeam(2);

@@ -476,6 +476,7 @@ public class PlayerManager
         if (botController == null)
         {
             RestorePracticeBotAiIfIdle();
+            server.ScheduleOnce(1.Seconds(), RemoveUntrackedBots);
 
             reply("The practice bot did not finish loading.");
             return null;
@@ -1989,6 +1990,24 @@ public class PlayerManager
         practiceBotsPreviousAiEnabled = false;
     }
 
+    private void RemoveUntrackedBots()
+    {
+        foreach (
+            var bot in Players.GetAll()
+                .Where(player =>
+                    player.IsBot &&
+                    !practiceBots.ContainsKey(player.EntityHandle)
+                )
+                .ToArray()
+        )
+        {
+            bot.Kick(
+                "Practice bot removed.",
+                ENetworkDisconnectionReason.NetworkDisconnectKicked
+            );
+        }
+    }
+
     private void RemovePracticeBot(uint controllerHandle)
     {
         if (!practiceBots.Remove(controllerHandle))
@@ -2768,7 +2787,6 @@ public class PlayerManager
     public HookResult OnPlayerDeath(PlayerDeathEvent args)
     {
         var victim = args.UseridController;
-        var killer = args.AttackerController;
 
         if (victim == null)
             return HookResult.Continue;
@@ -2792,22 +2810,17 @@ public class PlayerManager
 
         SetMatchDisarmed(match, true);
 
-        if (scoreRound && killer != null)
+        if (scoreRound)
         {
-            string killerName = GetMatchParticipantName(killer);
+            string victimName = GetMatchParticipantName(victim);
             if (string.Equals(
-                killerName,
+                victimName,
                 match.Player1,
                 StringComparison.OrdinalIgnoreCase
             ))
-                match.Score1++;
-
-            if (string.Equals(
-                killerName,
-                match.Player2,
-                StringComparison.OrdinalIgnoreCase
-            ))
                 match.Score2++;
+            else
+                match.Score1++;
         }
 
         if (scoreRound)
@@ -3010,6 +3023,7 @@ public class PlayerManager
                 Console.WriteLine(
                     $"[aimLOCK] Could not restore {playerName} to the arena after respawn."
                 );
+                server.Queue.StartCountdown(match);
                 return;
             }
 
