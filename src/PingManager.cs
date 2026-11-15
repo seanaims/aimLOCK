@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 
 using DeadworksManaged.Api;
 
@@ -98,51 +97,79 @@ public sealed class PingManager
 
         try
         {
-            var statusRows = output
-                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(ParseStatusRow)
-                .Where(row => row != null)
-                .Select(row => row!)
-                .ToArray();
+            var rowsByName = new Dictionary<string, StatusRow>(
+                StringComparer.OrdinalIgnoreCase
+            );
+            var ambiguousRowNames = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase
+            );
+            foreach (string line in output.Split(
+                new[] { '\r', '\n' },
+                StringSplitOptions.RemoveEmptyEntries
+            ))
+            {
+                var row = ParseStatusRow(line);
+                if (row == null || ambiguousRowNames.Contains(row.Name))
+                    continue;
 
-            var players = Players.GetAll()
-                .Where(player => !player.IsBot && player.PlayerSteamId != 0)
-                .ToArray();
-            var controllersByName = players
-                .GroupBy(player => player.PlayerName, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(
-                    group => group.Key,
-                    group => group.ToArray(),
+                if (!rowsByName.TryAdd(row.Name, row))
+                {
+                    rowsByName.Remove(row.Name);
+                    ambiguousRowNames.Add(row.Name);
+                }
+            }
+
+            var controllersByName =
+                new Dictionary<string, CCitadelPlayerController>(
                     StringComparer.OrdinalIgnoreCase
                 );
-            var rowsByName = statusRows
-                .GroupBy(row => row.Name, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(
-                    group => group.Key,
-                    group => group.ToArray(),
-                    StringComparer.OrdinalIgnoreCase
-                );
+            var ambiguousControllerNames = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase
+            );
+            var connectedIds = new HashSet<ulong>();
+            int playerCount = 0;
+            foreach (var player in Players.GetAll())
+            {
+                if (player.IsBot || player.PlayerSteamId == 0)
+                    continue;
 
-            var connectedIds = players
-                .Select(player => player.PlayerSteamId)
-                .ToHashSet();
-            foreach (ulong steamId in _samples.Keys.Where(id => !connectedIds.Contains(id)).ToArray())
+                playerCount++;
+                connectedIds.Add(player.PlayerSteamId);
+                if (ambiguousControllerNames.Contains(player.PlayerName))
+                    continue;
+
+                if (!controllersByName.TryAdd(player.PlayerName, player))
+                {
+                    controllersByName.Remove(player.PlayerName);
+                    ambiguousControllerNames.Add(player.PlayerName);
+                }
+            }
+
+            var staleSampleIds = new List<ulong>();
+            foreach (var sample in _samples)
+            {
+                if (!connectedIds.Contains(sample.Key))
+                    staleSampleIds.Add(sample.Key);
+            }
+            foreach (ulong steamId in staleSampleIds)
                 _samples.Remove(steamId);
 
             _latestReadings.Clear();
             DateTimeOffset capturedAt = DateTimeOffset.UtcNow;
             foreach (var group in controllersByName)
             {
-                if (group.Value.Length != 1
-                    || !rowsByName.TryGetValue(group.Key, out var matchingRows)
-                    || matchingRows.Length != 1)
+                if (
+                    ambiguousControllerNames.Contains(group.Key) ||
+                    ambiguousRowNames.Contains(group.Key) ||
+                    !rowsByName.TryGetValue(group.Key, out var statusRow)
+                )
                 {
                     continue;
                 }
 
-                var player = group.Value[0];
+                var player = group.Value;
                 var samples = GetSamples(player.PlayerSteamId);
-                samples.Enqueue(matchingRows[0].PingMs);
+                samples.Enqueue(statusRow.PingMs);
                 while (samples.Count > SampleCount)
                     samples.Dequeue();
 
@@ -152,7 +179,7 @@ public sealed class PingManager
                 );
             }
 
-            if (players.Length > 0 && _latestReadings.Count == 0)
+            if (playerCount > 0 && _latestReadings.Count == 0)
             {
                 if (!_warnedAboutMissingRows)
                 {
@@ -204,13 +231,26 @@ public sealed class PingManager
         return samples;
     }
 
-    private static int Median(IEnumerable<int> values)
+    private static int Median(Queue<int> values)
     {
-        int[] sorted = values.OrderBy(value => value).ToArray();
-        int middle = sorted.Length / 2;
-        return sorted.Length % 2 == 1
-            ? sorted[middle]
-            : (int)Math.Round((sorted[middle - 1] + sorted[middle]) / 2d);
+        using var enumerator = values.GetEnumerator();
+        enumerator.MoveNext();
+        int first = enumerator.Current;
+        if (!enumerator.MoveNext())
+            return first;
+
+        int second = enumerator.Current;
+        if (!enumerator.MoveNext())
+            return (int)Math.Round((first + second) / 2d);
+
+        int third = enumerator.Current;
+        if (first > second)
+            (first, second) = (second, first);
+        if (second > third)
+            (second, third) = (third, second);
+        if (first > second)
+            (first, second) = (second, first);
+        return second;
     }
 
     private static StatusRow? ParseStatusRow(string line)

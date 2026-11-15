@@ -13,15 +13,24 @@ using System.Numerics;
 using System.Text.Json;
 
 using DeadworksManaged.Api;
+using DeadworksManaged.Game;
 
 namespace aimLOCK;
 
 public class PlayerManager
 {
+    private static readonly JsonSerializerOptions PlayerRecordJsonOptions = new()
+    {
+        WriteIndented = true
+    };
+    private static readonly Vector3 ArenaScoreboardAngles =
+        new(180f, 90f, 270f);
+
     private const string FixationAbilityName = "ability_stacking_damage";
     private const string FixationModifierName =
         "ability_stacking_damage/modifier_passive_haze_stacking_damage";
-    private const float FixationMaxStacks = 999f;
+    private const short FixationMaxStacks = 999;
+    private const int FullyUpgradedAbilityBits = 0xF;
     private const int InitialAbilityCurrencyGrant = 30;
 
     // Keep the test bot's Elo entry separate from real Steam accounts.
@@ -79,15 +88,50 @@ public class PlayerManager
         2f * DuelArenaCourtHalfSize * DuelArenaCourtHalfSize +
         DuelArenaCourtHeight * DuelArenaCourtHeight / 4f
     ) + DuelArenaPlayerMargin * 2f + DuelArenaBarrierExpansion;
+    private static readonly float PracticeBotDuelPlayerRadius =
+        DuelArenaSphereRadius - DuelArenaPlayerMargin;
+    private static readonly float PracticeBotMaximumHorizontalRadius =
+        MathF.Sqrt(MathF.Max(
+            0f,
+            PracticeBotDuelPlayerRadius * PracticeBotDuelPlayerRadius -
+                DuelArenaCourtHeight * DuelArenaCourtHeight / 4f
+        ));
+    private static readonly float PracticeBotMaximumPossibleRange =
+        2f * PracticeBotMaximumHorizontalRadius;
+    private static readonly float PracticeBotMinimumRange =
+        PracticeBotMaximumPossibleRange >= PracticeBotDuelMinRange
+            ? PracticeBotDuelMinRange
+            : PracticeBotMaximumPossibleRange * 0.7f;
+    private static readonly float PracticeBotMaximumRange =
+        Math.Min(
+            PracticeBotDuelMaxRange,
+            PracticeBotMaximumPossibleRange
+        );
+    private static readonly float PracticeBotMinimumRangeSquared =
+        PracticeBotMinimumRange * PracticeBotMinimumRange;
+    private static readonly float PracticeBotMaximumRangeSquared =
+        PracticeBotMaximumRange * PracticeBotMaximumRange;
+    private static readonly float DuelArenaOuterRadius =
+        DuelArenaSphereRadius + DuelArenaPlayerMargin;
+    private static readonly float DuelArenaOuterRadiusSquared =
+        DuelArenaOuterRadius * DuelArenaOuterRadius;
     private static readonly Color DuelArenaCircleColor =
         Color.FromArgb(128, 255, 255, 255);
-    private const float DuelBulletLifestealPercent = 65f;
+    private const float DuelBulletLifestealPercent = 50f;
+    private const float DuelHandicapLifestealReduction = 10f;
     private const float DefaultBulletLifestealPercent = 28f;
     private const float DefaultBlitzBulletsFireRatePercent = 22f;
+    private const float ArenaScoreboardFontSize = 150f;
+    private const float ArenaScoreboardWorldUnitsPerPx = 0.3f;
+    private const float ArenaScoreboardHeightAboveCourt = 80f;
+    private const float ArenaScoreboardBackgroundDepthOffset = -1f;
+    private const int ArenaScoreboardBackgroundPadding = 8;
+    private const byte ArenaScoreboardBackgroundAlpha = 160;
+    private const char ArenaScoreboardBackgroundGlyph = '\u2588';
     private const float DuelBlitzBulletsFireRatePercent =
         DefaultBlitzBulletsFireRatePercent / 2f;
-    private const float DefaultUpgradeHealthBonus = 160f;
-    private const float DefaultUpgradeHealthAttackDamagePercent = 6f;
+    private const int DuelMaxHealth = 2800;
+    private const double DuelHealthCapCheckIntervalSeconds = 0.05;
     private static readonly string[] DuelItemStack =
     {
         "upgrade_blitz_bullets",
@@ -96,23 +140,33 @@ public class PlayerManager
         "upgrade_titan_round",
         "upgrade_cardio_calibrator",
         "upgrade_burst_fire",
+        "upgrade_chonky",
+        "upgrade_health",
+    };
+    private static readonly string[] DuelHealthRegenerationProperties =
+    {
+        "BonusHealthRegen",
+        "OutOfCombatHealthRegen",
+        "HealthRegen",
+        "MaxHealthRegen",
+        "MaxHealthRegenPct",
+        "TotalHealthRegen",
+        "HealLifePercentOutOfCombat",
     };
     private const string MatchTeleportEffect =
         "particles/items/gold_received_coins_player.vpcf";
-    private const string RespawnTeleportEffect =
-        "particles/generic/player_respawn_deploy.vpcf";
     public const float DefaultPracticeBotStrafeSpeed = 2500f;
     private static readonly PracticeBotDifficultyProfile EasyBotProfile = new(
         1200f, 50f, 0.45d, 0.45d, 0.85d, 0.4d, 0.7d, 90f, 300f,
-        85f, 28f, 0.25d
+        60f, 20f, 0.25d
     );
     private static readonly PracticeBotDifficultyProfile MediumBotProfile = new(
         1800f, 50f, 0.65d, 0.18d, 0.38d, 0.55d, 0.85d, 75f, 260f,
-        35f, 11f, 0.12d
+        30f, 9f, 0.12d
     );
     private static readonly PracticeBotDifficultyProfile HardBotProfile = new(
         DefaultPracticeBotStrafeSpeed, 40f, 0.8d, 0.1d, 0.25d, 0.65d, 0.95d,
-        80f, 300f, 25f, 8f, 0.1d
+        80f, 300f, 18f, 6f, 0.1d
     );
     private readonly record struct PracticeBotDifficultyProfile(
         float StrafeSpeed,
@@ -135,8 +189,28 @@ public class PlayerManager
         string Label,
         uint LabelColorABGR,
         Vector3 LabelPosition
-    );
-
+    )
+    {
+        public float RadiusSquared { get; } = Radius * Radius;
+    }
+    private sealed class PracticeBotState
+    {
+        public uint ControllerHandle { get; init; }
+        public string MatchKey { get; init; } = "";
+        public string DisplayName { get; set; } = "";
+        public uint OwnerControllerHandle { get; init; }
+        public string OwnerName { get; init; } = "";
+        public CCitadelPlayerController? TargetController { get; set; }
+        public string DifficultyName { get; set; } = "Hard";
+        public PracticeBotDifficultyProfile Difficulty { get; set; } =
+            HardBotProfile;
+        public Vector3 LookAt;
+        public Vector3 AimError;
+        public Vector3 StrafeTarget;
+        public int StrafeDirection = 1;
+        public DateTimeOffset NextMovementAdjustment;
+        public DateTimeOffset NextAimUpdate;
+    }
     private readonly aimLOCK server;
     private readonly HashSet<string> respawnRecoveryInProgress =
         new(StringComparer.OrdinalIgnoreCase);
@@ -149,30 +223,32 @@ public class PlayerManager
     private readonly Dictionary<uint, uint> initialHeroPawnInitializationHandles =
         new();
     private bool initialSpawnRecoverySweepStarted;
-    private string? practiceBotName;
-    private string? practiceBotBaseName;
-    private string? practiceBotTargetName;
-    private string practiceBotDifficultyName = "Hard";
-    private uint? practiceBotControllerHandle;
-    private bool practiceBotPreviousAiEnabled;
-    private PracticeBotDifficultyProfile practiceBotDifficulty = HardBotProfile;
-    private Vector3 practiceBotLookAt;
-    private Vector3 practiceBotAimError;
-    private Vector3 practiceBotStrafeTarget;
-    private int practiceBotStrafeDirection = 1;
-    private DateTimeOffset practiceBotNextMovementAdjustment;
-    private DateTimeOffset practiceBotNextAimUpdate;
-    private readonly HashSet<string> playersInsidePracticeBotZones =
-        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<uint, PracticeBotState> practiceBots = new();
+    private readonly Dictionary<uint, float> practiceBotStrafeSpeedOverrides =
+        new();
+    private readonly Dictionary<
+        int,
+        (DuelMatch Match, CPointWorldText Background, CPointWorldText Text)
+    > arenaScoreboards = new();
+    private bool practiceBotsPreviousAiEnabled;
+    private readonly HashSet<(uint PlayerHandle, int ZoneIndex)>
+        playersInsidePracticeBotZones = new();
     private readonly List<CPointWorldText> practiceBotZoneLabelEntities = new();
     private readonly List<CBeam> practiceBotZoneBoundaryBeams = new();
     private readonly List<CBeam> duelArenaRadiusBeams = new();
+    private readonly Vector3[] duelArenaSphereCenters;
     private readonly Dictionary<string, (int ArenaIndex, bool IsInside)>
         duelArenaBoundaryStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TimeZoneInfo> resolvedTimeZones =
+        new(StringComparer.Ordinal);
 
     public PlayerManager(aimLOCK server)
     {
         this.server = server;
+        duelArenaSphereCenters = new Vector3[server.DuelLocations.Length];
+        for (int i = 0; i < duelArenaSphereCenters.Length; i++)
+            duelArenaSphereCenters[i] =
+                GetDuelArenaSphereCenter(server.DuelLocations[i]);
     }
 
     public void PlayMatchTeleportEffect(CCitadelPlayerPawn pawn)
@@ -211,21 +287,40 @@ public class PlayerManager
         );
     }
 
-    public void ProcessPracticeBotDoorwayZone(ProcessUsercmdsEvent args)
+    public void ProcessUsercmds(ProcessUsercmdsEvent args)
     {
-        if (args.Controller is not { IsBot: false } player)
+        if (
+            args.Paused ||
+            args.Controller is not { IsValid: true } controller
+        )
             return;
 
-        var pawn = player.GetHeroPawn();
+        var pawn = controller.GetHeroPawn();
         if (pawn is not { IsValid: true })
             return;
 
-        foreach (var zone in PracticeBotZones)
+        DuelMatch? activeMatch = EnforceDuelArenaBounds(controller, pawn);
+        if (controller is not CCitadelPlayerController player)
+            return;
+
+        if (player.IsBot)
+            ProcessPracticeBotUsercmds(args, controller, pawn, activeMatch);
+        else
+            ProcessPracticeBotDoorwayZone(player, pawn);
+    }
+
+    private void ProcessPracticeBotDoorwayZone(
+        CCitadelPlayerController player,
+        CCitadelPlayerPawn pawn
+    )
+    {
+        for (int zoneIndex = 0; zoneIndex < PracticeBotZones.Length; zoneIndex++)
         {
-            string entryKey = $"{zone.Difficulty}:{player.PlayerName}";
+            PracticeBotZone zone = PracticeBotZones[zoneIndex];
+            var entryKey = (player.EntityHandle, zoneIndex);
             bool isInsideZone =
                 Vector3.DistanceSquared(pawn.Position, zone.Center) <=
-                zone.Radius * zone.Radius;
+                zone.RadiusSquared;
 
             if (!isInsideZone)
             {
@@ -292,43 +387,28 @@ public class PlayerManager
             return;
         }
 
-        practiceBotDifficulty = selectedProfile;
-        Vector3 arena = server.DuelLocations[
-            server.random.Next(server.DuelLocations.Length)
-        ];
-
-        var existingBot = practiceBotName == null
-            ? null
-            : Players.GetAll().FirstOrDefault(controller =>
-                controller.IsBot &&
-                string.Equals(
-                    controller.PlayerName,
-                    practiceBotName,
-                    StringComparison.OrdinalIgnoreCase
-                )
-            );
-        bool createdBot = false;
-        CCitadelPlayerController? botController = existingBot;
-
-        if (botController == null)
+        if (!server.Queue.TryGetAvailableArena(out int arenaIndex))
         {
-            if (practiceBotName != null)
-                RemovePracticeBot();
-
-            botController = CreatePracticeBot(playerPawn, arena, reply);
-            if (botController == null)
-                return;
-
-            createdBot = true;
+            reply("All duel arenas are currently in use.");
+            return;
         }
+
+        Vector3 arena = server.DuelLocations[arenaIndex];
+
+        var botController = CreatePracticeBot(
+            player,
+            playerPawn,
+            arena,
+            selectedProfile,
+            reply
+        );
+        if (botController == null)
+            return;
 
         SetPracticeBotDifficultyName(botController, difficulty);
 
         if (!server.Queue.StartBotMatch(player, botController, arena, reply))
-        {
-            if (createdBot)
-                RemovePracticeBot();
-        }
+            RemovePracticeBot(botController.EntityHandle);
     }
 
     private static bool TryGetPracticeBotProfile(
@@ -356,8 +436,10 @@ public class PlayerManager
     }
 
     private CCitadelPlayerController? CreatePracticeBot(
+        CCitadelPlayerController owner,
         CCitadelPlayerPawn playerPawn,
         Vector3 arena,
+        PracticeBotDifficultyProfile difficulty,
         Action<string> reply
     )
     {
@@ -365,9 +447,12 @@ public class PlayerManager
             new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f);
         int botTeam = 3;
 
-        practiceBotPreviousAiEnabled = Bots.AiEnabled;
+        if (practiceBots.Count == 0)
+            practiceBotsPreviousAiEnabled = Bots.AiEnabled;
+
         if (
-            practiceBotPreviousAiEnabled &&
+            practiceBots.Count == 0 &&
+            practiceBotsPreviousAiEnabled &&
             !Bots.SetAiEnabled(false)
         )
         {
@@ -383,8 +468,7 @@ public class PlayerManager
         );
         if (bot is not { IsValid: true })
         {
-            if (practiceBotPreviousAiEnabled)
-                Bots.SetAiEnabled(true);
+            RestorePracticeBotAiIfIdle();
 
             reply("Could not spawn a practice bot here.");
             return null;
@@ -393,24 +477,38 @@ public class PlayerManager
         var botController = bot.Controller;
         if (botController == null)
         {
-            if (practiceBotPreviousAiEnabled)
-                Bots.SetAiEnabled(true);
+            RestorePracticeBotAiIfIdle();
 
             reply("The practice bot did not finish loading.");
             return null;
         }
 
-        practiceBotName = botController.PlayerName;
-        practiceBotBaseName = botController.PlayerName;
-        practiceBotControllerHandle = botController.EntityHandle;
-        practiceBotTargetName = playerPawn.Controller?.PlayerName;
-        practiceBotLookAt = playerPawn.EyePosition;
-        practiceBotAimError = Vector3.Zero;
+        if (practiceBotStrafeSpeedOverrides.TryGetValue(
+            owner.EntityHandle,
+            out float strafeSpeed
+        ))
+        {
+            difficulty = difficulty with { StrafeSpeed = strafeSpeed };
+        }
+
+        var state = new PracticeBotState
+        {
+            ControllerHandle = botController.EntityHandle,
+            MatchKey = $"__aimlock_bot_{botController.EntityHandle}",
+            DisplayName = botController.PlayerName,
+            OwnerControllerHandle = owner.EntityHandle,
+            OwnerName = owner.PlayerName,
+            TargetController = owner,
+            Difficulty = difficulty,
+            LookAt = playerPawn.EyePosition,
+        };
+        practiceBots.Add(state.ControllerHandle, state);
         ResetPracticeBotMovement(
+            state,
             spawnPosition,
             DateTimeOffset.UtcNow
         );
-        practiceBotNextAimUpdate = DateTimeOffset.MinValue;
+        state.NextAimUpdate = DateTimeOffset.MinValue;
 
         return botController;
     }
@@ -420,18 +518,18 @@ public class PlayerManager
         string? difficulty
     )
     {
+        if (!practiceBots.TryGetValue(botController.EntityHandle, out var state))
+            return;
+
         string difficultyName = difficulty?.Trim().ToLowerInvariant() switch
         {
             "easy" => "Easy",
             "medium" => "Medium",
             _ => "Hard"
         };
-        practiceBotDifficultyName = difficultyName;
-        practiceBotBaseName ??= botController.PlayerName;
-        botController.PlayerName =
-            $"{practiceBotBaseName} ({difficultyName})";
-        practiceBotName = botController.PlayerName;
-        practiceBotControllerHandle = botController.EntityHandle;
+        state.DifficultyName = difficultyName;
+        state.DisplayName = $"Bot ({difficultyName})";
+        botController.PlayerName = state.DisplayName;
     }
 
     public void SetPracticeBotStrafeSpeed(Caller caller, float speed)
@@ -448,10 +546,19 @@ public class PlayerManager
             return;
         }
 
-        practiceBotDifficulty = practiceBotDifficulty with
+        var player = caller.Player;
+        if (player == null)
         {
-            StrafeSpeed = speed,
-        };
+            caller.Reply("You must be a player to set your practice bot speed.");
+            return;
+        }
+
+        practiceBotStrafeSpeedOverrides[player.EntityHandle] = speed;
+        foreach (var state in practiceBots.Values.Where(state =>
+            state.OwnerControllerHandle == player.EntityHandle))
+        {
+            state.Difficulty = state.Difficulty with { StrafeSpeed = speed };
+        }
         caller.Reply($"Bot strafe speed set to {speed:F0} units per second.");
     }
 
@@ -460,71 +567,288 @@ public class PlayerManager
         CCitadelPlayerPawn botPawn
     )
     {
-        if (!IsPracticeBot(botPawn))
+        if (
+            botPawn.Controller is not { } botController ||
+            !practiceBots.TryGetValue(botController.EntityHandle, out var state) ||
+            playerPawn.Controller?.EntityHandle != state.OwnerControllerHandle
+        )
             return;
 
-        practiceBotTargetName = playerPawn.Controller?.PlayerName;
-        practiceBotLookAt = playerPawn.EyePosition;
-        practiceBotAimError = Vector3.Zero;
+        state.TargetController =
+            playerPawn.Controller as CCitadelPlayerController;
+        state.LookAt = playerPawn.EyePosition;
+        state.AimError = Vector3.Zero;
         ResetPracticeBotMovement(
+            state,
             botPawn.Position,
             DateTimeOffset.UtcNow
         );
-        practiceBotNextAimUpdate = DateTimeOffset.MinValue;
+        state.NextAimUpdate = DateTimeOffset.MinValue;
     }
 
     private void ResetPracticeBotMovement(
+        PracticeBotState state,
         Vector3 botPosition,
         DateTimeOffset now
     )
     {
-        practiceBotStrafeTarget = botPosition;
+        state.StrafeTarget = botPosition;
         if (
             server.random.NextDouble() <
-            practiceBotDifficulty.DirectionChangeChance
+            state.Difficulty.DirectionChangeChance
         )
-            practiceBotStrafeDirection *= -1;
-        practiceBotNextMovementAdjustment = now;
+            state.StrafeDirection *= -1;
+        state.NextMovementAdjustment = now;
     }
 
     public void OnDuelMatchFinished(DuelMatch match)
     {
-        if (
-            practiceBotName != null &&
-            (string.Equals(
+        var bot = practiceBots.Values.FirstOrDefault(state =>
+            string.Equals(
                 match.Player1,
-                practiceBotName,
+                state.MatchKey,
                 StringComparison.OrdinalIgnoreCase
             ) ||
             string.Equals(
                 match.Player2,
-                practiceBotName,
+                state.MatchKey,
                 StringComparison.OrdinalIgnoreCase
-            ))
+            )
+        );
+        if (bot != null)
+            RemovePracticeBot(bot.ControllerHandle);
+
+        ResetArenaScoreboardWhenParticipantsLeave(match);
+    }
+
+    public void ShowArenaScoreboard(DuelMatch match)
+    {
+        int arenaIndex = match.ArenaIndex;
+        if (
+            arenaIndex < 0 ||
+            arenaIndex >= server.DuelLocations.Length ||
+            server.DuelLocations[arenaIndex] != match.ArenaPosition
         )
         {
-            RemovePracticeBot();
+            Console.WriteLine(
+                $"[aimLOCK] Cannot show scoreboard for invalid duel arena {arenaIndex}."
+            );
+            return;
         }
+
+        if (
+            arenaScoreboards.TryGetValue(arenaIndex, out var existing) &&
+            ReferenceEquals(existing.Match, match)
+        )
+        {
+            UpdateArenaScoreboard(match);
+            return;
+        }
+
+        RemoveArenaScoreboard(arenaIndex);
+
+        string[] lines = BuildArenaScoreboardLines(match);
+        int longestLine = lines.Max(line => line.Length);
+        int backgroundGlyphCount = Math.Max(
+            1,
+            (int)Math.Ceiling(longestLine / 2d) +
+                ArenaScoreboardBackgroundPadding
+        );
+        int backgroundLineCount = lines.Length;
+        string backgroundLine = new(
+            ArenaScoreboardBackgroundGlyph,
+            backgroundGlyphCount
+        );
+        string backgroundMessage = string.Join(
+            "\n",
+            Enumerable.Repeat(backgroundLine, backgroundLineCount)
+        );
+        Vector3 position = GetDuelArenaSphereCenter(match.ArenaPosition) +
+            new Vector3(
+                0f,
+                0f,
+                DuelArenaCourtHeight + ArenaScoreboardHeightAboveCourt
+            );
+
+        var background = CPointWorldText.Create(
+            backgroundMessage,
+            position,
+            fontSize: ArenaScoreboardFontSize,
+            worldUnitsPerPx: ArenaScoreboardWorldUnitsPerPx,
+            fontName: "RetailDemo-Bold",
+            reorientMode: 1
+        );
+        if (background == null)
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Failed to create the scoreboard background for duel arena {arenaIndex + 1}."
+            );
+            return;
+        }
+
+        background.ColorABGR =
+            (uint)ArenaScoreboardBackgroundAlpha << 24;
+        background.Fullbright = true;
+        background.DepthOffset = ArenaScoreboardBackgroundDepthOffset;
+        background.JustifyHorizontal = HorizontalJustify.Center;
+        background.Teleport(angles: ArenaScoreboardAngles);
+
+        var text = CPointWorldText.Create(
+            string.Join("\n", lines),
+            position,
+            fontSize: ArenaScoreboardFontSize,
+            worldUnitsPerPx: ArenaScoreboardWorldUnitsPerPx,
+            fontName: "RetailDemo-Bold",
+            reorientMode: 1
+        );
+        if (text == null)
+        {
+            background.Remove();
+            Console.WriteLine(
+                $"[aimLOCK] Failed to create the scoreboard for duel arena {arenaIndex + 1}."
+            );
+            return;
+        }
+
+        text.ColorABGR = 0xFFFFFFFF;
+        text.Fullbright = true;
+        text.JustifyHorizontal = HorizontalJustify.Center;
+        text.Teleport(angles: ArenaScoreboardAngles);
+        arenaScoreboards[arenaIndex] = (match, background, text);
+    }
+
+    public void UpdateArenaScoreboard(DuelMatch match)
+    {
+        if (
+            !arenaScoreboards.TryGetValue(match.ArenaIndex, out var scoreboard) ||
+            !ReferenceEquals(scoreboard.Match, match)
+        )
+            return;
+
+        string[] lines = BuildArenaScoreboardLines(match);
+        if (
+            scoreboard.Text is { IsValid: true } &&
+            scoreboard.Background is { IsValid: true }
+        )
+        {
+            scoreboard.Text.SetMessage(string.Join("\n", lines));
+            return;
+        }
+
+        RemoveArenaScoreboard(match.ArenaIndex);
+        ShowArenaScoreboard(match);
+    }
+
+    public void RefreshArenaScoreboards()
+    {
+        DuelMatch[] activeMatches = arenaScoreboards.Values
+            .Select(scoreboard => scoreboard.Match)
+            .ToArray();
+        foreach (DuelMatch match in activeMatches)
+            UpdateArenaScoreboard(match);
+    }
+
+    public void RemoveArenaScoreboards()
+    {
+        foreach (int arenaIndex in arenaScoreboards.Keys.ToArray())
+            RemoveArenaScoreboard(arenaIndex);
+    }
+
+    private string[] BuildArenaScoreboardLines(DuelMatch match)
+    {
+        return new[]
+        {
+            GetParticipantDisplayName(match.Player1),
+            $"{match.Score1}  -  {match.Score2}",
+            GetParticipantDisplayName(match.Player2)
+        };
+    }
+
+    private string GetParticipantDisplayName(string participantName)
+    {
+        var participant = FindMatchParticipant(participantName);
+        return participant is { IsBot: true }
+            ? GetPracticeBotDisplayName(participant) ?? participant.PlayerName
+            : participant == null
+                ? participantName
+                : server.GuildManager.FormatPlayerName(participant);
+    }
+
+    private void ResetArenaScoreboardWhenParticipantsLeave(DuelMatch match)
+    {
+        if (
+            !arenaScoreboards.TryGetValue(match.ArenaIndex, out var scoreboard) ||
+            !ReferenceEquals(scoreboard.Match, match)
+        )
+            return;
+
+        var onlinePlayers = Players.GetAll().ToArray();
+        bool player1InArena = IsMatchParticipantInArena(
+            match.Player1,
+            match.ArenaPosition,
+            onlinePlayers
+        );
+        bool player2InArena = IsMatchParticipantInArena(
+            match.Player2,
+            match.ArenaPosition,
+            onlinePlayers
+        );
+        if (!player1InArena && !player2InArena)
+        {
+            RemoveArenaScoreboard(match.ArenaIndex);
+            return;
+        }
+
+        server.ScheduleOnce(0.25.Seconds(), () =>
+            ResetArenaScoreboardWhenParticipantsLeave(match));
+    }
+
+    private bool IsMatchParticipantInArena(
+        string participantName,
+        Vector3 arenaPosition,
+        IEnumerable<CCitadelPlayerController> onlinePlayers
+    )
+    {
+        var participant = FindMatchParticipant(
+            participantName,
+            onlinePlayers
+        );
+        var pawn = participant?.GetHeroPawn();
+        return pawn is { IsValid: true } &&
+            Vector3.DistanceSquared(
+                pawn.Position,
+                GetDuelArenaSphereCenter(arenaPosition)
+            ) <= DuelArenaOuterRadiusSquared;
+    }
+
+    private void RemoveArenaScoreboard(int arenaIndex)
+    {
+        if (!arenaScoreboards.Remove(arenaIndex, out var scoreboard))
+            return;
+
+        if (scoreboard.Text is { IsValid: true })
+            scoreboard.Text.Remove();
+        if (scoreboard.Background is { IsValid: true })
+            scoreboard.Background.Remove();
     }
 
     public bool IsPracticeBot(CBaseEntity entity) =>
         entity is CCitadelPlayerPawn pawn &&
-        practiceBotControllerHandle is uint botHandle &&
-        pawn.Controller?.EntityHandle == botHandle;
+        pawn.Controller is { } controller &&
+        practiceBots.ContainsKey(controller.EntityHandle);
 
     public bool TryGetActiveMatch(
         CBasePlayerController player,
         out DuelMatch match
     )
     {
-        if (server.ActiveMatches.TryGetValue(player.PlayerName, out match!))
+        if (
+            practiceBots.TryGetValue(player.EntityHandle, out var bot) &&
+            server.ActiveMatches.TryGetValue(bot.MatchKey, out match!)
+        )
             return true;
 
-        if (
-            practiceBotControllerHandle == player.EntityHandle &&
-            practiceBotName != null &&
-            server.ActiveMatches.TryGetValue(practiceBotName, out match!)
-        )
+        if (server.ActiveMatches.TryGetValue(player.PlayerName, out match!))
             return true;
 
         match = null!;
@@ -605,32 +929,42 @@ public class PlayerManager
             return;
         }
 
-        var exactMatches = matches
-            .Where(match =>
-                string.Equals(
-                    match.Player1,
+        bool MatchesParticipantExactly(string matchKey) =>
+            string.Equals(
+                matchKey,
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            ) ||
+            string.Equals(
+                GetMatchParticipantDisplayName(matchKey),
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            );
+        bool MatchesParticipantPrefix(string matchKey)
+        {
+            string displayName = GetMatchParticipantDisplayName(matchKey);
+            return matchKey.StartsWith(
                     targetName,
                     StringComparison.OrdinalIgnoreCase
                 ) ||
-                string.Equals(
-                    match.Player2,
+                displayName.StartsWith(
                     targetName,
                     StringComparison.OrdinalIgnoreCase
-                )
+                );
+        }
+
+        var exactMatches = matches
+            .Where(match =>
+                MatchesParticipantExactly(match.Player1) ||
+                MatchesParticipantExactly(match.Player2)
             )
             .ToArray();
         var matchingMatches = exactMatches.Length > 0
             ? exactMatches
             : matches
                 .Where(match =>
-                    match.Player1.StartsWith(
-                        targetName,
-                        StringComparison.OrdinalIgnoreCase
-                    ) ||
-                    match.Player2.StartsWith(
-                        targetName,
-                        StringComparison.OrdinalIgnoreCase
-                    )
+                    MatchesParticipantPrefix(match.Player1) ||
+                    MatchesParticipantPrefix(match.Player2)
                 )
                 .ToArray();
 
@@ -696,9 +1030,7 @@ public class PlayerManager
     )
     {
         Vector3 center = GetDuelArenaSphereCenter(match.ArenaPosition);
-        float radius = GetArenaSphereRadius(
-            FindArenaIndex(match.ArenaPosition)
-        );
+        float radius = DuelArenaSphereRadius;
         Vector3 position = center + new Vector3(0f, -radius - 128f, 180f);
         Vector3 direction = center - position;
         float horizontalDistance = MathF.Sqrt(
@@ -732,12 +1064,16 @@ public class PlayerManager
 
     private void ReturnSpectatorToSpawn(
         ulong steamId,
-        int retriesRemaining = 20
+        int retriesRemaining = 20,
+        CCitadelPlayerController? cachedPlayer = null
     )
     {
-        var player = Players.GetAll().FirstOrDefault(controller =>
-            controller.PlayerSteamId == steamId
-        );
+        var player = cachedPlayer is { IsValid: true } &&
+            cachedPlayer.PlayerSteamId == steamId
+                ? cachedPlayer
+                : Players.GetAll().FirstOrDefault(controller =>
+                    controller.PlayerSteamId == steamId
+                );
         if (player is not { IsValid: true })
             return;
 
@@ -755,56 +1091,65 @@ public class PlayerManager
             }
 
             server.ScheduleOnce(0.25.Seconds(), () =>
-                ReturnSpectatorToSpawn(steamId, retriesRemaining - 1));
+                ReturnSpectatorToSpawn(
+                    steamId,
+                    retriesRemaining - 1,
+                    player
+                ));
             return;
         }
 
         pawn.Teleport(aimLOCK.MidtownSpawnPosition, null, null);
         PlayMatchTeleportEffect(pawn);
-        PlayRespawnTeleportEffect(pawn);
         server.UIManager.RestoreServerInfoAfterSpawn(player);
         Chat.PrintToChat(player, "The match ended; you have been returned to spawn.");
     }
 
     public string GetMatchParticipantName(CBasePlayerController player) =>
-        practiceBotControllerHandle == player.EntityHandle &&
-        practiceBotName != null
-            ? practiceBotName
+        practiceBots.TryGetValue(player.EntityHandle, out var bot)
+            ? bot.MatchKey
             : player.PlayerName;
 
     public string? GetPracticeBotDisplayName(
         CBasePlayerController player
     ) =>
-        practiceBotControllerHandle == player.EntityHandle
-            ? practiceBotName
+        practiceBots.TryGetValue(player.EntityHandle, out var bot)
+            ? bot.DisplayName
             : null;
 
     public string GetPracticeBotDifficultyName(
         CCitadelPlayerController bot
     ) =>
-        practiceBotControllerHandle == bot.EntityHandle
-            ? practiceBotDifficultyName
+        practiceBots.TryGetValue(bot.EntityHandle, out var state)
+            ? state.DifficultyName
             : "Hard";
 
     public CCitadelPlayerController? FindMatchParticipant(
         string participantName
     )
     {
-        var players = Players.GetAll();
-        if (
-            practiceBotControllerHandle is uint botHandle &&
+        return FindMatchParticipant(participantName, Players.GetAll());
+    }
+
+    private CCitadelPlayerController? FindMatchParticipant(
+        string participantName,
+        IEnumerable<CCitadelPlayerController> players
+    )
+    {
+        var bot = practiceBots.Values.FirstOrDefault(state =>
             string.Equals(
                 participantName,
-                practiceBotName,
+                state.MatchKey,
                 StringComparison.OrdinalIgnoreCase
             )
-        )
+        );
+        if (bot != null)
         {
-            var bot = players.FirstOrDefault(player =>
-                player.EntityHandle == botHandle
+            var botController = players.FirstOrDefault(player =>
+                player.EntityHandle == bot.ControllerHandle
             );
-            if (bot != null)
-                return bot;
+            if (botController != null)
+                return botController;
         }
 
         return players.FirstOrDefault(player =>
@@ -820,8 +1165,9 @@ public class PlayerManager
         DuelMatch match
     )
     {
-        var player1 = FindMatchParticipant(match.Player1);
-        var player2 = FindMatchParticipant(match.Player2);
+        var onlinePlayers = Players.GetAll().ToArray();
+        var player1 = FindMatchParticipant(match.Player1, onlinePlayers);
+        var player2 = FindMatchParticipant(match.Player2, onlinePlayers);
 
         if (player1 != null)
             yield return player1;
@@ -845,7 +1191,6 @@ public class PlayerManager
     public HookResult ApplyDuelBulletDamage(TakeDamageEvent args)
     {
         if (
-            args.Info.CitadelDamageType == ECitadelDamageType.Bullet &&
             args.Entity is CCitadelPlayerPawn victimPawn &&
             victimPawn.Controller is { } victim &&
             TryGetActiveMatch(victim, out var match) &&
@@ -853,8 +1198,11 @@ public class PlayerManager
             match.CombatActive
         )
         {
-            args.Info.Damage *=
-                aimLOCK.DUEL_BULLET_DAMAGE / aimLOCK.BASE_DUEL_BULLET_DAMAGE;
+            if (args.Info.CitadelDamageType == ECitadelDamageType.Bullet)
+            {
+                args.Info.Damage *=
+                    aimLOCK.DUEL_BULLET_DAMAGE / aimLOCK.BASE_DUEL_BULLET_DAMAGE;
+            }
         }
 
         return HookResult.Continue;
@@ -870,11 +1218,27 @@ public class PlayerManager
         }
 
         pawn.RemoveModifier("upgrade_vampire/modifier_intrinsic_base");
+        float lifestealPercent = DuelBulletLifestealPercent;
+        if (
+            pawn.Controller is CCitadelPlayerController player &&
+            server.PlayerRecords.TryGetValue(
+                player.PlayerSteamId,
+                out var record
+            ) &&
+            record.HandicapEnabled
+        )
+        {
+            lifestealPercent = Math.Max(
+                0f,
+                lifestealPercent - DuelHandicapLifestealReduction
+            );
+        }
+
         pawn.AddModifier(
             "upgrade_vampire/modifier_intrinsic_base",
             abilityValues: new()
             {
-                ["BulletLifestealPercent"] = DuelBulletLifestealPercent,
+                ["BulletLifestealPercent"] = lifestealPercent,
             }
         );
     }
@@ -954,21 +1318,6 @@ public class PlayerManager
         }
     }
 
-    public void ApplyDuelHealthModifier(CCitadelPlayerPawn pawn)
-    {
-        pawn.RemoveModifier("upgrade_health/modifier_intrinsic_base");
-        pawn.AddModifier(
-            "upgrade_health/modifier_intrinsic_base",
-            abilityValues: new()
-            {
-                ["BonusHealth"] = DefaultUpgradeHealthBonus,
-                ["BaseAttackDamagePercent"] =
-                    DefaultUpgradeHealthAttackDamagePercent,
-                ["BonusHealthRegen"] = 0f,
-            }
-        );
-    }
-
     public void ApplyDuelItemStack(CCitadelPlayerPawn pawn)
     {
         foreach (string itemName in DuelItemStack)
@@ -978,70 +1327,91 @@ public class PlayerManager
         }
 
         ApplyDuelBlitzBullets(pawn);
+        foreach (string itemName in DuelItemStack)
+            OverrideDuelItemHealthRegen(pawn, itemName);
     }
 
-    public void RestoreDuelHealthModifier(
+    private static void OverrideDuelItemHealthRegen(
         CCitadelPlayerPawn pawn,
-        bool hadItemBeforeMatch
+        string itemName
     )
     {
-        pawn.RemoveModifier("upgrade_health/modifier_intrinsic_base");
-        if (!hadItemBeforeMatch)
+        if (pawn.AbilityComponent?.FindAbilityByName(itemName) == null)
             return;
 
+        string modifierName = $"{itemName}/modifier_intrinsic_base";
+        pawn.RemoveModifier(modifierName);
+        var abilityValues = DuelHealthRegenerationProperties.ToDictionary(
+            propertyName => propertyName,
+            _ => 0f
+        );
         pawn.AddModifier(
-            "upgrade_health/modifier_intrinsic_base",
-            abilityValues: new()
-            {
-                ["BonusHealth"] = DefaultUpgradeHealthBonus,
-                ["BaseAttackDamagePercent"] =
-                    DefaultUpgradeHealthAttackDamagePercent,
-            }
+            modifierName,
+            abilityValues: abilityValues
         );
     }
 
-    public void ProcessPracticeBotUsercmds(ProcessUsercmdsEvent args)
+    private static void RestoreDuelItemHealthRegen(
+        CCitadelPlayerPawn pawn,
+        string itemName,
+        bool hadItemBeforeMatch
+    )
+    {
+        string modifierName = $"{itemName}/modifier_intrinsic_base";
+        pawn.RemoveModifier(modifierName);
+        if (hadItemBeforeMatch)
+            pawn.AddModifier(modifierName);
+    }
+
+    private void ProcessPracticeBotUsercmds(
+        ProcessUsercmdsEvent args,
+        CBasePlayerController controller,
+        CCitadelPlayerPawn pawn,
+        DuelMatch? practiceBotMatch
+    )
     {
         if (
-            practiceBotName == null ||
-            practiceBotControllerHandle is not uint botHandle ||
-            args.Paused ||
-            args.Controller is not { IsBot: true } controller ||
-            controller.EntityHandle != botHandle
+            !controller.IsBot ||
+            !practiceBots.TryGetValue(controller.EntityHandle, out var state)
         )
         {
             return;
         }
 
-        var pawn = controller.GetHeroPawn();
-        if (pawn is not { IsValid: true })
-            return;
+        var target = state.TargetController;
+        if (
+            target is not { IsValid: true } ||
+            target.EntityHandle != state.OwnerControllerHandle
+        )
+        {
+            target = Players.GetAll().FirstOrDefault(player =>
+                !player.IsBot &&
+                player.EntityHandle == state.OwnerControllerHandle
+            );
+            state.TargetController = target;
+        }
 
-        var target = Players.GetAll().FirstOrDefault(player =>
-            !player.IsBot &&
-            string.Equals(
-                player.PlayerName,
-                practiceBotTargetName,
-                StringComparison.OrdinalIgnoreCase
-            )
-        );
         var targetPawn = target?.GetHeroPawn();
         if (targetPawn is not { IsValid: true })
             return;
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        UpdatePracticeBotAim(now, targetPawn);
+        UpdatePracticeBotAim(state, now, targetPawn);
         var moveTo = UpdatePracticeBotDuelMovement(
+            state,
             pawn,
             targetPawn,
-            now
+            now,
+            practiceBotMatch
         );
         bool canAttack =
-            server.ActiveMatches.TryGetValue(practiceBotName, out var match) &&
-            !match.Finished &&
-            match.ArenaInitialized &&
-            !match.CountdownActive &&
-            match.CombatActive;
+            practiceBotMatch is
+            {
+                Finished: false,
+                ArenaInitialized: true,
+                CountdownActive: false,
+                CombatActive: true
+            };
 
         foreach (var usercmd in args.Usercmds)
         {
@@ -1049,7 +1419,7 @@ public class PlayerManager
                 usercmd,
                 pawn,
                 moveTo,
-                practiceBotLookAt,
+                state.LookAt,
                 jump: false
             );
 
@@ -1068,33 +1438,23 @@ public class PlayerManager
         }
     }
 
-    public void EnforceDuelArenaBounds(ProcessUsercmdsEvent args)
+    private DuelMatch? EnforceDuelArenaBounds(
+        CBasePlayerController controller,
+        CCitadelPlayerPawn pawn
+    )
     {
-        if (
-            args.Paused ||
-            args.Controller is not { IsValid: true } controller
-        )
-        {
-            return;
-        }
-
-        var pawn = controller.GetHeroPawn();
-        if (pawn is not { IsValid: true })
-            return;
-
         if (TryGetActiveMatch(controller, out var match))
         {
-            duelArenaBoundaryStates.Remove(GetMatchParticipantName(controller));
             if (match.Finished || !match.ArenaInitialized)
-                return;
+                return match;
 
             EnforceSphereBoundary(
                 pawn,
                 match.ArenaPosition,
                 isInside: true,
-                GetArenaSphereRadius(FindArenaIndex(match.ArenaPosition))
+                DuelArenaSphereRadius
             );
-            return;
+            return match;
         }
 
         Vector3 position = pawn.Position;
@@ -1107,10 +1467,15 @@ public class PlayerManager
             float nearestDistanceSquared = float.MaxValue;
             for (int i = 0; i < server.DuelLocations.Length; i++)
             {
-                float distanceSquared = Vector3.DistanceSquared(
-                    position,
-                    GetDuelArenaSphereCenter(server.DuelLocations[i])
-                );
+                Vector3 offset = position - duelArenaSphereCenters[i];
+                if (
+                    MathF.Abs(offset.X) > DuelArenaOuterRadius ||
+                    MathF.Abs(offset.Y) > DuelArenaOuterRadius ||
+                    MathF.Abs(offset.Z) > DuelArenaOuterRadius
+                )
+                    continue;
+
+                float distanceSquared = offset.LengthSquared();
                 if (distanceSquared < nearestDistanceSquared)
                 {
                     nearestArenaIndex = i;
@@ -1118,15 +1483,14 @@ public class PlayerManager
                 }
             }
 
-            float arenaSphereRadius = GetArenaSphereRadius(nearestArenaIndex);
-            float detectionRadius = arenaSphereRadius + DuelArenaPlayerMargin;
             if (
                 nearestArenaIndex < 0 ||
-                nearestDistanceSquared > detectionRadius * detectionRadius
+                nearestDistanceSquared > DuelArenaOuterRadiusSquared
             )
-                return;
+                return null;
 
-            float interiorRadius = arenaSphereRadius - DuelArenaPlayerMargin;
+            float interiorRadius =
+                DuelArenaSphereRadius - DuelArenaPlayerMargin;
             boundaryState = (
                 nearestArenaIndex,
                 nearestDistanceSquared <= interiorRadius * interiorRadius
@@ -1136,26 +1500,21 @@ public class PlayerManager
         else if (
             Vector3.DistanceSquared(
                 position,
-                GetDuelArenaSphereCenter(
-                    server.DuelLocations[boundaryState.ArenaIndex]
-                )
-            ) > MathF.Pow(
-                GetArenaSphereRadius(boundaryState.ArenaIndex) +
-                    DuelArenaPlayerMargin,
-                2f
-            )
+                duelArenaSphereCenters[boundaryState.ArenaIndex]
+            ) > DuelArenaOuterRadiusSquared
         )
         {
             duelArenaBoundaryStates.Remove(controller.PlayerName);
-            return;
+            return null;
         }
 
         EnforceSphereBoundary(
             pawn,
             server.DuelLocations[boundaryState.ArenaIndex],
             boundaryState.IsInside,
-            GetArenaSphereRadius(boundaryState.ArenaIndex)
+            DuelArenaSphereRadius
         );
+        return null;
     }
 
     public void RegisterArenaBoundaryPosition(
@@ -1178,7 +1537,7 @@ public class PlayerManager
             }
         }
 
-        float arenaSphereRadius = GetArenaSphereRadius(nearestArenaIndex);
+        float arenaSphereRadius = DuelArenaSphereRadius;
         float detectionRadius = arenaSphereRadius + DuelArenaPlayerMargin;
         if (
             nearestArenaIndex < 0 ||
@@ -1242,8 +1601,7 @@ public class PlayerManager
         {
             Vector3 arena = server.DuelLocations[arenaIndex];
             Vector3 sphereCenter = GetDuelArenaSphereCenter(arena);
-            float radius =
-                GetArenaSphereRadius(arenaIndex) - DuelArenaPlayerMargin;
+            float radius = DuelArenaSphereRadius - DuelArenaPlayerMargin;
             var points = new Vector3[DuelArenaCircleSegments];
             for (int pointIndex = 0; pointIndex < points.Length; pointIndex++)
             {
@@ -1395,81 +1753,34 @@ public class PlayerManager
     public Vector3 GetDuelArenaCenter(Vector3 arena) =>
         GetDuelArenaSphereCenter(arena);
 
-    private float GetArenaSphereRadius(int arenaIndex) =>
-        DuelArenaSphereRadius;
-
-    private int FindArenaIndex(Vector3 arenaPosition)
-    {
-        for (int i = 0; i < server.DuelLocations.Length; i++)
-        {
-            if (Vector3.DistanceSquared(server.DuelLocations[i], arenaPosition) < 0.01f)
-                return i;
-        }
-
-        return -1;
-    }
-
     private Vector3 UpdatePracticeBotDuelMovement(
+        PracticeBotState state,
         CCitadelPlayerPawn botPawn,
         CCitadelPlayerPawn opponentPawn,
-        DateTimeOffset now
+        DateTimeOffset now,
+        DuelMatch? match
     )
     {
         var botPosition = botPawn.Position;
         var opponentPosition = opponentPawn.Position;
-        float playerRadius = DuelArenaSphereRadius - DuelArenaPlayerMargin;
-        Vector3? arenaPosition = null;
-        if (
-            botPawn.Controller is { } controller &&
-            TryGetActiveMatch(controller, out var match)
-        )
-        {
-            arenaPosition = match.ArenaPosition;
-            playerRadius =
-                GetArenaSphereRadius(FindArenaIndex(match.ArenaPosition)) -
-                DuelArenaPlayerMargin;
-        }
-
-        Vector2 target = CorrectPracticeBotStrafeRange(
-            new Vector2(practiceBotStrafeTarget.X, practiceBotStrafeTarget.Y),
-            new Vector2(botPosition.X, botPosition.Y),
-            new Vector2(opponentPosition.X, opponentPosition.Y),
-            playerRadius
+        Vector3? arenaPosition = match?.ArenaPosition;
+        var botPosition2D = new Vector2(botPosition.X, botPosition.Y);
+        var opponentPosition2D = new Vector2(
+            opponentPosition.X,
+            opponentPosition.Y
         );
-        if (arenaPosition is Vector3 nextArena)
-        {
-            target = KeepPracticeBotTargetInsideArena(
-                target,
-                botPosition,
-                nextArena,
-                playerRadius
-            );
-        }
+        bool chooseNextTarget = now >= state.NextMovementAdjustment;
+        Vector2 target = default;
 
-        if (
-            now >= practiceBotNextMovementAdjustment ||
-            Vector2.DistanceSquared(
-                new Vector2(botPosition.X, botPosition.Y),
-                target
-            ) <= practiceBotDifficulty.ArrivalDistance *
-                practiceBotDifficulty.ArrivalDistance
-        )
+        if (!chooseNextTarget)
         {
-            ChooseNextPracticeBotMovement(
-                botPosition,
-                opponentPosition,
-                now,
-                playerRadius,
-                arenaPosition
-            );
             target = CorrectPracticeBotStrafeRange(
                 new Vector2(
-                    practiceBotStrafeTarget.X,
-                    practiceBotStrafeTarget.Y
+                    state.StrafeTarget.X,
+                    state.StrafeTarget.Y
                 ),
-                new Vector2(botPosition.X, botPosition.Y),
-                new Vector2(opponentPosition.X, opponentPosition.Y),
-                playerRadius
+                botPosition2D,
+                opponentPosition2D
             );
             if (arenaPosition is Vector3 activeArena)
             {
@@ -1477,23 +1788,43 @@ public class PlayerManager
                     target,
                     botPosition,
                     activeArena,
-                    playerRadius
+                    PracticeBotDuelPlayerRadius
                 );
             }
+
+            chooseNextTarget =
+                Vector2.DistanceSquared(botPosition2D, target) <=
+                state.Difficulty.ArrivalDistance *
+                    state.Difficulty.ArrivalDistance;
+        }
+
+        if (chooseNextTarget)
+        {
+            ChooseNextPracticeBotMovement(
+                state,
+                botPosition,
+                opponentPosition,
+                now,
+                arenaPosition
+            );
+            target = new Vector2(
+                state.StrafeTarget.X,
+                state.StrafeTarget.Y
+            );
         }
 
         return new Vector3(target.X, target.Y, botPosition.Z);
     }
 
     private void ChooseNextPracticeBotMovement(
+        PracticeBotState state,
         Vector3 botPosition,
         Vector3 opponentPosition,
         DateTimeOffset now,
-        float playerRadius,
         Vector3? arenaPosition
     )
     {
-        practiceBotStrafeDirection =
+        state.StrafeDirection =
             server.random.Next(2) == 0 ? -1 : 1;
 
         var fromOpponent = new Vector2(
@@ -1507,26 +1838,25 @@ public class PlayerManager
         Vector2 right = new(-away.Y, away.X);
 
         float duration = (float)RandomRange(
-            practiceBotDifficulty.StrafeDurationMinimum,
-            practiceBotDifficulty.StrafeDurationMaximum
+            state.Difficulty.StrafeDurationMinimum,
+            state.Difficulty.StrafeDurationMaximum
         );
         float stepDistance = Math.Clamp(
-            practiceBotDifficulty.StrafeSpeed *
+            state.Difficulty.StrafeSpeed *
                 (float)RandomRange(
-                    practiceBotDifficulty.StepFactorMinimum,
-                    practiceBotDifficulty.StepFactorMaximum
+                    state.Difficulty.StepFactorMinimum,
+                    state.Difficulty.StepFactorMaximum
                 ) *
                 duration,
-            practiceBotDifficulty.StepDistanceMinimum,
-            practiceBotDifficulty.StepDistanceMaximum
+            state.Difficulty.StepDistanceMinimum,
+            state.Difficulty.StepDistanceMaximum
         );
         Vector2 target = new Vector2(botPosition.X, botPosition.Y)
-            + right * practiceBotStrafeDirection * stepDistance;
+            + right * state.StrafeDirection * stepDistance;
         target = CorrectPracticeBotStrafeRange(
             target,
             new Vector2(botPosition.X, botPosition.Y),
-            new Vector2(opponentPosition.X, opponentPosition.Y),
-            playerRadius
+            new Vector2(opponentPosition.X, opponentPosition.Y)
         );
         if (arenaPosition is Vector3 activeArena)
         {
@@ -1534,16 +1864,16 @@ public class PlayerManager
                 target,
                 botPosition,
                 activeArena,
-                playerRadius
+                PracticeBotDuelPlayerRadius
             );
         }
 
-        practiceBotStrafeTarget = new Vector3(
+        state.StrafeTarget = new Vector3(
             target.X,
             target.Y,
             botPosition.Z
         );
-        practiceBotNextMovementAdjustment = now.AddSeconds(duration);
+        state.NextMovementAdjustment = now.AddSeconds(duration);
     }
 
     private Vector2 KeepPracticeBotTargetInsideArena(
@@ -1559,51 +1889,44 @@ public class PlayerManager
             0f,
             playerRadius - PracticeBotArenaBoundaryMargin
         );
-        float horizontalRadius = MathF.Sqrt(MathF.Max(
+        float horizontalRadiusSquared = MathF.Max(
             0f,
             safeRadius * safeRadius - verticalOffset * verticalOffset
-        ));
+        );
         Vector2 center = new(arenaCenter.X, arenaCenter.Y);
         Vector2 offset = target - center;
-        float distance = offset.Length();
-        if (distance <= horizontalRadius)
+        float distanceSquared = offset.LengthSquared();
+        if (distanceSquared <= horizontalRadiusSquared)
             return target;
 
+        float distance = MathF.Sqrt(distanceSquared);
         Vector2 direction = distance > 0.001f
             ? offset / distance
             : Vector2.UnitX;
-        return center + direction * horizontalRadius;
+        return center + direction * MathF.Sqrt(horizontalRadiusSquared);
     }
 
     private static Vector2 CorrectPracticeBotStrafeRange(
         Vector2 moveTarget,
         Vector2 botPosition,
-        Vector2 opponentPosition,
-        float playerRadius
+        Vector2 opponentPosition
     )
     {
-        float courtCenterOffset = DuelArenaCourtHeight / 2f;
-        float maxHorizontalRadius = MathF.Sqrt(MathF.Max(
-            0f,
-            playerRadius * playerRadius - courtCenterOffset * courtCenterOffset
-        ));
-        float maximumPossibleRange = 2f * maxHorizontalRadius;
-        float minimumRange = maximumPossibleRange >= PracticeBotDuelMinRange
-            ? PracticeBotDuelMinRange
-            : maximumPossibleRange * 0.7f;
-        float maximumRange = Math.Min(PracticeBotDuelMaxRange, maximumPossibleRange);
-        float currentRange = Vector2.Distance(botPosition, opponentPosition);
+        float currentRangeSquared = Vector2.DistanceSquared(
+            botPosition,
+            opponentPosition
+        );
         if (
-            currentRange >= minimumRange &&
-            currentRange <= maximumRange
+            currentRangeSquared >= PracticeBotMinimumRangeSquared &&
+            currentRangeSquared <= PracticeBotMaximumRangeSquared
         )
         {
             return moveTarget;
         }
 
-        float targetRange = currentRange < minimumRange
-            ? minimumRange
-            : maximumRange;
+        float targetRange = currentRangeSquared < PracticeBotMinimumRangeSquared
+            ? PracticeBotMinimumRange
+            : PracticeBotMaximumRange;
         Vector2 targetOffset = moveTarget - opponentPosition;
         if (targetOffset.LengthSquared() < 0.001f)
             targetOffset = botPosition - opponentPosition;
@@ -1615,83 +1938,88 @@ public class PlayerManager
     }
 
     private void UpdatePracticeBotAim(
+        PracticeBotState state,
         DateTimeOffset now,
         CCitadelPlayerPawn targetPawn
     )
     {
-        if (now >= practiceBotNextAimUpdate)
+        if (now >= state.NextAimUpdate)
         {
-            practiceBotNextAimUpdate =
-                now.AddSeconds(practiceBotDifficulty.AimUpdateInterval);
+            state.NextAimUpdate =
+                now.AddSeconds(state.Difficulty.AimUpdateInterval);
 
             float errorX = (float)(server.random.NextDouble() * 2d - 1d)
-                * practiceBotDifficulty.HorizontalAimError;
+                * state.Difficulty.HorizontalAimError;
             float errorY = (float)(server.random.NextDouble() * 2d - 1d)
-                * practiceBotDifficulty.HorizontalAimError;
+                * state.Difficulty.HorizontalAimError;
             float errorZ = (float)(server.random.NextDouble() * 2d - 1d)
-                * practiceBotDifficulty.VerticalAimError;
-            practiceBotAimError = new Vector3(errorX, errorY, errorZ);
+                * state.Difficulty.VerticalAimError;
+            state.AimError = new Vector3(errorX, errorY, errorZ);
         }
 
-        practiceBotLookAt = targetPawn.EyePosition + practiceBotAimError;
+        state.LookAt = targetPawn.EyePosition + state.AimError;
     }
 
     private double RandomRange(double minimum, double maximum) =>
         minimum + server.random.NextDouble() * (maximum - minimum);
 
-    private void RemovePracticeBot()
+    private void RestorePracticeBotAiIfIdle()
     {
-        if (practiceBotName == null)
+        if (practiceBots.Count != 0)
+            return;
+
+        if (practiceBotsPreviousAiEnabled)
+            Bots.SetAiEnabled(true);
+
+        practiceBotsPreviousAiEnabled = false;
+    }
+
+    private void RemovePracticeBot(uint controllerHandle)
+    {
+        if (!practiceBots.Remove(controllerHandle))
             return;
 
         var bot = Players.GetAll().FirstOrDefault(player =>
             player.IsBot &&
-            (
-                player.EntityHandle == practiceBotControllerHandle ||
-                string.Equals(
-                    player.PlayerName,
-                    practiceBotName,
-                    StringComparison.OrdinalIgnoreCase
-                )
-            )
+            player.EntityHandle == controllerHandle
         );
         bot?.Kick(
             "Practice bot removed.",
             ENetworkDisconnectionReason.NetworkDisconnectKicked
         );
 
-        if (practiceBotPreviousAiEnabled)
-            Bots.SetAiEnabled(true);
-
-        practiceBotName = null;
-        practiceBotBaseName = null;
-        practiceBotTargetName = null;
-        practiceBotDifficultyName = "Hard";
-        practiceBotControllerHandle = null;
-        practiceBotPreviousAiEnabled = false;
-        practiceBotLookAt = Vector3.Zero;
-        practiceBotAimError = Vector3.Zero;
-        practiceBotStrafeTarget = Vector3.Zero;
-        practiceBotStrafeDirection = 1;
-        practiceBotNextMovementAdjustment = DateTimeOffset.MinValue;
-        practiceBotNextAimUpdate = DateTimeOffset.MinValue;
+        RestorePracticeBotAiIfIdle();
     }
 
     public void ApplyDuelMatchModifiers(
         CCitadelPlayerPawn pawn,
-        int sharedMaxHealth
+        bool hadGlassCannonItemBeforeMatch
     )
     {
         ApplyFixation(pawn);
-        ApplyDuelHealthModifier(pawn);
-        ApplyDuelGlassCannon(pawn);
-        NormalizeDuelPawnHealth(pawn, sharedMaxHealth, force: true);
+        ApplyDuelGlassCannon(pawn, hadGlassCannonItemBeforeMatch);
     }
 
-    private void ApplyFixation(CCitadelPlayerPawn pawn)
+    public int MaxFixationForOnlinePlayers()
+    {
+        int updatedPlayers = 0;
+        foreach (var controller in Players.GetAll())
+        {
+            if (!controller.IsValid)
+                continue;
+
+            var pawn = controller.GetHeroPawn();
+            if (pawn is { IsValid: true } && ApplyFixation(pawn))
+                updatedPlayers++;
+        }
+
+        return updatedPlayers;
+    }
+
+    private bool ApplyFixation(CCitadelPlayerPawn pawn)
     {
         if (!pawn.IsValid)
-            return;
+            return false;
 
         var fixation = pawn.AbilityComponent?.FindAbilityByName(FixationAbilityName);
         var signature3Ability = pawn.GetAbilityBySlot(EAbilitySlot.Signature3);
@@ -1705,26 +2033,67 @@ public class PlayerManager
                 Console.WriteLine(
                     $"[aimLOCK] Could not move Fixation to Signature3 for {pawn.Controller?.PlayerName ?? "player"}."
                 );
-                return;
+                return false;
             }
 
-            if (pawn.AddAbility(FixationAbilityName, (ushort)EAbilitySlot.Signature3) == null)
+            var addedFixation = pawn.AddAbility(
+                FixationAbilityName,
+                (ushort)EAbilitySlot.Signature3
+            );
+            if (addedFixation == null || !addedFixation.IsValid)
             {
                 Console.WriteLine(
                     $"[aimLOCK] Could not add Fixation to {pawn.Controller?.PlayerName ?? "player"}."
                 );
-                return;
+                return false;
+            }
+
+            fixation = pawn.AbilityComponent?.FindAbilityByName(FixationAbilityName);
+            if (fixation == null || !fixation.IsValid)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not find Fixation after adding it to {pawn.Controller?.PlayerName ?? "player"}."
+                );
+                return false;
             }
         }
 
+        fixation.UpgradeBits = FullyUpgradedAbilityBits;
+        if (fixation.UpgradeBits != FullyUpgradedAbilityBits)
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Could not fully upgrade Fixation for {pawn.Controller?.PlayerName ?? "player"}."
+            );
+            return false;
+        }
+
         pawn.RemoveModifier(FixationModifierName);
-        pawn.AddModifier(
+        var fixationModifier = pawn.AddModifier(
             FixationModifierName,
             abilityValues: new()
             {
                 ["MaxStacks"] = FixationMaxStacks,
             }
         );
+        if (fixationModifier is not { IsValid: true })
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Could not add the Fixation stack modifier to {pawn.Controller?.PlayerName ?? "player"}."
+            );
+            return false;
+        }
+
+        var modifierSchema = fixationModifier.AsSchema<Schema.CBaseModifier>();
+        modifierSchema.m_iMaxStackCount = FixationMaxStacks;
+        if (modifierSchema.m_iMaxStackCount != FixationMaxStacks)
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Could not set Fixation's runtime stack cap to {FixationMaxStacks} for {pawn.Controller?.PlayerName ?? "player"}."
+            );
+            return false;
+        }
+
+        return true;
     }
 
     private void GrantInitialAbilityCurrencies(
@@ -1757,60 +2126,133 @@ public class PlayerManager
         initialAbilityCurrenciesGranted.Add(controllerHandle);
     }
 
-    private void NormalizeDuelPawnHealth(
+    public void ApplyDuelGlassCannon(
         CCitadelPlayerPawn pawn,
-        int sharedMaxHealth,
-        bool force = false
+        bool hadGlassCannonItemBeforeMatch
     )
-    {
-        if (!force && pawn.GetMaxHealth() == sharedMaxHealth)
-            return;
-
-        pawn.RemoveModifier("upgrade_health/modifier_intrinsic_base");
-        float bonusHealth = sharedMaxHealth - pawn.GetMaxHealth();
-        pawn.AddModifier(
-            "upgrade_health/modifier_intrinsic_base",
-            abilityValues: new()
-            {
-                ["BonusHealth"] = bonusHealth,
-                ["BaseAttackDamagePercent"] =
-                    DefaultUpgradeHealthAttackDamagePercent,
-                ["BonusHealthRegen"] = 0f
-            }
-        );
-    }
-
-    public void ApplyDuelGlassCannon(CCitadelPlayerPawn pawn)
     {
         pawn.RemoveModifier(
             "upgrade_glass_cannon/modifier_glass_cannon_intrinstic"
         );
-        pawn.AddModifier(
-            "upgrade_glass_cannon/modifier_glass_cannon_intrinstic",
-            new System.Collections.Generic.Dictionary<string, float>
-            {
-                ["MaxHealthLossPercent"] =
-                    aimLOCK.DUEL_GLASS_CANNON_HEALTH_LOSS,
-                ["BaseAttackDamagePercent"] =
-                    aimLOCK.DUEL_GLASS_CANNON_DAMAGE
-            }
+        AddDuelGlassCannonModifier(
+            pawn,
+            aimLOCK.DUEL_GLASS_CANNON_HEALTH_LOSS,
+            hadGlassCannonItemBeforeMatch
         );
     }
 
-    private void NormalizeDuelMatchHealth(DuelMatch match)
+    private static void AddDuelGlassCannonModifier(
+        CCitadelPlayerPawn pawn,
+        float maxHealthLossPercent,
+        bool hadGlassCannonItemBeforeMatch
+    )
     {
-        if (match.Finished)
+        var abilityValues = new System.Collections.Generic.Dictionary<
+            string,
+            float
+        >
+        {
+            ["MaxHealthLossPercent"] = maxHealthLossPercent,
+        };
+        if (!hadGlassCannonItemBeforeMatch)
+            abilityValues["BaseAttackDamagePercent"] =
+                aimLOCK.DUEL_GLASS_CANNON_DAMAGE;
+
+        pawn.AddModifier(
+            "upgrade_glass_cannon/modifier_glass_cannon_intrinstic",
+            abilityValues
+        );
+    }
+
+    private static void RemoveDuelGlassCannon(
+        CCitadelPlayerPawn pawn,
+        bool hadGlassCannonItemBeforeMatch
+    )
+    {
+        pawn.RemoveModifier(
+            "upgrade_glass_cannon/modifier_glass_cannon_intrinstic"
+        );
+        if (hadGlassCannonItemBeforeMatch)
+            pawn.AddModifier(
+                "upgrade_glass_cannon/modifier_glass_cannon_intrinstic"
+            );
+    }
+
+    private static void ClampHealthToMax(CCitadelPlayerPawn? pawn)
+    {
+        if (pawn is { IsValid: true, IsAlive: true })
+            pawn.Health = Math.Min(pawn.Health, pawn.GetMaxHealth());
+    }
+
+    private static void ApplyDuelMaxHealth(CCitadelPlayerPawn pawn)
+    {
+        const string modifierName =
+            "upgrade_health/modifier_intrinsic_base";
+
+        if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
+        {
+            Console.WriteLine(
+                "[aimLOCK] Cannot set duel max health; upgrade_health is missing."
+            );
             return;
+        }
 
-        var player1 = FindMatchParticipant(match.Player1);
-        var player2 = FindMatchParticipant(match.Player2);
+        pawn.RemoveModifier(modifierName);
+        int maxHealthWithoutHealthUpgrade = pawn.GetMaxHealth();
+        if (maxHealthWithoutHealthUpgrade <= 0)
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Cannot set duel max health; effective max health without upgrade_health is {maxHealthWithoutHealthUpgrade}."
+            );
+            return;
+        }
 
-        var pawn1 = player1?.GetHeroPawn();
-        var pawn2 = player2?.GetHeroPawn();
-        if (pawn1 is { IsValid: true })
-            NormalizeDuelPawnHealth(pawn1, match.SharedMaxHealth);
-        if (pawn2 is { IsValid: true })
-            NormalizeDuelPawnHealth(pawn2, match.SharedMaxHealth);
+        var abilityValues = DuelHealthRegenerationProperties.ToDictionary(
+            propertyName => propertyName,
+            _ => 0f
+        );
+        abilityValues["BonusHealth"] =
+            DuelMaxHealth - maxHealthWithoutHealthUpgrade;
+        pawn.AddModifier(modifierName, abilityValues: abilityValues);
+
+        int effectiveMaxHealth = pawn.GetMaxHealth();
+        if (effectiveMaxHealth != DuelMaxHealth)
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Duel max health is {effectiveMaxHealth}, expected {DuelMaxHealth} after the upgrade_health bonus."
+            );
+        }
+        ClampHealthToMax(pawn);
+    }
+
+    private static void SetDuelStartingHealth(CCitadelPlayerPawn pawn)
+    {
+        pawn.Health = Math.Min(DuelMaxHealth, pawn.GetMaxHealth());
+    }
+
+    public void StartDuelHealthCapMonitor(DuelMatch match)
+    {
+        void MonitorHealthCap()
+        {
+            if (match.Finished)
+                return;
+
+            foreach (var player in GetMatchParticipants(match))
+            {
+                var pawn = player.GetHeroPawn();
+                if (pawn is { IsValid: true, IsAlive: true })
+                {
+                    ClampHealthToMax(pawn);
+                }
+            }
+
+            server.ScheduleOnce(
+                DuelHealthCapCheckIntervalSeconds.Seconds(),
+                MonitorHealthCap
+            );
+        }
+
+        MonitorHealthCap();
     }
 
     public void PrepareDuelMatchHealth(DuelMatch match)
@@ -1818,29 +2260,21 @@ public class PlayerManager
         if (match.Finished)
             return;
 
-        NormalizeDuelMatchHealth(match);
-        ResetDuelCurrentHealth(match);
-    }
-
-    public void PlayRespawnTeleportEffect(CCitadelPlayerPawn pawn)
-    {
-        SpawnAttachedEffect(pawn, RespawnTeleportEffect);
-    }
-
-    public CParticleSystem? BeginRespawnEffect(CCitadelPlayerPawn pawn) =>
-        CreateAttachedEffect(pawn, RespawnTeleportEffect);
-
-    public void EndRespawnEffect(CParticleSystem? effect)
-    {
-        if (effect is not { IsValid: true })
-            return;
-
-        effect.Stop();
-        server.ScheduleOnce(1.Seconds(), () =>
+        var pawn1 = FindMatchParticipant(match.Player1)?.GetHeroPawn();
+        var pawn2 = FindMatchParticipant(match.Player2)?.GetHeroPawn();
+        if (pawn1 is not { IsValid: true } || pawn2 is not { IsValid: true })
         {
-            if (effect.IsValid)
-                effect.Destroy();
-        });
+            Console.WriteLine(
+                "[aimLOCK] Could not set duel max health for " +
+                $"{GetMatchParticipantDisplayName(match.Player1)} vs " +
+                $"{GetMatchParticipantDisplayName(match.Player2)}."
+            );
+            return;
+        }
+
+        ApplyDuelMaxHealth(pawn1);
+        ApplyDuelMaxHealth(pawn2);
+        ResetDuelCurrentHealth(match);
     }
 
     private void SpawnAttachedEffect(CCitadelPlayerPawn pawn, string effectName)
@@ -1958,7 +2392,10 @@ public class PlayerManager
         initialHeroHazeSelectionStarted.Remove(controllerHandle);
         initialAbilityCurrenciesGranted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
-        playersInsidePracticeBotZones.Remove(controller.PlayerName);
+        practiceBotStrafeSpeedOverrides.Remove(controllerHandle);
+        playersInsidePracticeBotZones.RemoveWhere(
+            entry => entry.PlayerHandle == controller.EntityHandle
+        );
         duelArenaBoundaryStates.Remove(controller.PlayerName);
 
         if (
@@ -1979,38 +2416,40 @@ public class PlayerManager
             return;
 
         initialSpawnRecoverySweepStarted = true;
+        RecoverInitialSpawns(initializeExistingPawns: true);
+    }
+
+    private void RecoverInitialSpawns(bool initializeExistingPawns = false)
+    {
+        bool needsAnotherSweep = false;
         foreach (var controller in Players.GetAll().Where(player => !player.IsBot).ToArray())
         {
             if (!controller.IsValid)
                 continue;
 
             var pawn = controller.GetHeroPawn();
-            if (pawn is { IsValid: true })
+            if (initializeExistingPawns && pawn is { IsValid: true })
             {
                 ApplyFixation(pawn);
                 GrantInitialAbilityCurrencies(controller, pawn);
             }
-        }
 
-        RecoverInitialSpawns();
-    }
-
-    private void RecoverInitialSpawns()
-    {
-        foreach (var controller in Players.GetAll().Where(player => !player.IsBot).ToArray())
-        {
-            if (!controller.IsValid)
-                continue;
-
-            var pawn = controller.GetHeroPawn();
             if (pawn is { IsValid: true, IsAlive: true })
                 continue;
 
+            uint controllerHandle = controller.EntityHandle;
             MarkInitialHeroSelectionPending(controller);
+            if (
+                initialHeroSelectionPending.Contains(controllerHandle) &&
+                !initialHeroSelectionIssued.Contains(controllerHandle)
+            )
+                needsAnotherSweep = true;
+
             BeginInitialHazeSpawn(controller);
         }
 
-        server.ScheduleOnce(1.Seconds(), RecoverInitialSpawns);
+        if (needsAnotherSweep)
+            server.ScheduleOnce(1.Seconds(), () => RecoverInitialSpawns());
     }
 
     public void MarkInitialHeroSelectionPending(
@@ -2333,6 +2772,8 @@ public class PlayerManager
         if (match.Finished || !match.ArenaInitialized)
             return HookResult.Continue;
 
+        ResetMatchFixationStacks(match);
+
         bool scoreRound = match.CombatActive;
         if (match.CountdownActive)
         {
@@ -2363,6 +2804,7 @@ public class PlayerManager
         if (scoreRound)
         {
             server.UIManager.UpdateMatchHud(match);
+            UpdateArenaScoreboard(match);
         }
 
         if (
@@ -2389,7 +2831,6 @@ public class PlayerManager
             if (match.Finished)
                 return;
 
-            NormalizeDuelMatchHealth(match);
             ResetDuelCurrentHealth(match);
         });
 
@@ -2397,6 +2838,54 @@ public class PlayerManager
         BeginMatchRespawnRecovery(match, participantName);
 
         return HookResult.Continue;
+    }
+
+    public void ResetMatchFixationStacks(DuelMatch match)
+    {
+        foreach (var participant in GetMatchParticipants(match))
+            ResetFixationStacks(participant);
+    }
+
+    private static void ResetFixationStacks(CCitadelPlayerController player)
+    {
+        var pawn = player.GetHeroPawn();
+        if (pawn is not { IsValid: true })
+            return;
+
+        var fixation = pawn.AbilityComponent?.FindAbilityByName(
+            FixationAbilityName
+        );
+        if (fixation is not { IsValid: true })
+            return;
+
+        pawn.RemoveModifier(FixationModifierName);
+        var fixationModifier = pawn.AddModifier(
+            FixationModifierName,
+            abilityValues: new()
+            {
+                ["MaxStacks"] = FixationMaxStacks,
+            }
+        );
+        if (fixationModifier is not { IsValid: true })
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Could not reset Fixation stacks for {player.PlayerName ?? "player"}."
+            );
+            return;
+        }
+
+        var modifierSchema = fixationModifier.AsSchema<Schema.CBaseModifier>();
+        modifierSchema.m_iMaxStackCount = FixationMaxStacks;
+        modifierSchema.m_iStackCount = 0;
+        if (
+            modifierSchema.m_iMaxStackCount != FixationMaxStacks ||
+            modifierSchema.m_iStackCount != 0
+        )
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Could not reset Fixation stacks for {player.PlayerName ?? "player"}."
+            );
+        }
     }
 
     public HookResult OnPlayerRespawned(PlayerRespawnedEvent args)
@@ -2485,7 +2974,8 @@ public class PlayerManager
     private void RespawnIntoArena(
         DuelMatch match,
         string playerName,
-        int retriesRemaining = 20
+        int retriesRemaining = 20,
+        CCitadelPlayerController? cachedPlayer = null
     )
     {
         if (match.Finished)
@@ -2494,7 +2984,9 @@ public class PlayerManager
             return;
         }
 
-        var player = FindMatchParticipant(playerName);
+        var player = cachedPlayer is { IsValid: true }
+            ? cachedPlayer
+            : FindMatchParticipant(playerName);
 
         var pawn = player?.GetHeroPawn();
 
@@ -2513,17 +3005,30 @@ public class PlayerManager
             }
 
             server.ScheduleOnce(0.25.Seconds(), () =>
-                RespawnIntoArena(match, playerName, retriesRemaining - 1));
+                RespawnIntoArena(
+                    match,
+                    playerName,
+                    retriesRemaining - 1,
+                    player
+                ));
             return;
         }
 
         SetMatchDisarmed(match, true);
 
         Vector3 arenaCenter = GetDuelArenaSphereCenter(match.ArenaPosition);
-        ApplyDuelGlassCannon(pawn);
-        NormalizeDuelMatchHealth(match);
+        bool hadGlassCannonItemBeforeMatch = string.Equals(
+            playerName,
+            match.Player1,
+            StringComparison.OrdinalIgnoreCase
+        )
+            ? match.Player1HadGlassCannonItem
+            : match.Player2HadGlassCannonItem;
+        ApplyDuelGlassCannon(pawn, hadGlassCannonItemBeforeMatch);
         ApplyDuelBulletLifesteal(pawn);
         ApplyDuelItemStack(pawn);
+        if (pawn.GetMaxHealth() != DuelMaxHealth)
+            ApplyDuelMaxHealth(pawn);
         pawn.RemoveAbility("upgrade_infinite_rounds");
 
         if (string.Equals(
@@ -2538,7 +3043,6 @@ public class PlayerManager
                 null
             );
             PlayMatchTeleportEffect(pawn);
-            PlayRespawnTeleportEffect(pawn);
         }
         else if (string.Equals(
             playerName,
@@ -2552,17 +3056,86 @@ public class PlayerManager
                 null
             );
             PlayMatchTeleportEffect(pawn);
-            PlayRespawnTeleportEffect(pawn);
         }
 
-        pawn.Health = pawn.GetMaxHealth();
+        SetDuelStartingHealth(pawn);
         server.PendingRespawns.Remove(playerName);
         respawnRecoveryInProgress.Remove(playerName);
 
         server.ScheduleOnce(0.5.Seconds(), () =>
         {
-            server.Queue.StartCountdown(match);
+            RestoreDuelRespawnHealth(match, playerName);
         });
+    }
+
+    private void RestoreDuelRespawnHealth(
+        DuelMatch match,
+        string playerName,
+        int attemptsRemaining = 12,
+        bool hasStableMaxHealth = false
+    )
+    {
+        if (match.Finished)
+            return;
+
+        var pawn = FindMatchParticipant(playerName)?.GetHeroPawn();
+        if (pawn is not { IsValid: true, IsAlive: true })
+        {
+            if (attemptsRemaining <= 1)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not restore duel health for {playerName} after respawn."
+                );
+                return;
+            }
+
+            server.ScheduleOnce(0.25.Seconds(), () =>
+                RestoreDuelRespawnHealth(
+                    match,
+                    playerName,
+                    attemptsRemaining - 1
+                ));
+            return;
+        }
+
+        if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
+            pawn.AddItem("upgrade_health");
+        if (pawn.GetMaxHealth() != DuelMaxHealth)
+            ApplyDuelMaxHealth(pawn);
+        if (pawn.GetMaxHealth() == DuelMaxHealth)
+        {
+            if (hasStableMaxHealth)
+            {
+                SetDuelStartingHealth(pawn);
+                server.Queue.StartCountdown(match);
+                return;
+            }
+
+            server.ScheduleOnce(0.25.Seconds(), () =>
+                RestoreDuelRespawnHealth(
+                    match,
+                    playerName,
+                    attemptsRemaining - 1,
+                    hasStableMaxHealth: true
+                ));
+            return;
+        }
+
+        if (attemptsRemaining <= 1)
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Duel max health remained {pawn.GetMaxHealth()} instead of {DuelMaxHealth} after respawning {playerName}."
+            );
+            server.Queue.StartCountdown(match);
+            return;
+        }
+
+        server.ScheduleOnce(0.25.Seconds(), () =>
+            RestoreDuelRespawnHealth(
+                match,
+                playerName,
+                attemptsRemaining - 1
+            ));
     }
 
     private void ResetDuelCurrentHealth(DuelMatch match)
@@ -2571,21 +3144,25 @@ public class PlayerManager
         {
             var pawn = player.GetHeroPawn();
             if (pawn is { IsValid: true, IsAlive: true })
-                pawn.Health = pawn.GetMaxHealth();
+            {
+                SetDuelStartingHealth(pawn);
+            }
         }
     }
 
     private void FinishMatch(
-        DuelMatch match,
-        string? respawnEffectPlayer = null,
-        CParticleSystem? startedRespawnEffect = null
+        DuelMatch match
     )
     {
         if (!match.Finished)
             match.Finished = true;
         match.CountdownActive = false;
         match.CountdownGeneration++;
-        SetMatchDisarmed(match, true);
+
+        var onlinePlayers = Players.GetAll().ToArray();
+        var player1 = FindMatchParticipant(match.Player1, onlinePlayers);
+        var player2 = FindMatchParticipant(match.Player2, onlinePlayers);
+        SetMatchDisarmed(match, true, player1, player2);
 
         string winner;
         if (match.ForfeitingPlayer is { } forfeitingPlayer)
@@ -2605,16 +3182,12 @@ public class PlayerManager
                     : match.Player2;
         }
 
-        var winnerController = FindMatchParticipant(winner);
-
-        string loserName = StringComparer.OrdinalIgnoreCase.Equals(
+        bool player1Won = StringComparer.OrdinalIgnoreCase.Equals(
             winner,
             match.Player1
-        )
-            ? match.Player2
-            : match.Player1;
-        var loserController = FindMatchParticipant(loserName);
-
+        );
+        var winnerController = player1Won ? player1 : player2;
+        var loserController = player1Won ? player2 : player1;
         if (
             winnerController != null &&
             loserController != null &&
@@ -2648,12 +3221,11 @@ public class PlayerManager
             server.LeaderboardManager.Refresh();
         }
 
-        Console.WriteLine($"Match Over! Winner: {winner}");
+        Console.WriteLine(
+            $"Match Over! Winner: {GetMatchParticipantDisplayName(winner)}"
+        );
 
-        var player1 = FindMatchParticipant(match.Player1);
-        var player2 = FindMatchParticipant(match.Player2);
-
-        SetMatchDisarmed(match, false);
+        SetMatchDisarmed(match, false, player1, player2);
 
         server.ActiveMatches.Remove(match.Player1);
         server.ActiveMatches.Remove(match.Player2);
@@ -2663,20 +3235,6 @@ public class PlayerManager
 
         var pawn1 = player1?.GetHeroPawn();
         var pawn2 = player2?.GetHeroPawn();
-        if (pawn1 != null)
-        {
-            server.PlayerManager.RestoreDuelHealthModifier(
-                pawn1,
-                match.Player1HadHealthItem
-            );
-        }
-        if (pawn2 != null)
-        {
-            server.PlayerManager.RestoreDuelHealthModifier(
-                pawn2,
-                match.Player2HadHealthItem
-            );
-        }
         if (pawn1 != null)
         {
             server.PlayerManager.RestoreDuelBulletLifesteal(
@@ -2732,6 +3290,56 @@ public class PlayerManager
                 "upgrade_burst_fire",
                 match.Player1HadBurstFireItem
             );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn1,
+                "upgrade_chonky",
+                match.Player1HadFortitudeItem
+            );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn1,
+                "upgrade_health",
+                match.Player1HadHealthItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_blitz_bullets",
+                match.Player1HadBlitzBulletsItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_pristine_emblem",
+                match.Player1HadOpeningRoundsItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_fleetfoot_boots",
+                match.Player1HadFleetfootItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_titan_round",
+                match.Player1HadTitanicMagazineItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_cardio_calibrator",
+                match.Player1HadCardioCalibratorItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_burst_fire",
+                match.Player1HadBurstFireItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_chonky",
+                match.Player1HadFortitudeItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn1,
+                "upgrade_health",
+                match.Player1HadHealthItem
+            );
         }
         if (pawn2 != null)
         {
@@ -2760,7 +3368,72 @@ public class PlayerManager
                 "upgrade_burst_fire",
                 match.Player2HadBurstFireItem
             );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn2,
+                "upgrade_chonky",
+                match.Player2HadFortitudeItem
+            );
+            server.PlayerManager.RemoveDuelItemIfGranted(
+                pawn2,
+                "upgrade_health",
+                match.Player2HadHealthItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_blitz_bullets",
+                match.Player2HadBlitzBulletsItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_pristine_emblem",
+                match.Player2HadOpeningRoundsItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_fleetfoot_boots",
+                match.Player2HadFleetfootItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_titan_round",
+                match.Player2HadTitanicMagazineItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_cardio_calibrator",
+                match.Player2HadCardioCalibratorItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_burst_fire",
+                match.Player2HadBurstFireItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_chonky",
+                match.Player2HadFortitudeItem
+            );
+            RestoreDuelItemHealthRegen(
+                pawn2,
+                "upgrade_health",
+                match.Player2HadHealthItem
+            );
         }
+        if (pawn1 != null)
+        {
+            RemoveDuelGlassCannon(pawn1, match.Player1HadGlassCannonItem);
+            ClampHealthToMax(pawn1);
+        }
+        if (pawn2 != null)
+        {
+            RemoveDuelGlassCannon(pawn2, match.Player2HadGlassCannonItem);
+            ClampHealthToMax(pawn2);
+        }
+        server.ScheduleOnce(0.1.Seconds(), () =>
+        {
+            ClampHealthToMax(pawn1);
+            ClampHealthToMax(pawn2);
+        });
         pawn1?.RemoveModifier("modifier_speed_boost");
         pawn2?.RemoveModifier("modifier_speed_boost");
         pawn1?.Teleport(
@@ -2774,33 +3447,9 @@ public class PlayerManager
             null
         );
         if (pawn1 != null)
-        {
             server.PlayerManager.PlayMatchTeleportEffect(pawn1);
-            if (
-                respawnEffectPlayer == match.Player1 &&
-                startedRespawnEffect is { IsValid: true }
-            )
-            {
-                server.ScheduleOnce(1.Seconds(), () =>
-                    server.PlayerManager.EndRespawnEffect(startedRespawnEffect));
-            }
-            else
-                server.PlayerManager.PlayRespawnTeleportEffect(pawn1);
-        }
         if (pawn2 != null)
-        {
             server.PlayerManager.PlayMatchTeleportEffect(pawn2);
-            if (
-                respawnEffectPlayer == match.Player2 &&
-                startedRespawnEffect is { IsValid: true }
-            )
-            {
-                server.ScheduleOnce(1.Seconds(), () =>
-                    server.PlayerManager.EndRespawnEffect(startedRespawnEffect));
-            }
-            else
-                server.PlayerManager.PlayRespawnTeleportEffect(pawn2);
-        }
 
         player1?.ChangeTeam(2);
         player2?.ChangeTeam(2);
@@ -2812,10 +3461,7 @@ public class PlayerManager
         server.Queue.TryStartMatches();
     }
 
-    public bool ForfeitMatch(
-        string playerName,
-        CParticleSystem? startedRespawnEffect = null
-    )
+    public bool ForfeitMatch(string playerName)
     {
         if (
             !server.ActiveMatches.TryGetValue(playerName, out var match) ||
@@ -2835,24 +3481,55 @@ public class PlayerManager
 
         match.ForfeitingPlayer = playerName;
         match.Finished = true;
-        FinishMatch(match, playerName, startedRespawnEffect);
+        FinishMatch(match);
         return true;
     }
 
     public void SetMatchDisarmed(DuelMatch match, bool disarmed)
     {
+        var onlinePlayers = Players.GetAll().ToArray();
+        SetMatchDisarmed(
+            match,
+            disarmed,
+            FindMatchParticipant(match.Player1, onlinePlayers),
+            FindMatchParticipant(match.Player2, onlinePlayers)
+        );
+    }
+
+    private static void SetMatchDisarmed(
+        DuelMatch match,
+        bool disarmed,
+        CCitadelPlayerController? player1,
+        CCitadelPlayerController? player2
+    )
+    {
         match.CombatActive = !disarmed && !match.Finished;
 
-        foreach (var player in GetMatchParticipants(match))
+        if (player1 is { IsValid: true })
         {
-            var pawn = player.GetHeroPawn();
-            if (pawn == null)
-                continue;
+            var pawn = player1.GetHeroPawn();
+            if (pawn != null)
+            {
+                if (disarmed)
+                    pawn.AddModifier("modifier_citadel_disarmed");
+                else
+                    pawn.RemoveModifier("modifier_citadel_disarmed");
+            }
+        }
 
-            if (disarmed)
-                pawn.AddModifier("modifier_citadel_disarmed");
-            else
-                pawn.RemoveModifier("modifier_citadel_disarmed");
+        if (
+            player2 is { IsValid: true } &&
+            (player1 == null || player2.EntityHandle != player1.EntityHandle)
+        )
+        {
+            var pawn = player2.GetHeroPawn();
+            if (pawn != null)
+            {
+                if (disarmed)
+                    pawn.AddModifier("modifier_citadel_disarmed");
+                else
+                    pawn.RemoveModifier("modifier_citadel_disarmed");
+            }
         }
     }
 
@@ -3003,6 +3680,65 @@ public class PlayerManager
         );
     }
 
+    public bool IsHandicapEnabled(CCitadelPlayerController player) =>
+        server.PlayerRecords.TryGetValue(
+            player.PlayerSteamId,
+            out var record
+        ) && record.HandicapEnabled;
+
+    public void SetHandicapEnabled(
+        CCitadelPlayerController player,
+        bool enabled
+    )
+    {
+        ulong steamId = player.PlayerSteamId;
+        if (steamId == 0 || steamId == ulong.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(player));
+
+        bool hadRecord = server.PlayerRecords.TryGetValue(
+            steamId,
+            out var record
+        );
+        if (!hadRecord && !enabled)
+            return;
+
+        record ??= new PlayerRecord
+        {
+            SteamId = steamId,
+            LastKnownName = player.PlayerName
+        };
+        bool previousValue = record.HandicapEnabled;
+        string previousName = record.LastKnownName;
+        if (!hadRecord || previousValue != enabled)
+        {
+            record.LastKnownName = player.PlayerName;
+            record.HandicapEnabled = enabled;
+            server.PlayerRecords[steamId] = record;
+
+            if (!SaveRecords())
+            {
+                if (hadRecord)
+                {
+                    record.HandicapEnabled = previousValue;
+                    record.LastKnownName = previousName;
+                }
+                else
+                    server.PlayerRecords.Remove(steamId);
+
+                throw new IOException("Could not save your handicap setting.");
+            }
+        }
+
+        if (
+            TryGetActiveMatch(player, out var match) &&
+            !match.Finished &&
+            player.GetHeroPawn() is { IsValid: true } pawn
+        )
+        {
+            ApplyDuelBulletLifesteal(pawn);
+        }
+    }
+
     public void ResetUnrankedRecord(ulong steamId, string playerName)
     {
         if (steamId == 0 || steamId == ulong.MaxValue)
@@ -3062,8 +3798,16 @@ public class PlayerManager
         return record.TimeZoneId;
     }
 
-    public TimeZoneInfo GetTimeZone(ulong steamId) =>
-        ResolveIanaTimeZone(GetTimeZoneId(steamId));
+    public TimeZoneInfo GetTimeZone(ulong steamId)
+    {
+        string timeZoneId = GetTimeZoneId(steamId);
+        if (resolvedTimeZones.TryGetValue(timeZoneId, out var timeZone))
+            return timeZone;
+
+        timeZone = ResolveIanaTimeZone(timeZoneId);
+        resolvedTimeZones.Add(timeZoneId, timeZone);
+        return timeZone;
+    }
 
     public void SetTimeZone(CCitadelPlayerController player, string ianaTimeZoneId)
     {
@@ -3266,7 +4010,8 @@ public class PlayerManager
         {
             string json = JsonSerializer.Serialize(
                 server.PlayerRecords,
-                new JsonSerializerOptions { WriteIndented = true });
+                PlayerRecordJsonOptions
+            );
 
             File.WriteAllText("aimlock_records.json", json);
             return true;

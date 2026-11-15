@@ -46,6 +46,12 @@ public sealed class GuildManager
         }
     }
 
+    public string? GetMemberTag(ulong steamId)
+    {
+        lock (syncRoot)
+            return FindGuildForMember(guilds, steamId)?.Tag;
+    }
+
     public IReadOnlyList<GuildLeaderboardEntry> GetLeaderboardEntries()
     {
         lock (syncRoot)
@@ -127,8 +133,8 @@ public sealed class GuildManager
             return "Usage: /guild create <tag>.";
 
         string tag = string.Join(" ", arguments).Trim();
-        if (!IsValidTag(tag, 4))
-            return "Guild tags must be 1-4 characters.";
+        if (!IsValidTag(tag, 5))
+            return "Guild tags must be 1-5 characters.";
 
         lock (syncRoot)
         {
@@ -388,8 +394,8 @@ public sealed class GuildManager
     )
     {
         string newTag = requestedTag.Trim();
-        if (!IsValidTag(newTag, 4))
-            return "Guild tags must be 1-4 characters.";
+        if (!IsValidTag(newTag, 5))
+            return "Guild tags must be 1-5 characters.";
 
         lock (syncRoot)
         {
@@ -597,8 +603,9 @@ public sealed class GuildManager
         "Guild commands: /guild create <tag>, " +
         "join <tag|name>, invite <player>, invites, accept [tag|name], " +
         "decline [tag|name], leave, lookup [tag|name], members [tag|name], " +
-        "list, mode <open|invite>, newtag <tag>, rename <name>, kick <member>, transfer <member>, " +
-        "disband confirm.";
+        "list, mode <open|invite>, newtag <tag>, rename <name>, " +
+        "kick <member>, transfer <member>, disband confirm. " +
+        "Tags are 1-5 characters.";
 
     private static CCitadelPlayerController? FindOnlinePlayer(
         string query,
@@ -643,10 +650,21 @@ public sealed class GuildManager
         out string error
     )
     {
+        var onlinePlayerNames = Players.GetAll()
+            .GroupBy(player => player.PlayerSteamId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First().PlayerName
+            );
+        string CurrentName(GuildMember member) =>
+            onlinePlayerNames.TryGetValue(member.SteamId, out var playerName)
+                ? playerName ?? member.LastKnownName
+                : member.LastKnownName;
+
         var matches = guild.Members
             .Where(member =>
                 string.Equals(
-                    GetCurrentPlayerName(member),
+                    CurrentName(member),
                     query,
                     StringComparison.OrdinalIgnoreCase
                 ) ||
@@ -660,7 +678,7 @@ public sealed class GuildManager
         {
             matches = guild.Members
                 .Where(member =>
-                    GetCurrentPlayerName(member).StartsWith(
+                    CurrentName(member).StartsWith(
                         query,
                         StringComparison.OrdinalIgnoreCase
                     ) ||

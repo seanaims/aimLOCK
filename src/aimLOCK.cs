@@ -16,11 +16,13 @@ using DeadworksManaged.Api;
 
 namespace aimLOCK;
 
+[DeclarePermission(
+    "aimlock.tags.manage",
+    Description = "Grant tag access and assign overhead tags to players."
+)]
 public class aimLOCK : DeadworksPluginBase
 {
     public override string Name => "aimLOCK";
-    private const int EntityRemovalSweepIntervalSeconds = 1;
-
     private static readonly HashSet<string> EntityDesignerNamesToRemove = new(StringComparer.Ordinal)
     {
         "npc_boss_tier3",
@@ -41,9 +43,12 @@ public class aimLOCK : DeadworksPluginBase
     ];
     private readonly HashSet<string> _missingNpcSpawnConVarsLogged =
         new(StringComparer.Ordinal);
-
     private readonly Queue<uint> _pendingEntityRemovals = new();
+    private readonly HashSet<uint> _pendingEntityRemovalHandles = new();
     private bool _entityRemovalSweepRunning;
+    private bool _initialEntityRemovalSweepStarted;
+    private bool _entityCullingEnabled;
+    private int _entityCullingGeneration;
     private bool _rutgerForceFieldCastScheduled;
     private bool _rutgerForceFieldCastAttempted;
     private int? _previousSvInfiniteAmmo;
@@ -73,6 +78,21 @@ public class aimLOCK : DeadworksPluginBase
         new Vector3(1486f, 3697f, 468f),
         new Vector3(-1387f, 6881f, 599f)
     };
+    public static readonly string[] DuelArenaNames =
+    {
+        "clock",
+        "boxes",
+        "stocks",
+        "forest",
+        "railroad",
+        "bridge",
+        "cola",
+        "tunnel",
+        "purple",
+        "sewer",
+        "front_door",
+        "clock2",
+    };
 
     public static readonly Vector3 MidtownSpawnPosition =
         new(-1202f, -10120f, 1323f);
@@ -80,10 +100,8 @@ public class aimLOCK : DeadworksPluginBase
     private static readonly Vector3 RutgerForceFieldPosition =
         new(-1238f, -3606f, -472f);
 
-    public const float DUEL_BONUS_HEALTH = 1200f;
-
     public const float DUEL_GLASS_CANNON_DAMAGE = 300f;
-    public const float DUEL_GLASS_CANNON_HEALTH_LOSS = -1f;
+    public const float DUEL_GLASS_CANNON_HEALTH_LOSS = 0f;
     public const float BASE_DUEL_BULLET_DAMAGE = 25f;
     public const float DUEL_BULLET_DAMAGE = 40f;
     public const float DUEL_BULLET_VELOCITY = 100f;
@@ -121,9 +139,17 @@ public class aimLOCK : DeadworksPluginBase
 
     public override void OnStartupServer()
     {
+        int cullingGeneration = ++_entityCullingGeneration;
+        _pendingEntityRemovals.Clear();
+        _pendingEntityRemovalHandles.Clear();
+        _entityRemovalSweepRunning = false;
+        _initialEntityRemovalSweepStarted = false;
+        _entityCullingEnabled = true;
+        DisableServerPausing();
         DisableNpcSpawning("citadel_trooper_spawn_enabled");
         DisableNpcSpawning("citadel_npc_spawn_enabled");
-        Timer.Once(3.Seconds(), RunStartupForceKillCommands);
+        DisableHeroKillGoldRewards();
+        Timer.Once(3.Seconds(), () => RunStartupForceKillCommand(0));
 
         var maxRespawnTime = ConVar.Find(
             "citadel_player_spawn_time_max_respawn_time"
@@ -154,7 +180,10 @@ public class aimLOCK : DeadworksPluginBase
         }
 
         Timer.Once(2.Seconds(), PlayerManager.StartInitialSpawnRecoverySweep);
-        Timer.Once(1.Seconds(), QueueExistingEntityRemovalSweep);
+        Timer.Once(
+            1.Seconds(),
+            () => QueueExistingEntityRemovalSweep(cullingGeneration)
+        );
         Timer.Once(1.Seconds(), PlayerManager.CreateDuelArenaRadiusMarkers);
         Timer.Once(1.Seconds(), PlayerManager.RemovePracticeBotZoneBoundaries);
         Timer.Once(1.Seconds(), PlayerManager.CreatePracticeBotDoorwayLabel);
@@ -162,44 +191,78 @@ public class aimLOCK : DeadworksPluginBase
         PingManager.Start();
     }
 
-    private static void RunStartupForceKillCommands()
+    private void RunStartupForceKillCommand(int commandIndex)
     {
-        foreach (string command in StartupForceKillCommands)
+        if (commandIndex >= StartupForceKillCommands.Length)
+            return;
+
+        string command = StartupForceKillCommands[commandIndex];
+        Console.WriteLine($"[aimLOCK] Running startup cleanup command: {command}");
+        Server.ExecuteCommand(command, output =>
         {
-            Console.WriteLine($"[aimLOCK] Running startup cleanup command: {command}");
-            Server.ExecuteCommand(command, output =>
-            {
-                string result = string.IsNullOrWhiteSpace(output)
-                    ? "<no console output>"
-                    : output.Trim();
-                Console.WriteLine(
-                    $"[aimLOCK] Startup cleanup result for {command}: {result}"
-                );
-            });
+            string result = string.IsNullOrWhiteSpace(output)
+                ? "<no console output>"
+                : output.Trim();
+            Console.WriteLine(
+                $"[aimLOCK] Startup cleanup result for {command}: {result}"
+            );
+        });
+
+        if (commandIndex + 1 < StartupForceKillCommands.Length)
+        {
+            Timer.Once(
+                0.5.Seconds(),
+                () => RunStartupForceKillCommand(commandIndex + 1)
+            );
         }
     }
 
     public override void OnUnload()
     {
+        _entityCullingEnabled = false;
+        _entityCullingGeneration++;
+        _pendingEntityRemovals.Clear();
+        _pendingEntityRemovalHandles.Clear();
+        _entityRemovalSweepRunning = false;
         PlayerManager.RemoveDuelArenaRadiusMarkers();
         PlayerManager.RemovePracticeBotZoneBoundaries();
         PlayerManager.RemovePracticeBotDoorwayLabel();
+        PlayerManager.RemoveArenaScoreboards();
         base.OnUnload();
     }
 
-    private void QueueExistingEntityRemovalSweep()
+    public override void OnEntitySpawned(EntitySpawnedEvent args)
     {
-        if (_entityRemovalSweepRunning)
+        if (
+            !_entityCullingEnabled ||
+            args.Entity is not CAI_BaseNPC entity ||
+            !ShouldRemoveEnemyNpc(entity)
+        )
             return;
 
+        QueueEntityRemoval(entity.EntityHandle, _entityCullingGeneration);
+    }
+
+    private void QueueExistingEntityRemovalSweep(int generation)
+    {
+        if (
+            !_entityCullingEnabled ||
+            generation != _entityCullingGeneration ||
+            _initialEntityRemovalSweepStarted
+        )
+            return;
+
+        _initialEntityRemovalSweepStarted = true;
         DisableNpcSpawning("citadel_trooper_spawn_enabled");
         DisableNpcSpawning("citadel_npc_spawn_enabled");
 
-        _entityRemovalSweepRunning = true;
         int queued = 0;
         foreach (var entity in Entities.ByClass<CAI_BaseNPC>())
         {
-            if (ShouldRemoveEnemyNpc(entity))
+            if (
+                ShouldRemoveEnemyNpc(entity) &&
+                _pendingEntityRemovalHandles.Add(entity.EntityHandle)
+            )
             {
                 _pendingEntityRemovals.Enqueue(entity.EntityHandle);
                 queued++;
@@ -209,15 +272,30 @@ public class aimLOCK : DeadworksPluginBase
         if (queued > 0)
             Console.WriteLine($"[aimLOCK] Queued {queued} enemy NPCs/objectives for staggered removal.");
         if (_pendingEntityRemovals.Count > 0)
-            Timer.NextTick(RemoveNextQueuedEntity);
-        else
         {
-            _entityRemovalSweepRunning = false;
-            Timer.Once(
-                EntityRemovalSweepIntervalSeconds.Seconds(),
-                QueueExistingEntityRemovalSweep
-            );
+            if (!_entityRemovalSweepRunning)
+            {
+                _entityRemovalSweepRunning = true;
+                Timer.NextTick(() => RemoveNextQueuedEntity(generation));
+            }
         }
+    }
+
+    private void QueueEntityRemoval(uint entityHandle, int generation)
+    {
+        if (
+            !_entityCullingEnabled ||
+            generation != _entityCullingGeneration ||
+            !_pendingEntityRemovalHandles.Add(entityHandle)
+        )
+            return;
+
+        _pendingEntityRemovals.Enqueue(entityHandle);
+        if (_entityRemovalSweepRunning)
+            return;
+
+        _entityRemovalSweepRunning = true;
+        Timer.NextTick(() => RemoveNextQueuedEntity(generation));
     }
 
     private static bool ShouldRemoveEnemyNpc(CBaseEntity entity)
@@ -238,25 +316,26 @@ public class aimLOCK : DeadworksPluginBase
         return entity is CAI_BaseNPC;
     }
 
-    private void RemoveNextQueuedEntity()
+    private void RemoveNextQueuedEntity(int generation)
     {
+        if (
+            !_entityCullingEnabled ||
+            generation != _entityCullingGeneration
+        )
+            return;
+
         if (!_pendingEntityRemovals.TryDequeue(out uint entityHandle))
             return;
 
+        _pendingEntityRemovalHandles.Remove(entityHandle);
         var entity = CBaseEntity.FromHandle(entityHandle);
         if (entity != null && ShouldRemoveEnemyNpc(entity))
             entity.Remove();
 
         if (_pendingEntityRemovals.Count > 0)
-            Timer.NextTick(RemoveNextQueuedEntity);
+            Timer.NextTick(() => RemoveNextQueuedEntity(generation));
         else
-        {
             _entityRemovalSweepRunning = false;
-            Timer.Once(
-                EntityRemovalSweepIntervalSeconds.Seconds(),
-                QueueExistingEntityRemovalSweep
-            );
-        }
     }
 
     private void DisableNpcSpawning(string conVarName)
@@ -278,6 +357,74 @@ public class aimLOCK : DeadworksPluginBase
 
         conVar.SetInt(0);
         Console.WriteLine($"[aimLOCK] Set {conVarName} to 0.");
+    }
+
+    private void DisableServerPausing()
+    {
+        string[] conVarNames =
+        [
+            "sv_pausable",
+            "citadel_allow_pausing",
+            "citadel_allow_pause_in_match",
+        ];
+
+        foreach (string conVarName in conVarNames)
+        {
+            var conVar = ConVar.Find(conVarName);
+            if (conVar == null)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not find {conVarName}; server pausing may remain enabled."
+                );
+                continue;
+            }
+
+            conVar.SetInt(0);
+            int actualValue = conVar.GetInt();
+            if (actualValue != 0)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not disable {conVarName}; it remained at {actualValue}."
+                );
+                continue;
+            }
+
+            Console.WriteLine($"[aimLOCK] Disabled pausing via {conVarName}.");
+        }
+    }
+
+    private void DisableHeroKillGoldRewards()
+    {
+        string[] conVarNames =
+        [
+            "citadel_player_gold_reward_min",
+            "citadel_player_gold_reward_max",
+            "citadel_player_gold_reward_first_kill_bonus",
+        ];
+
+        foreach (string conVarName in conVarNames)
+        {
+            var conVar = ConVar.Find(conVarName);
+            if (conVar == null)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not find {conVarName}; hero-kill gold rewards may remain enabled."
+                );
+                continue;
+            }
+
+            conVar.SetInt(0);
+            int actualValue = conVar.GetInt();
+            if (actualValue != 0)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Could not disable {conVarName}; it remained at {actualValue}."
+                );
+                continue;
+            }
+
+            Console.WriteLine($"[aimLOCK] Disabled {conVarName}.");
+        }
     }
 
     public void EnableMatchInfiniteAmmo()
@@ -451,6 +598,22 @@ public class aimLOCK : DeadworksPluginBase
     public override HookResult OnClientConCommand(ClientConCommandEvent e)
     {
         if (
+            e.Controller is CCitadelPlayerController chatPlayer &&
+            (
+                string.Equals(e.Command, "say", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(e.Command, "say_team", StringComparison.OrdinalIgnoreCase)
+            ) &&
+            Penalties.GetActive(
+                PenaltyType.Gag,
+                chatPlayer.PlayerSteamId
+            ) is { } activeGag
+        )
+        {
+            Chat.PrintToChat(chatPlayer, BuildMuteNotice(activeGag));
+            return HookResult.Stop;
+        }
+
+        if (
             e.Command == "selecthero" &&
             e.Controller is CCitadelPlayerController controller &&
             controller.GetHeroPawn() is { IsValid: true }
@@ -475,6 +638,7 @@ public class aimLOCK : DeadworksPluginBase
         if (args.Controller is not CCitadelPlayerController controller)
             return;
 
+        Queue.OnPlayerDisconnect(controller);
         PlayerManager.OnPlayerDisconnect(controller);
         controller.RemoveWithPawns();
     }
@@ -488,9 +652,7 @@ public class aimLOCK : DeadworksPluginBase
 
     public override void OnProcessUsercmds(ProcessUsercmdsEvent args)
     {
-        PlayerManager.EnforceDuelArenaBounds(args);
-        PlayerManager.ProcessPracticeBotUsercmds(args);
-        PlayerManager.ProcessPracticeBotDoorwayZone(args);
+        PlayerManager.ProcessUsercmds(args);
     }
 
     /* Debug Hero Change */
@@ -534,7 +696,7 @@ public class aimLOCK : DeadworksPluginBase
             caller.Reply("/join <ranked|unranked> (alias: /queue) - Join a queue.");
             caller.Reply("/leave - Leave your current queue.");
             caller.Reply("/pbmm <on|off> - Toggle ping-based matchmaking for your queue matches.");
-            caller.Reply("Use /help 2 for stats and Elo, or /help 3 for spawn and UI settings.");
+            caller.Reply("Use /help 2 for stats and Elo, or /help 3 for duels, arenas, and other commands.");
         }
         else if (page == 2)
         {
@@ -550,18 +712,27 @@ public class aimLOCK : DeadworksPluginBase
         else if (page == 3)
         {
             caller.Reply("aimLOCK server commands (page 3/3):");
-            caller.Reply("/duel <player name> - Start an unranked duel with an online player.");
+            caller.Reply("/duel <player name> [arena name] - Request a duel; omit the arena for a random map.");
+            caller.Reply("/accept - Accept a pending duel request.");
             caller.Reply("/bot [easy|medium|hard] - Start a bot match (default: hard).");
             caller.Reply("/botspeed <units/sec> - Set the practice bot's strafe speed (100-2500; default 2500).");
-            caller.Reply("/arena [number] - List arenas or teleport to a configured arena.");
+            caller.Reply("/arena [number|name] - List arenas or teleport to one.");
             caller.Reply("/spectate (/spec) list | <player name> - List matches or spectate one until it ends.");
-            caller.Reply("/tp <player name|arena number> - Teleport to a player or arena (permission required).");
-            caller.Reply("/spawn - Return to Midtown spawn after a 2-second countdown; forfeits an active duel.");
+            caller.Reply("/tp <player name|arena number|name> - Teleport to a player or arena (permission required).");
+            caller.Reply("Arena names: clock, boxes, stocks, forest, railroad, bridge.");
+            caller.Reply("More arenas: cola, tunnel, purple, sewer, front_door, clock2.");
+            caller.Reply("/spawn - Return to spawn after a 2-second countdown; forfeits an active duel.");
             caller.Reply("/scoreboard <on|off> - Show or hide the server info UI.");
             caller.Reply("/timezone [IANA ID] - View or set your local time zone.");
-            caller.Reply("/tag <playername> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|off> - Set or remove an overhead tag (permission required).");
+            caller.Reply("/tag <tagname> - Equip a tag an admin granted you; /tag list shows your available tags.");
+            caller.Reply("/tag give <playername> <tagname> - Grant tag access (aimlock.tags.manage).");
             caller.Reply("/tagoff - Hide your own overhead tag.");
             caller.Reply("/tagon - Show your overhead tag again.");
+            caller.Reply("/kick <player name> [reason] - Kick an online player (permission required).");
+            caller.Reply("/ban <player> <duration> <reason> - Ban a player (permission required).");
+            caller.Reply("/unban <player|SteamID64> - Lift an active ban (permission required).");
+            caller.Reply("/mute <player> <duration> <reason> and /unmute <player|SteamID64> - Manage text chat mutes (permission required).");
+            caller.Reply("/fixationmax - Fully upgrade Fixation with a 999-stack cap for all online players (permission required).");
             caller.Reply("/guild help - Create and manage guilds, invitations, rosters, and access settings.");
             caller.Reply("/leaderboardmove <x> <y> <z> - Move the leaderboard (permission required).");
             caller.Reply("Use /help 1 for queueing or /help 2 for stats, Elo, and stat resets.");
@@ -583,8 +754,22 @@ public class aimLOCK : DeadworksPluginBase
     }
 
     [Command(
+        "fixationmax",
+        Description = "Unlock and fully upgrade Fixation with a 999-stack cap in Signature3 for all online players.",
+        Permission = "aimlock.fixation.max",
+        SuppressChat = true
+    )]
+    public void FixationMaxCommand(Caller caller)
+    {
+        int updatedPlayers = PlayerManager.MaxFixationForOnlinePlayers();
+        caller.Reply(
+            $"Fully upgraded Fixation with a 999-stack cap for {updatedPlayers} online player(s)."
+        );
+    }
+
+    [Command(
         "duel",
-        Description = "Start an unranked duel with an online player: duel <player name>.",
+        Description = "Request a duel: duel <player name> [arena name].",
         SuppressChat = true
     )]
     public void DuelCommand(Caller caller, params string[] arguments)
@@ -597,11 +782,53 @@ public class aimLOCK : DeadworksPluginBase
         }
 
         string targetName = string.Join(" ", arguments).Trim();
-        Queue.StartDuelMatch(
+        int? arenaIndex = null;
+        if (
+            arguments.Length > 1 &&
+            TryParseDuelArenaName(arguments[^1], out int requestedArena)
+        )
+        {
+            bool exactPlayerNameExists = Players.GetAll().Any(target =>
+                !target.IsBot &&
+                string.Equals(
+                    target.PlayerName,
+                    targetName,
+                    StringComparison.OrdinalIgnoreCase
+                )
+            );
+            if (!exactPlayerNameExists)
+            {
+                targetName = string.Join(
+                    " ",
+                    arguments.Take(arguments.Length - 1)
+                ).Trim();
+                arenaIndex = requestedArena;
+            }
+        }
+
+        Queue.RequestDuelMatch(
             player,
             targetName,
+            arenaIndex,
             message => caller.Reply(message)
         );
+    }
+
+    [Command(
+        "accept",
+        Description = "Accept a pending duel request.",
+        SuppressChat = true
+    )]
+    public void AcceptDuelCommand(Caller caller)
+    {
+        var player = caller.Player;
+        if (player == null)
+        {
+            caller.Reply("You must be a player to accept a duel request.");
+            return;
+        }
+
+        Queue.AcceptDuelRequest(player, message => caller.Reply(message));
     }
 
     [Command(
@@ -613,6 +840,48 @@ public class aimLOCK : DeadworksPluginBase
     public void SpectateCommand(Caller caller, params string[] arguments)
     {
         PlayerManager.SpectateCommand(caller, arguments);
+    }
+
+    private bool TryParseDuelArenaSelection(
+        string selection,
+        out int arenaIndex
+    )
+    {
+        if (
+            int.TryParse(selection, out int arenaNumber) &&
+            arenaNumber >= 1 &&
+            arenaNumber <= DuelLocations.Length
+        )
+        {
+            arenaIndex = arenaNumber - 1;
+            return true;
+        }
+
+        arenaIndex = Array.FindIndex(
+            DuelArenaNames,
+            name => string.Equals(
+                name,
+                selection.Trim(),
+                StringComparison.OrdinalIgnoreCase
+            )
+        );
+        return arenaIndex >= 0 && arenaIndex < DuelLocations.Length;
+    }
+
+    private bool TryParseDuelArenaName(
+        string selection,
+        out int arenaIndex
+    )
+    {
+        arenaIndex = Array.FindIndex(
+            DuelArenaNames,
+            name => string.Equals(
+                name,
+                selection.Trim(),
+                StringComparison.OrdinalIgnoreCase
+            )
+        );
+        return arenaIndex >= 0 && arenaIndex < DuelLocations.Length;
     }
 
     [Command(
@@ -627,10 +896,10 @@ public class aimLOCK : DeadworksPluginBase
 
     [Command(
         "arena",
-        Description = "List configured arenas or teleport to one: arena [number].",
+        Description = "List arenas or teleport to one: arena [number|name].",
         SuppressChat = true
     )]
-    public void ArenaCommand(Caller caller, string? arenaNumber = null)
+    public void ArenaCommand(Caller caller, string? arenaSelection = null)
     {
         var player = caller.Player;
         if (player == null)
@@ -639,24 +908,27 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(arenaNumber))
+        if (string.IsNullOrWhiteSpace(arenaSelection))
         {
             for (int i = 0; i < DuelLocations.Length; i++)
             {
                 Vector3 arena = DuelLocations[i];
                 caller.Reply(
-                    $"Arena {i + 1}: {arena.X:0}, {arena.Y:0}, {arena.Z:0}"
+                    $"Arena {i + 1} ({DuelArenaNames[i]}): " +
+                    $"{arena.X:0}, {arena.Y:0}, {arena.Z:0}"
                 );
             }
-            caller.Reply("Use /arena <number> to teleport to an arena.");
+            caller.Reply("Use /arena <number|name> to teleport to an arena.");
             return;
         }
 
-        if (!int.TryParse(arenaNumber, out int selectedArena) ||
-            selectedArena < 1 ||
-            selectedArena > DuelLocations.Length)
+        if (
+            !TryParseDuelArenaSelection(arenaSelection, out int arenaIndex)
+        )
         {
-            caller.Reply($"Choose an arena number from 1 to {DuelLocations.Length}.");
+            caller.Reply(
+                $"Choose an arena number from 1 to {DuelLocations.Length} or a listed arena name."
+            );
             return;
         }
 
@@ -668,19 +940,21 @@ public class aimLOCK : DeadworksPluginBase
         }
 
         Vector3 destination =
-            PlayerManager.GetDuelArenaCenter(DuelLocations[selectedArena - 1]);
+            PlayerManager.GetDuelArenaCenter(DuelLocations[arenaIndex]);
         pawn.Teleport(
             destination,
             null,
             null
         );
         PlayerManager.RegisterArenaBoundaryPosition(player, destination);
-        caller.Reply($"Teleported to arena {selectedArena}.");
+        caller.Reply(
+            $"Teleported to arena {arenaIndex + 1} ({DuelArenaNames[arenaIndex]})."
+        );
     }
 
     [Command(
         "tp",
-        Description = "Teleport to an online player or configured arena: tp <player name|arena number>.",
+        Description = "Teleport to a player or arena: tp <player name|arena number|name>.",
         Permission = "aimlock.teleport",
         SuppressChat = true
     )]
@@ -695,7 +969,9 @@ public class aimLOCK : DeadworksPluginBase
 
         if (arguments.Length == 0)
         {
-            caller.Reply("Use /tp <player name> or /tp arena <number>.");
+            caller.Reply(
+                "Use /tp <player name> or /tp arena <number|name>."
+            );
             return;
         }
 
@@ -710,24 +986,26 @@ public class aimLOCK : DeadworksPluginBase
         {
             if (
                 arguments.Length != 2 ||
-                !int.TryParse(arguments[1], out int selectedArena) ||
-                selectedArena < 1 ||
-                selectedArena > DuelLocations.Length
+                !TryParseDuelArenaSelection(arguments[1], out int arenaIndex)
             )
             {
-                caller.Reply($"Use /tp arena <number> (1-{DuelLocations.Length}).");
+                caller.Reply(
+                    $"Use /tp arena <number|name> (1-{DuelLocations.Length})."
+                );
                 return;
             }
 
             Vector3 destination =
-                PlayerManager.GetDuelArenaCenter(DuelLocations[selectedArena - 1]);
+                PlayerManager.GetDuelArenaCenter(DuelLocations[arenaIndex]);
             sourcePawn.Teleport(
                 destination,
                 null,
                 null
             );
             PlayerManager.RegisterArenaBoundaryPosition(player, destination);
-            caller.Reply($"Teleported to arena {selectedArena}.");
+            caller.Reply(
+                $"Teleported to arena {arenaIndex + 1} ({DuelArenaNames[arenaIndex]})."
+            );
             return;
         }
 
@@ -812,7 +1090,11 @@ public class aimLOCK : DeadworksPluginBase
                     "mode" or "access" or "newtag" or "rename" or "kick" or
                     "transfer"
             )
+            {
                 LeaderboardManager.Refresh();
+                PlayerManager.RefreshArenaScoreboards();
+                PlayerTagManager.RefreshGuildTags();
+            }
 
             caller.Reply(response);
         }
@@ -910,13 +1192,69 @@ public class aimLOCK : DeadworksPluginBase
         }
     }
 
-    [Command("spawn", Description = "Return to Midtown spawn after a 2-second countdown or forfeit an active duel.")]
+    [Command(
+        "handicap",
+        Description = "Toggle a 10 percentage-point reduction to your duel lifesteal: handicap [on|off].",
+        SuppressChat = true
+    )]
+    public void HandicapCommand(Caller caller, string? setting = null)
+    {
+        var player = caller.Player;
+        if (player == null)
+        {
+            caller.Reply("You must be a player to change this setting.");
+            return;
+        }
+
+        bool enabled;
+        if (string.IsNullOrWhiteSpace(setting))
+        {
+            enabled = !PlayerManager.IsHandicapEnabled(player);
+        }
+        else if (string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase))
+        {
+            enabled = true;
+        }
+        else if (string.Equals(setting, "off", StringComparison.OrdinalIgnoreCase))
+        {
+            enabled = false;
+        }
+        else
+        {
+            caller.Reply("Use /handicap, /handicap on, or /handicap off.");
+            return;
+        }
+
+        try
+        {
+            PlayerManager.SetHandicapEnabled(player, enabled);
+            caller.Reply(
+                enabled
+                    ? "Handicap enabled. Your duel bullet lifesteal is reduced from 50% to 40% until you turn it off."
+                    : "Handicap disabled. Your duel bullet lifesteal is back to 50%."
+            );
+        }
+        catch (IOException ex)
+        {
+            Console.WriteLine(
+                $"Failed to update handicap for {player.PlayerName}: {ex}"
+            );
+            caller.Reply("Could not save your handicap setting.");
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            Console.WriteLine($"Invalid Steam ID for handicap setting: {ex}");
+            caller.Reply("Your player account is not ready; try again shortly.");
+        }
+    }
+
+    [Command("spawn", Description = "Return to spawn after a 2-second countdown or forfeit an active duel.")]
     public void SpawnCommand(Caller caller)
     {
         var player = caller.Player;
         if (player == null)
         {
-            caller.Reply("You must be a player to return to Midtown spawn.");
+            caller.Reply("You must be a player to return to spawn.");
             return;
         }
 
@@ -925,27 +1263,17 @@ public class aimLOCK : DeadworksPluginBase
             bool isBotMatch =
                 PlayerManager.FindMatchParticipant(activeMatch.Player1)?.IsBot == true ||
                 PlayerManager.FindMatchParticipant(activeMatch.Player2)?.IsBot == true;
-            var matchPawn = player.GetHeroPawn();
-            var matchRespawnEffect = matchPawn is { IsValid: true }
-                ? PlayerManager.BeginRespawnEffect(matchPawn)
-                : null;
 
-            caller.Reply("Returning to Midtown spawn in 2...");
+            caller.Reply("Returning to spawn in 2...");
             ScheduleOnce(1.Seconds(), () =>
-                caller.Reply("Returning to Midtown spawn in 1..."));
+                caller.Reply("Returning to spawn in 1..."));
             ScheduleOnce(2.Seconds(), () =>
             {
                 if (!player.IsValid)
-                {
-                    PlayerManager.EndRespawnEffect(matchRespawnEffect);
                     return;
-                }
 
                 if (
-                    PlayerManager.ForfeitMatch(
-                        player.PlayerName,
-                        matchRespawnEffect
-                    )
+                    PlayerManager.ForfeitMatch(player.PlayerName)
                 )
                 {
                     UIManager.RestoreServerInfoAfterSpawn(player);
@@ -954,7 +1282,6 @@ public class aimLOCK : DeadworksPluginBase
                 }
                 else
                 {
-                    PlayerManager.EndRespawnEffect(matchRespawnEffect);
                     caller.Reply("The match is already ending; /spawn was not used.");
                 }
             });
@@ -968,24 +1295,18 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        var respawnEffect = PlayerManager.BeginRespawnEffect(pawn);
-        caller.Reply("Returning to Midtown spawn in 2...");
-        ScheduleOnce(1.Seconds(), () => caller.Reply("Returning to Midtown spawn in 1..."));
+        caller.Reply("Returning to spawn in 2...");
+        ScheduleOnce(1.Seconds(), () => caller.Reply("Returning to spawn in 1..."));
         ScheduleOnce(2.Seconds(), () =>
         {
             if (!player.IsValid || !pawn.IsValid)
-            {
-                PlayerManager.EndRespawnEffect(respawnEffect);
                 return;
-            }
 
             PlayerManager.StopSpectating(player);
             player.ChangeTeam(2);
             pawn.Teleport(MidtownSpawnPosition, null, null);
-            ScheduleOnce(1.Seconds(), () =>
-                PlayerManager.EndRespawnEffect(respawnEffect));
             UIManager.RestoreServerInfoAfterSpawn(player);
-            caller.Reply("Returned to Midtown spawn.");
+            caller.Reply("Returned to spawn.");
         });
     }
 
@@ -1327,19 +1648,196 @@ public class aimLOCK : DeadworksPluginBase
 
     [Command(
         "tag",
-        Description = "Set or remove an overhead player tag: tag <playername> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|off>.",
-        Permission = "aimlock.tags.manage",
+        Description = "Equip an admin-granted overhead tag or grant access: tag <tagname|list|give>.",
         SuppressChat = true
     )]
-    public void PlayerTagCommand(Caller caller, string playerName, string tag)
+    public void PlayerTagCommand(Caller caller, params string[] arguments)
     {
-        if (string.IsNullOrWhiteSpace(playerName))
+        if (arguments.Length == 0)
+        {
+            caller.Reply(
+                "Use /tag <tagname> or /tag list. Admins: /tag give <player name> <tagname>."
+            );
+            return;
+        }
+
+        if (string.Equals(arguments[0], "give", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!caller.HasPermission("aimlock.tags.manage"))
+            {
+                caller.Reply("Only admins can grant overhead tag access.");
+                return;
+            }
+
+            if (
+                arguments.Length < 3 ||
+                string.IsNullOrWhiteSpace(string.Join(" ", arguments.Skip(1).Take(arguments.Length - 2)))
+            )
+            {
+                caller.Reply("Use /tag give <player name> <tagname>.");
+                return;
+            }
+
+            string targetName = string.Join(
+                " ",
+                arguments.Skip(1).Take(arguments.Length - 2)
+            ).Trim();
+            if (!PlayerTagManager.TryParseTag(arguments[^1], out PlayerTag grantedTag))
+            {
+                caller.Reply(
+                    "Choose a tag: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, or GUILDTAG."
+                );
+                return;
+            }
+
+            try
+            {
+                if (!PlayerTagManager.GrantTag(targetName, grantedTag))
+                {
+                    caller.Reply(
+                        $"No online player or saved player record matches \"{targetName}\"."
+                    );
+                    return;
+                }
+
+                caller.Reply(
+                    $"Granted {PlayerTagManager.GetTagToken(grantedTag)} tag access to {targetName}. " +
+                    $"They can equip it with /tag {PlayerTagManager.GetTagToken(grantedTag)}."
+                );
+            }
+            catch (IOException ex)
+            {
+                Console.WriteLine($"Failed to grant a tag to {targetName}: {ex}");
+                caller.Reply("Could not save the tag grant.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Console.WriteLine($"Access denied granting a tag to {targetName}: {ex}");
+                caller.Reply("Could not save the tag grant.");
+            }
+
+            return;
+        }
+
+        if (
+            arguments.Length == 1 &&
+            string.Equals(arguments[0], "list", StringComparison.OrdinalIgnoreCase)
+        )
+        {
+            var player = caller.Player;
+            if (player == null)
+            {
+                caller.Reply("Tag access lists are only available to players.");
+                return;
+            }
+
+            caller.Reply(PlayerTagManager.GetGrantedTagList(player.PlayerSteamId));
+            return;
+        }
+
+        if (arguments.Length == 1)
+        {
+            var player = caller.Player;
+            if (player == null)
+            {
+                caller.Reply("Only players can equip their own overhead tags.");
+                return;
+            }
+
+            if (string.Equals(arguments[0], "off", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    PlayerTagManager.RemoveTag(player.PlayerName);
+                    caller.Reply("Your overhead tag was removed.");
+                }
+                catch (IOException ex)
+                {
+                    Console.WriteLine(
+                        $"Failed to remove tag for {player.PlayerName}: {ex}"
+                    );
+                    caller.Reply("Could not save the tag change.");
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    Console.WriteLine(
+                        $"Access denied removing tag for {player.PlayerName}: {ex}"
+                    );
+                    caller.Reply("Could not save the tag change.");
+                }
+
+                return;
+            }
+
+            if (!PlayerTagManager.TryParseTag(arguments[0], out PlayerTag ownTag))
+            {
+                caller.Reply(
+                    "Use /tag <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG>, /tag list, or /tagoff."
+                );
+                return;
+            }
+
+            if (!PlayerTagManager.CanUseTag(player.PlayerSteamId, ownTag))
+            {
+                caller.Reply(
+                    $"An admin must grant you {PlayerTagManager.GetTagToken(ownTag)} tag access first."
+                );
+                return;
+            }
+
+            if (
+                ownTag == PlayerTag.GuildTag &&
+                GuildManager.GetMemberTag(player.PlayerSteamId) == null
+            )
+            {
+                caller.Reply("You must be in a guild to use your guild tag.");
+                return;
+            }
+
+            try
+            {
+                PlayerTagManager.SetTag(player.PlayerName, ownTag);
+                caller.Reply(
+                    $"Your overhead tag is now {PlayerTagManager.GetTagToken(ownTag)}."
+                );
+            }
+            catch (IOException ex)
+            {
+                Console.WriteLine(
+                    $"Failed to set tag for {player.PlayerName}: {ex}"
+                );
+                caller.Reply("Could not save the tag change.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Console.WriteLine(
+                    $"Access denied setting tag for {player.PlayerName}: {ex}"
+                );
+                caller.Reply("Could not save the tag change.");
+            }
+
+            return;
+        }
+
+        if (!caller.HasPermission("aimlock.tags.manage"))
+        {
+            caller.Reply(
+                "Only admins can assign tags to other players. Use /tag <tagname> for yourself."
+            );
+            return;
+        }
+
+        string normalizedName = string.Join(
+            " ",
+            arguments.Take(arguments.Length - 1)
+        ).Trim();
+        string tag = arguments[^1];
+        if (string.IsNullOrWhiteSpace(normalizedName))
         {
             caller.Reply("A player name is required.");
             return;
         }
 
-        string normalizedName = playerName.Trim();
         if (string.Equals(tag, "off", StringComparison.OrdinalIgnoreCase))
         {
             try
@@ -1361,34 +1859,11 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        PlayerTag playerTag;
-        if (string.Equals(tag, "YT", StringComparison.OrdinalIgnoreCase))
+        if (!PlayerTagManager.TryParseTag(tag, out PlayerTag playerTag))
         {
-            playerTag = PlayerTag.YouTube;
-        }
-        else if (string.Equals(tag, "TTV", StringComparison.OrdinalIgnoreCase))
-        {
-            playerTag = PlayerTag.Twitch;
-        }
-        else if (string.Equals(tag, "OWNER", StringComparison.OrdinalIgnoreCase))
-        {
-            playerTag = PlayerTag.Owner;
-        }
-        else if (string.Equals(tag, "STAFF", StringComparison.OrdinalIgnoreCase))
-        {
-            playerTag = PlayerTag.Staff;
-        }
-        else if (string.Equals(tag, "AIMLOCK", StringComparison.OrdinalIgnoreCase))
-        {
-            playerTag = PlayerTag.Aimlock;
-        }
-        else if (string.Equals(tag, "SUPPORTER", StringComparison.OrdinalIgnoreCase))
-        {
-            playerTag = PlayerTag.Supporter;
-        }
-        else
-        {
-            caller.Reply("Use /tag <playername> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|off>.");
+            caller.Reply(
+                "Use /tag <playername> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG|off>."
+            );
             return;
         }
 
@@ -1399,7 +1874,9 @@ public class aimLOCK : DeadworksPluginBase
                 ? "aimlock.xyz"
                 : playerTag == PlayerTag.Supporter
                     ? "[♥]"
-                : $"[{tag.ToUpperInvariant()}]";
+                    : playerTag == PlayerTag.GuildTag
+                        ? "guild tag"
+                        : $"[{PlayerTagManager.GetTagToken(playerTag)}]";
             caller.Reply($"Set the overhead tag for {normalizedName} to {displayTag}.");
         }
         catch (IOException ex)
@@ -1412,6 +1889,515 @@ public class aimLOCK : DeadworksPluginBase
             Console.WriteLine($"Access denied setting tag for {normalizedName}: {ex}");
             caller.Reply("Could not save the tag change.");
         }
+    }
+
+    [Command(
+        "mute",
+        Description = "Mute a player from text chat: mute <player> <duration> <reason>.",
+        Permission = "aimlock.chat.mute",
+        SuppressChat = true
+    )]
+    public void MuteCommand(
+        Caller caller,
+        Target target,
+        string durationText,
+        params string[] reasonParts
+    )
+    {
+        CCitadelPlayerController targetPlayer = target.Single();
+        if (!caller.CanTarget(targetPlayer))
+        {
+            caller.Reply("You are not allowed to mute that player.");
+            return;
+        }
+
+        if (!TryParseMuteDuration(durationText, out TimeSpan duration))
+        {
+            caller.Reply(
+                "Use a positive duration such as 10m, 2h, or 1d; permanent mutes are not supported."
+            );
+            return;
+        }
+
+        string reason = string.Join(" ", reasonParts).Trim();
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            caller.Reply("A mute reason is required.");
+            return;
+        }
+
+        if (
+            Penalties.WouldShorten(
+                PenaltyType.Gag,
+                targetPlayer.PlayerSteamId,
+                duration
+            ) is { } longerMute
+        )
+        {
+            caller.Reply(
+                $"{targetPlayer.PlayerName} already has a longer mute: " +
+                $"{GetPenaltyTimeLeft(longerMute)} remaining."
+            );
+            return;
+        }
+
+        try
+        {
+            Penalties.Add(
+                PenaltyType.Gag,
+                targetPlayer.PlayerSteamId,
+                duration,
+                caller,
+                targetPlayer.PlayerName,
+                reason
+            );
+
+            Penalty? penalty = Penalties.GetActive(
+                PenaltyType.Gag,
+                targetPlayer.PlayerSteamId
+            );
+            if (penalty != null)
+                Chat.PrintToChat(targetPlayer, BuildMuteNotice(penalty));
+
+            caller.Reply(
+                $"Muted {targetPlayer.PlayerName} for " +
+                $"{GetDurationText(duration)}. Reason: {reason}"
+            );
+        }
+        catch (CommandException ex)
+        {
+            Console.WriteLine(
+                $"Failed to mute {targetPlayer.PlayerName}: {ex}"
+            );
+            caller.Reply("Could not apply the mute.");
+        }
+    }
+
+    [Command(
+        "kick",
+        Description = "Kick an online player by name: kick <player name> [reason].",
+        Permission = "admin.moderation.kick",
+        SuppressChat = true
+    )]
+    public void KickCommand(Caller caller, params string[] arguments)
+    {
+        if (
+            !TryResolveKickTarget(
+                arguments,
+                out CCitadelPlayerController? target,
+                out string reason,
+                out string error
+            )
+        )
+        {
+            caller.Reply(error);
+            return;
+        }
+
+        if (target is not { IsValid: true })
+        {
+            caller.Reply("That player is no longer connected.");
+            return;
+        }
+
+        if (!caller.CanTarget(target))
+        {
+            caller.Reply("You are not allowed to kick that player.");
+            return;
+        }
+
+        string kickReason = string.IsNullOrWhiteSpace(reason)
+            ? "No reason specified."
+            : reason;
+        AdminActivity.Show(
+            caller,
+            $"kicked {target.PlayerName}: {kickReason}",
+            $"SteamID64: {target.PlayerSteamId}"
+        );
+        target.Kick(
+            kickReason,
+            ENetworkDisconnectionReason.NetworkDisconnectKicked
+        );
+        caller.Reply($"Kicked {target.PlayerName}. Reason: {kickReason}");
+    }
+
+    private static bool TryResolveKickTarget(
+        string[] arguments,
+        out CCitadelPlayerController? target,
+        out string reason,
+        out string error
+    )
+    {
+        target = null;
+        reason = "";
+        error = "";
+        if (arguments.Length == 0)
+        {
+            error = "Use /kick <player name> [reason].";
+            return false;
+        }
+
+        CCitadelPlayerController[] onlinePlayers = Players.GetAll()
+            .Where(player => !player.IsBot && player.IsValid)
+            .ToArray();
+
+        for (int nameWordCount = arguments.Length; nameWordCount > 0; nameWordCount--)
+        {
+            string name = string.Join(" ", arguments.Take(nameWordCount)).Trim();
+            CCitadelPlayerController[] exactMatches = onlinePlayers
+                .Where(player =>
+                    string.Equals(
+                        player.PlayerName,
+                        name,
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                )
+                .ToArray();
+            if (exactMatches.Length > 0)
+            {
+                if (exactMatches.Length != 1)
+                {
+                    error = "More than one player matches that name; use a more specific name.";
+                    return false;
+                }
+
+                target = exactMatches[0];
+                reason = string.Join(" ", arguments.Skip(nameWordCount)).Trim();
+                return true;
+            }
+        }
+
+        for (int nameWordCount = arguments.Length; nameWordCount > 0; nameWordCount--)
+        {
+            string name = string.Join(" ", arguments.Take(nameWordCount)).Trim();
+            CCitadelPlayerController[] prefixMatches = onlinePlayers
+                .Where(player =>
+                    player.PlayerName.StartsWith(
+                        name,
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                )
+                .ToArray();
+            if (prefixMatches.Length > 0)
+            {
+                if (prefixMatches.Length != 1)
+                {
+                    error = "More than one player matches that name; use a more specific name.";
+                    return false;
+                }
+
+                target = prefixMatches[0];
+                reason = string.Join(" ", arguments.Skip(nameWordCount)).Trim();
+                return true;
+            }
+        }
+
+        error = "No online player matches that name.";
+        return false;
+    }
+
+    [Command(
+        "ban",
+        Description = "Ban a player for a finite duration: ban <player> <duration> <reason>.",
+        Permission = "admin.moderation.ban",
+        SuppressChat = true
+    )]
+    public void BanCommand(
+        Caller caller,
+        Target target,
+        string durationText,
+        params string[] reasonParts
+    )
+    {
+        CCitadelPlayerController targetPlayer = target.Single();
+        if (!caller.CanTarget(targetPlayer))
+        {
+            caller.Reply("You are not allowed to ban that player.");
+            return;
+        }
+
+        if (!TryParseMuteDuration(durationText, out TimeSpan duration))
+        {
+            caller.Reply("Use a positive finite duration such as 10m, 2h, or 1d.");
+            return;
+        }
+
+        string reason = string.Join(" ", reasonParts).Trim();
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            caller.Reply("A ban reason is required.");
+            return;
+        }
+
+        if (
+            Penalties.WouldShorten(
+                PenaltyType.Ban,
+                targetPlayer.PlayerSteamId,
+                duration
+            ) is { } longerBan
+        )
+        {
+            caller.Reply(
+                $"{targetPlayer.PlayerName} already has a longer ban: " +
+                $"{GetPenaltyTimeLeft(longerBan)} remaining."
+            );
+            return;
+        }
+
+        try
+        {
+            Penalties.Add(
+                PenaltyType.Ban,
+                targetPlayer.PlayerSteamId,
+                duration,
+                caller,
+                targetPlayer.PlayerName,
+                reason
+            );
+            caller.Reply(
+                $"Banned {targetPlayer.PlayerName} for " +
+                $"{GetDurationText(duration)}. Reason: {reason}"
+            );
+        }
+        catch (CommandException ex)
+        {
+            Console.WriteLine($"Failed to ban {targetPlayer.PlayerName}: {ex}");
+            caller.Reply("Could not apply the ban.");
+        }
+    }
+
+    [Command(
+        "unban",
+        Description = "Lift an active ban by player name or SteamID64.",
+        Permission = "admin.moderation.ban",
+        SuppressChat = true
+    )]
+    public void UnbanCommand(Caller caller, string player)
+    {
+        RemovePenaltyCommand(caller, PenaltyType.Ban, player);
+    }
+
+    [Command(
+        "unmute",
+        Description = "Lift an active text chat mute by player name or SteamID64.",
+        Permission = "aimlock.chat.mute",
+        SuppressChat = true
+    )]
+    public void UnmuteCommand(Caller caller, string player)
+    {
+        RemovePenaltyCommand(caller, PenaltyType.Gag, player);
+    }
+
+    private static void RemovePenaltyCommand(
+        Caller caller,
+        PenaltyType type,
+        string player
+    )
+    {
+        Penalty? penalty;
+        try
+        {
+            if (
+                !TryResolveActivePenalty(
+                    player,
+                    type,
+                    out penalty,
+                    out string error
+                )
+            )
+            {
+                caller.Reply(error);
+                return;
+            }
+        }
+        catch (CommandException ex)
+        {
+            Console.WriteLine(
+                $"Failed to check active {GetPenaltyName(type)} for '{player}': {ex}"
+            );
+            caller.Reply($"Could not check for an active {GetPenaltyName(type)}.");
+            return;
+        }
+
+        if (penalty == null)
+            return;
+
+        if (!caller.CanTarget(penalty.SteamId64))
+        {
+            caller.Reply($"You are not allowed to remove that {GetPenaltyName(type)}.");
+            return;
+        }
+
+        try
+        {
+            if (
+                !Penalties.Remove(
+                    type,
+                    penalty.SteamId64,
+                    caller,
+                    $"Lifted by {caller.Name}."
+                )
+            )
+            {
+                caller.Reply($"That player no longer has an active {GetPenaltyName(type)}.");
+                return;
+            }
+
+            caller.Reply(
+                $"Removed the {GetPenaltyName(type)} from {penalty.PlayerName}."
+            );
+        }
+        catch (CommandException ex)
+        {
+            Console.WriteLine(
+                $"Failed to remove {GetPenaltyName(type)} from " +
+                $"{penalty.PlayerName} ({penalty.SteamId64}): {ex}"
+            );
+            caller.Reply($"Could not remove the {GetPenaltyName(type)}.");
+        }
+    }
+
+    private static bool TryResolveActivePenalty(
+        string player,
+        PenaltyType type,
+        out Penalty? penalty,
+        out string error
+    )
+    {
+        penalty = null;
+        error = "";
+        string lookup = player?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(lookup))
+        {
+            error = "A player name or SteamID64 is required.";
+            return false;
+        }
+
+        Penalty[] activePenalties = Penalties.GetAllActive(type).ToArray();
+        Penalty[] matches;
+        if (
+            ulong.TryParse(
+                lookup,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out ulong steamId
+            )
+        )
+        {
+            matches = activePenalties
+                .Where(activePenalty => activePenalty.SteamId64 == steamId)
+                .ToArray();
+        }
+        else
+        {
+            matches = activePenalties
+                .Where(activePenalty =>
+                    string.Equals(
+                        activePenalty.PlayerName,
+                        lookup,
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                )
+                .ToArray();
+
+            if (matches.Length == 0)
+            {
+                matches = activePenalties
+                    .Where(activePenalty =>
+                        !string.IsNullOrWhiteSpace(activePenalty.PlayerName) &&
+                        activePenalty.PlayerName.StartsWith(
+                            lookup,
+                            StringComparison.OrdinalIgnoreCase
+                        )
+                    )
+                    .ToArray();
+            }
+        }
+
+        if (matches.Length == 1)
+        {
+            penalty = matches[0];
+            return true;
+        }
+
+        string penaltyName = GetPenaltyName(type);
+        error = matches.Length > 1
+            ? $"More than one active {penaltyName} matches '{lookup}'; use a more specific name or SteamID64."
+            : $"No active {penaltyName} found for '{lookup}'.";
+        return false;
+    }
+
+    private static string GetPenaltyName(PenaltyType type) =>
+        type == PenaltyType.Ban
+            ? "ban"
+            : type == PenaltyType.Gag
+                ? "mute"
+                : "penalty";
+
+    private static bool TryParseMuteDuration(
+        string input,
+        out TimeSpan duration
+    )
+    {
+        duration = TimeSpan.Zero;
+        if (
+            string.IsNullOrWhiteSpace(input) ||
+            input.Length < 2 ||
+            !int.TryParse(
+                input[..^1],
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out int value
+            ) ||
+            value <= 0
+        )
+        {
+            return false;
+        }
+
+        try
+        {
+            duration = char.ToLowerInvariant(input[^1]) switch
+            {
+                's' => TimeSpan.FromSeconds(value),
+                'm' => TimeSpan.FromMinutes(value),
+                'h' => TimeSpan.FromHours(value),
+                'd' => TimeSpan.FromDays(value),
+                _ => TimeSpan.Zero
+            };
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        return duration > TimeSpan.Zero;
+    }
+
+    private static string GetDurationText(TimeSpan duration)
+    {
+        string text = Penalties.DescribeDuration(duration);
+        return text.StartsWith("for ", StringComparison.OrdinalIgnoreCase)
+            ? text[4..]
+            : text;
+    }
+
+    private static string GetPenaltyTimeLeft(Penalty penalty)
+    {
+        string text = penalty.DescribeRemaining(DateTime.UtcNow);
+        return text.StartsWith("for ", StringComparison.OrdinalIgnoreCase)
+            ? text[4..]
+            : text;
+    }
+
+    private static string BuildMuteNotice(Penalty penalty)
+    {
+        string reason = string.IsNullOrWhiteSpace(penalty.Reason)
+            ? "No reason provided."
+            : penalty.Reason;
+        return
+            $"You are muted. Reason: {reason}. " +
+            $"Time left: {GetPenaltyTimeLeft(penalty)}.";
     }
 
     [Command(
@@ -1546,7 +2532,6 @@ public sealed class DuelMatch
     public int CountdownGeneration;
     public bool ArenaInitialized;
     public bool Finished;
-    public int SharedMaxHealth;
     public string? ForfeitingPlayer;
     public MatchQueueType QueueType;
     public string Player1 = "";
@@ -1565,12 +2550,17 @@ public sealed class DuelMatch
     public bool Player2HadCardioCalibratorItem;
     public bool Player1HadBurstFireItem;
     public bool Player2HadBurstFireItem;
+    public bool Player1HadFortitudeItem;
+    public bool Player2HadFortitudeItem;
     public bool Player1HadHealthItem;
     public bool Player2HadHealthItem;
+    public bool Player1HadGlassCannonItem;
+    public bool Player2HadGlassCannonItem;
     public int Score1;
     public int Score2;
     public bool CombatActive;
 
+    public int ArenaIndex;
     public Vector3 ArenaPosition;
 }
 
@@ -1580,6 +2570,7 @@ public sealed class PlayerRecord
     public string LastKnownName { get; set; } = "";
     public string TimeZoneId { get; set; } = "UTC";
     public bool PingBasedMatchmakingEnabled { get; set; } = true;
+    public bool HandicapEnabled { get; set; }
 
     public int Wins { get; set; }
     public int Losses { get; set; }

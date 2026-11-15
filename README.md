@@ -10,6 +10,10 @@ Matchmaking can use server-reported ping readings from the server-console `statu
 
 When a match ends, only that duel's participants and its registered spectators are returned to Midtown spawn. A player who disconnects is removed with their hero and controlled pawns; leaving a duel records a forfeit. Server-info UI is restored after matches, and the duel countdown is private to the participants.
 
+Each active arena displays its current duel score above the arena, including players' guild tags. The final score remains visible until both participants have left, then the scoreboard is removed. New matches use only free arenas; queued matches wait for an arena, and practice-bot matches cannot start while all arenas are occupied.
+
+Server pausing is disabled at startup.
+
 ## Commands
 
 Commands are entered in chat with a leading `/`. `/help [page]` and `/commands [page]` show the in-game command guide.
@@ -21,16 +25,18 @@ Commands are entered in chat with a leading `/`. `/help [page]` and `/commands [
 | `/join <ranked\|unranked>` or `/queue <ranked\|unranked>` | Join ranked or unranked matchmaking. |
 | `/leave` | Leave your current queue. |
 | `/pbmm <on\|off>` | Toggle ping-based matchmaking for your queue matches. |
-| `/duel <player name>` | Immediately start an unranked duel with an online player. Both players must be available, unqueued, and not spectating. Exact names or unique prefixes are accepted. |
-| `/bot [easy\|medium\|hard]` | Start a practice-bot duel. Difficulty defaults to `hard`. |
+| `/handicap [on\|off]` | Toggle a saved 10-percentage-point reduction to your duel bullet lifesteal (50% to 40%). |
+| `/duel <player name> [arena name]` | Send an unranked duel request to an online player, optionally selecting an arena. Omit the arena for a random map. They must use `/accept` within 60 seconds; both players must be available, unqueued, and not spectating. Exact names or unique prefixes are accepted. |
+| `/accept` | Accept your pending duel request and play on the selected arena, or a random arena if none was selected. |
+| `/bot [easy\|medium\|hard]` | Start a practice-bot duel; the bot is named `Bot (difficulty)`. Difficulty defaults to `hard`. |
 | `/botspeed <units/sec>` | Set the practice bot's strafe speed from 100 to 2500 units/sec. |
 | `/spectate list` or `/spec list` | List active duels and their scores. |
 | `/spectate <player name>` or `/spec <player name>` | Spectate the active duel containing that player. Spectators are disarmed; they return to spawn when the match ends or when they use `/spawn`. |
-| `/arena` | List configured arena numbers and coordinates. |
-| `/arena <number>` | Teleport to a configured arena. |
+| `/arena` | List all configured arena names, numbers, and coordinates: clock, boxes, stocks, forest, railroad, bridge, cola, tunnel, purple, sewer, front_door, and clock2. |
+| `/arena <number|name>` | Teleport to a configured arena by number or name. |
 | `/tp <player name>` | Teleport to an online player. Requires `aimlock.teleport`. |
-| `/tp arena <number>` | Teleport to an arena. Requires `aimlock.teleport`. |
-| `/spawn` | Return to Midtown spawn after a two-second countdown. Using it during a duel forfeits the duel. |
+| `/tp arena <number|name>` | Teleport to an arena by number or name. Requires `aimlock.teleport`. |
+| `/spawn` | Return to spawn after a two-second countdown. Using it during a duel forfeits the duel. |
 
 ### Stats and leaderboards
 
@@ -50,13 +56,27 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 | `/scoreboard <on\|off>` | Show or hide your server-info UI. |
 | `/timezone` | Show your saved time zone. |
 | `/timezone <IANA ID>` | Set your time zone, for example `/timezone America/New_York`. IDs are case-insensitive; daylight-saving changes follow the selected zone's rules. |
-| `/tag <player name> <YT\|TTV\|OWNER\|STAFF\|AIMLOCK\|SUPPORTER\|off>` | Set or remove a player's overhead tag. Requires `aimlock.tags.manage`. |
+| `/tag <tagname>` | Equip an overhead tag an admin has granted you. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. |
+| `/tag list` | List the overhead tags you can use. |
+| `/tag give <player name> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. |
+| `/tag <player name> <tagname\|off>` | Directly set or remove a player's overhead tag. Requires `aimlock.tags.manage`. |
 | `/tagoff` | Hide your own overhead tag. |
 | `/tagon` | Show your overhead tag again. |
+| `/fixationmax` | Unlock and fully upgrade Fixation in Signature3, with a 999-stack cap for all online players. Requires `aimlock.fixation.max`. |
+
+### Chat moderation
+
+| Command | Description |
+| --- | --- |
+| `/kick <player name> [reason]` | Kick an online player by exact name or unique name prefix. Requires `admin.moderation.kick`. |
+| `/mute <player name> <duration> <reason>` | Mute a player from text chat for a finite duration such as `10m`, `2h`, or `1d`. Requires `aimlock.chat.mute`; the player privately sees the reason and time remaining when they try to chat. |
+| `/unmute <player name\|SteamID64>` | Lift an active text chat mute. Requires `aimlock.chat.mute`. |
+| `/ban <player name> <duration> <reason>` | Ban an online player for a finite duration such as `10m`, `2h`, or `1d`. Requires `admin.moderation.ban`; the ban immediately kicks them. |
+| `/unban <player name\|SteamID64>` | Lift an active ban by saved player name or SteamID64. Requires `admin.moderation.ban`. |
 
 ### Guilds
 
-Use `/guild help` for the short in-game reference. Guild tags are 1-4 characters; new guilds are invite-only by default.
+Use `/guild help` for the short in-game reference. Guild tags are 1-5 characters; new guilds are invite-only by default.
 
 | Command | Description |
 | --- | --- |

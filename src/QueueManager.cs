@@ -4,6 +4,7 @@ it parses the various commands, starting matches, finding other players, and set
 */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 
@@ -14,7 +15,18 @@ namespace aimLOCK;
 
 public class QueueManager
 {
+    private static readonly TimeSpan DuelRequestLifetime =
+        TimeSpan.FromSeconds(60);
+
     private readonly aimLOCK server;
+    private readonly Dictionary<uint, DuelRequest> pendingDuelRequests = new();
+
+    private sealed record DuelRequest(
+        CCitadelPlayerController Initiator,
+        CCitadelPlayerController Target,
+        int? ArenaIndex,
+        DateTimeOffset ExpiresAt
+    );
 
     public QueueManager(aimLOCK server)
     {
@@ -140,7 +152,11 @@ public class QueueManager
             return false;
         }
 
-        if (server.ActiveMatches.ContainsKey(bot.PlayerName))
+        if (
+            server.ActiveMatches.ContainsKey(
+                server.PlayerManager.GetMatchParticipantName(bot)
+            )
+        )
         {
             reply("The practice bot is already in a match.");
             return false;
@@ -157,34 +173,32 @@ public class QueueManager
             return false;
         }
 
-        StartMatch(player, bot, MatchQueueType.Unranked, arena);
+        int arenaIndex = Array.IndexOf(server.DuelLocations, arena);
+        if (!IsArenaAvailable(arenaIndex))
+        {
+            reply("All duel arenas are currently in use.");
+            return false;
+        }
+
+        if (!StartMatch(player, bot, MatchQueueType.Unranked, arenaIndex))
+            return false;
+
         reply(
             $"Starting Bot ({server.PlayerManager.GetPracticeBotDifficultyName(bot)}) match..."
         );
         return true;
     }
 
-    public bool StartDuelMatch(
+    public bool RequestDuelMatch(
         CCitadelPlayerController initiator,
         string targetName,
+        int? arenaIndex,
         Action<string> reply
     )
     {
         if (string.IsNullOrWhiteSpace(targetName))
         {
-            reply("Use /duel <player name>.");
-            return false;
-        }
-
-        if (server.PlayerManager.TryGetActiveMatch(initiator, out _))
-        {
-            reply("You are already in a match.");
-            return false;
-        }
-
-        if (server.PlayerManager.IsSpectating(initiator))
-        {
-            reply("Stop spectating before starting a duel.");
+            reply("Use /duel <player name> [arena name].");
             return false;
         }
 
@@ -233,6 +247,151 @@ public class QueueManager
         }
 
         var target = matches[0];
+        if (!ValidateDuelParticipants(initiator, target, reply))
+            return false;
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        PruneExpiredDuelRequests(now);
+        if (pendingDuelRequests.Values.Any(request =>
+            request.Initiator.EntityHandle == initiator.EntityHandle))
+        {
+            reply("You already have a pending duel request.");
+            return false;
+        }
+
+        if (pendingDuelRequests.TryGetValue(target.EntityHandle, out var existing))
+        {
+            reply(
+                $"{target.PlayerName} already has a pending duel request from {existing.Initiator.PlayerName}."
+            );
+            return false;
+        }
+
+        pendingDuelRequests[target.EntityHandle] = new DuelRequest(
+            initiator,
+            target,
+            arenaIndex,
+            now + DuelRequestLifetime
+        );
+        string arenaMessage = arenaIndex is int selectedArena
+            ? $" on arena {selectedArena + 1} ({aimLOCK.DuelArenaNames[selectedArena]})"
+            : "";
+        reply($"Duel request sent to {target.PlayerName}{arenaMessage}.");
+        Chat.PrintToChat(
+            target,
+            $"{initiator.PlayerName} challenged you to a duel{arenaMessage}. Use /accept within 60 seconds."
+        );
+        return true;
+    }
+
+    public bool AcceptDuelRequest(
+        CCitadelPlayerController target,
+        Action<string> reply
+    )
+    {
+        if (!pendingDuelRequests.TryGetValue(target.EntityHandle, out var request))
+        {
+            reply("You do not have a pending duel request.");
+            return false;
+        }
+
+        if (request.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            pendingDuelRequests.Remove(target.EntityHandle);
+            reply("That duel request has expired. Ask them to send another.");
+            return false;
+        }
+
+        if (
+            !request.Initiator.IsValid ||
+            !request.Target.IsValid ||
+            request.Target.EntityHandle != target.EntityHandle
+        )
+        {
+            pendingDuelRequests.Remove(target.EntityHandle);
+            reply("That duel request is no longer valid.");
+            return false;
+        }
+
+        if (!ValidateDuelParticipants(request.Initiator, target, reply))
+        {
+            pendingDuelRequests.Remove(target.EntityHandle);
+            return false;
+        }
+
+        int arenaIndex;
+        if (request.ArenaIndex is int requestedArena)
+        {
+            if (!IsArenaAvailable(requestedArena))
+            {
+                reply(
+                    $"Arena {requestedArena + 1} ({aimLOCK.DuelArenaNames[requestedArena]}) is currently in use. Try again when it is free."
+                );
+                return false;
+            }
+
+            arenaIndex = requestedArena;
+        }
+        else if (!TryGetAvailableArena(out arenaIndex))
+        {
+            reply("All duel arenas are currently in use. Try again when one is free.");
+            return false;
+        }
+
+        if (!StartMatch(
+            request.Initiator,
+            target,
+            MatchQueueType.Unranked,
+            arenaIndex
+        ))
+            return false;
+
+        pendingDuelRequests.Remove(target.EntityHandle);
+        string arenaMessage =
+            $" on arena {arenaIndex + 1} ({aimLOCK.DuelArenaNames[arenaIndex]})";
+        reply(
+            $"Accepted {request.Initiator.PlayerName}'s duel request{arenaMessage}. Starting match..."
+        );
+        Chat.PrintToChat(
+            request.Initiator,
+            $"{target.PlayerName} accepted your duel request{arenaMessage}. Starting match..."
+        );
+        return true;
+    }
+
+    public void OnPlayerDisconnect(CCitadelPlayerController player)
+    {
+        uint playerHandle = player.EntityHandle;
+        var requestsToRemove = pendingDuelRequests
+            .Where(request =>
+                request.Key == playerHandle ||
+                request.Value.Initiator.EntityHandle == playerHandle
+            )
+            .Select(request => request.Key)
+            .ToArray();
+
+        foreach (uint targetHandle in requestsToRemove)
+            pendingDuelRequests.Remove(targetHandle);
+    }
+
+    private bool ValidateDuelParticipants(
+        CCitadelPlayerController initiator,
+        CCitadelPlayerController target,
+        Action<string> reply
+    )
+    {
+        if (server.PlayerManager.TryGetActiveMatch(initiator, out _))
+        {
+            reply($"{initiator.PlayerName} is already in a match.");
+            return false;
+        }
+
+        if (server.PlayerManager.IsSpectating(initiator))
+        {
+            reply($"{initiator.PlayerName} must stop spectating before starting a duel.");
+            return false;
+        }
+
         if (server.PlayerManager.TryGetActiveMatch(target, out _))
         {
             reply($"{target.PlayerName} is already in a match.");
@@ -272,8 +431,22 @@ public class QueueManager
             return false;
         }
 
-        StartMatch(initiator, target, MatchQueueType.Unranked);
         return true;
+    }
+
+    private void PruneExpiredDuelRequests(DateTimeOffset now)
+    {
+        var requestsToRemove = pendingDuelRequests
+            .Where(request =>
+                request.Value.ExpiresAt <= now ||
+                !request.Value.Initiator.IsValid ||
+                !request.Value.Target.IsValid
+            )
+            .Select(request => request.Key)
+            .ToArray();
+
+        foreach (uint targetHandle in requestsToRemove)
+            pendingDuelRequests.Remove(targetHandle);
     }
 
     public void TryStartMatches()
@@ -286,10 +459,11 @@ public class QueueManager
     {
         var queue = GetQueue(queueType);
 
-        if (queue.Count < 2)
+        if (queue.Count < 2 || !TryGetAvailableArena(out int arenaIndex))
             return;
 
         var playersByName = Players.GetAll()
+            .Where(player => !player.IsBot)
             .GroupBy(player => player.PlayerName, StringComparer.OrdinalIgnoreCase)
             .Where(group => group.Count() == 1)
             .ToDictionary(
@@ -381,7 +555,8 @@ public class QueueManager
         if (selectedFirstIndex < 0 || player1 == null || player2 == null)
             return;
 
-        StartMatch(player1, player2, queueType);
+        if (!StartMatch(player1, player2, queueType, arenaIndex))
+            return;
 
         queue.RemoveAt(selectedSecondIndex);
         queue.RemoveAt(selectedFirstIndex);
@@ -389,13 +564,54 @@ public class QueueManager
         server.UIManager.RefreshHud();
     }
 
-    private void StartMatch(
+    public bool TryGetAvailableArena(out int arenaIndex)
+    {
+        var occupiedArenas = server.ActiveMatches.Values
+            .Select(match => match.ArenaIndex)
+            .ToHashSet();
+        int[] availableArenas = Enumerable
+            .Range(0, server.DuelLocations.Length)
+            .Where(index => !occupiedArenas.Contains(index))
+            .ToArray();
+        if (availableArenas.Length == 0)
+        {
+            arenaIndex = -1;
+            return false;
+        }
+
+        arenaIndex = availableArenas[
+            server.random.Next(availableArenas.Length)
+        ];
+        return true;
+    }
+
+    private bool IsArenaAvailable(int arenaIndex) =>
+        arenaIndex >= 0 &&
+        arenaIndex < server.DuelLocations.Length &&
+        !server.ActiveMatches.Values.Any(match =>
+            match.ArenaIndex == arenaIndex
+        );
+
+    private bool StartMatch(
         CCitadelPlayerController player1,
         CCitadelPlayerController player2,
         MatchQueueType queueType,
-        Vector3? selectedArena = null
+        int? selectedArenaIndex = null
     )
     {
+        int arenaIndex;
+        if (selectedArenaIndex is int selectedIndex)
+        {
+            if (!IsArenaAvailable(selectedIndex))
+                return false;
+
+            arenaIndex = selectedIndex;
+        }
+        else if (!TryGetAvailableArena(out arenaIndex))
+        {
+            return false;
+        }
+
         if (player1.IsBot)
             server.PlayerManager.ResetPracticeBotRecord(player1);
         if (player2.IsBot)
@@ -426,98 +642,52 @@ public class QueueManager
             $"Starting match: {player1.PlayerName} vs {player2.PlayerName}"
         );
 
-        Vector3 arena = selectedArena ?? server.DuelLocations[
-            server.random.Next(server.DuelLocations.Length)
-        ];
+        Vector3 arena = server.DuelLocations[arenaIndex];
+        string player1MatchKey =
+            server.PlayerManager.GetMatchParticipantName(player1);
+        string player2MatchKey =
+            server.PlayerManager.GetMatchParticipantName(player2);
+        var player1Pawn = player1.GetHeroPawn();
+        var player2Pawn = player2.GetHeroPawn();
+        bool HasItem(CCitadelPlayerPawn? pawn, string itemName) =>
+            pawn?.AbilityComponent?.FindAbilityByName(itemName) != null;
 
         var match = new DuelMatch
         {
-            Player1 = player1.PlayerName,
-            Player2 = player2.PlayerName,
-            Player1HadBulletLifestealItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_vampire"
-                ) != null,
-            Player2HadBulletLifestealItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_vampire"
-                ) != null,
-            Player1HadBlitzBulletsItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_blitz_bullets"
-                ) != null,
-            Player2HadBlitzBulletsItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_blitz_bullets"
-                ) != null,
-            Player1HadOpeningRoundsItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_pristine_emblem"
-                ) != null,
-            Player2HadOpeningRoundsItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_pristine_emblem"
-                ) != null,
-            Player1HadFleetfootItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_fleetfoot_boots"
-                ) != null,
-            Player2HadFleetfootItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_fleetfoot_boots"
-                ) != null,
-            Player1HadTitanicMagazineItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_titan_round"
-                ) != null,
-            Player2HadTitanicMagazineItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_titan_round"
-                ) != null,
-            Player1HadCardioCalibratorItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_cardio_calibrator"
-                ) != null,
-            Player2HadCardioCalibratorItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_cardio_calibrator"
-                ) != null,
-            Player1HadBurstFireItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_burst_fire"
-                ) != null,
-            Player2HadBurstFireItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_burst_fire"
-                ) != null,
-            Player1HadHealthItem =
-                player1.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_health"
-                ) != null,
-            Player2HadHealthItem =
-                player2.GetHeroPawn()?.AbilityComponent?.FindAbilityByName(
-                    "upgrade_health"
-                ) != null,
+            Player1 = player1MatchKey,
+            Player2 = player2MatchKey,
+            Player1HadBulletLifestealItem = HasItem(player1Pawn, "upgrade_vampire"),
+            Player2HadBulletLifestealItem = HasItem(player2Pawn, "upgrade_vampire"),
+            Player1HadBlitzBulletsItem = HasItem(player1Pawn, "upgrade_blitz_bullets"),
+            Player2HadBlitzBulletsItem = HasItem(player2Pawn, "upgrade_blitz_bullets"),
+            Player1HadOpeningRoundsItem = HasItem(player1Pawn, "upgrade_pristine_emblem"),
+            Player2HadOpeningRoundsItem = HasItem(player2Pawn, "upgrade_pristine_emblem"),
+            Player1HadFleetfootItem = HasItem(player1Pawn, "upgrade_fleetfoot_boots"),
+            Player2HadFleetfootItem = HasItem(player2Pawn, "upgrade_fleetfoot_boots"),
+            Player1HadTitanicMagazineItem = HasItem(player1Pawn, "upgrade_titan_round"),
+            Player2HadTitanicMagazineItem = HasItem(player2Pawn, "upgrade_titan_round"),
+            Player1HadCardioCalibratorItem = HasItem(player1Pawn, "upgrade_cardio_calibrator"),
+            Player2HadCardioCalibratorItem = HasItem(player2Pawn, "upgrade_cardio_calibrator"),
+            Player1HadBurstFireItem = HasItem(player1Pawn, "upgrade_burst_fire"),
+            Player2HadBurstFireItem = HasItem(player2Pawn, "upgrade_burst_fire"),
+            Player1HadFortitudeItem = HasItem(player1Pawn, "upgrade_chonky"),
+            Player2HadFortitudeItem = HasItem(player2Pawn, "upgrade_chonky"),
+            Player1HadHealthItem = HasItem(player1Pawn, "upgrade_health"),
+            Player2HadHealthItem = HasItem(player2Pawn, "upgrade_health"),
+            Player1HadGlassCannonItem = HasItem(player1Pawn, "upgrade_glass_cannon"),
+            Player2HadGlassCannonItem = HasItem(player2Pawn, "upgrade_glass_cannon"),
             QueueType = queueType,
             ArenaPosition = arena,
+            ArenaIndex = arenaIndex,
             Score1 = 0,
             Score2 = 0
         };
 
-        server.PendingRespawns.Remove(player1.PlayerName);
-        server.PendingRespawns.Remove(player2.PlayerName);
-        server.ActiveMatches[player1.PlayerName] = match;
-        server.ActiveMatches[player2.PlayerName] = match;
+        server.PendingRespawns.Remove(player1MatchKey);
+        server.PendingRespawns.Remove(player2MatchKey);
+        server.ActiveMatches[player1MatchKey] = match;
+        server.ActiveMatches[player2MatchKey] = match;
         server.UIManager.ShowMatchHud(match);
-
-        var preTeleportPawn1 = player1.GetHeroPawn();
-        var preTeleportPawn2 = player2.GetHeroPawn();
-        var respawnEffect1 = preTeleportPawn1 is { IsValid: true }
-            ? server.PlayerManager.BeginRespawnEffect(preTeleportPawn1)
-            : null;
-        var respawnEffect2 = preTeleportPawn2 is { IsValid: true }
-            ? server.PlayerManager.BeginRespawnEffect(preTeleportPawn2)
-            : null;
 
         void InitializeMatchInArena()
         {
@@ -530,9 +700,18 @@ public class QueueManager
             if (pawn1 == null || pawn2 == null)
             {
                 Console.WriteLine("A player pawn is null.");
-                server.PlayerManager.EndRespawnEffect(respawnEffect1);
-                server.PlayerManager.EndRespawnEffect(respawnEffect2);
+                match.Finished = true;
+                server.ActiveMatches.Remove(match.Player1);
+                server.ActiveMatches.Remove(match.Player2);
+                server.PendingRespawns.Remove(match.Player1);
+                server.PendingRespawns.Remove(match.Player2);
+                if (player1.IsValid)
+                    player1.ChangeTeam(2);
+                if (player2.IsValid)
+                    player2.ChangeTeam(2);
                 server.UIManager.RestoreHudAfterMatch(match);
+                server.PlayerManager.OnDuelMatchFinished(match);
+                server.Queue.TryStartMatches();
                 return;
             }
 
@@ -554,24 +733,14 @@ public class QueueManager
             );
             server.PlayerManager.ConfigurePracticeBotStrafe(pawn1, pawn2);
             server.UIManager.ShowMatchHud(match);
-            server.ScheduleOnce(1.5.Seconds(), () =>
-            {
-                server.PlayerManager.EndRespawnEffect(respawnEffect1);
-                server.PlayerManager.EndRespawnEffect(respawnEffect2);
-            });
 
-            server.PlayerManager.ApplyDuelHealthModifier(pawn1);
-            server.PlayerManager.ApplyDuelHealthModifier(pawn2);
-            match.SharedMaxHealth =
-                Math.Max(pawn1.GetMaxHealth(), pawn2.GetMaxHealth())
-                + (int)aimLOCK.DUEL_BONUS_HEALTH;
             server.PlayerManager.ApplyDuelMatchModifiers(
                 pawn1,
-                match.SharedMaxHealth
+                match.Player1HadGlassCannonItem
             );
             server.PlayerManager.ApplyDuelMatchModifiers(
                 pawn2,
-                match.SharedMaxHealth
+                match.Player2HadGlassCannonItem
             );
             server.PlayerManager.ApplyDuelBulletLifesteal(pawn1);
             server.PlayerManager.ApplyDuelBulletLifesteal(pawn2);
@@ -582,6 +751,8 @@ public class QueueManager
             }
 
             match.ArenaInitialized = true;
+            server.PlayerManager.ShowArenaScoreboard(match);
+            server.PlayerManager.StartDuelHealthCapMonitor(match);
             server.PlayerManager.SetMatchDisarmed(match, true);
             server.ScheduleOnce(0.25.Seconds(), () =>
             {
@@ -599,6 +770,7 @@ public class QueueManager
         }
 
         server.ScheduleOnce(2.Seconds(), InitializeMatchInArena);
+        return true;
     }
 
     private static int GetAllowedPingDifference(double oldestWaitSeconds)
@@ -675,6 +847,7 @@ public class QueueManager
         match.CombatActive = false;
         int countdownGeneration = ++match.CountdownGeneration;
 
+        server.PlayerManager.ResetMatchFixationStacks(match);
         server.PlayerManager.SetMatchDisarmed(match, true);
 
         PrintCountdownMessage(match, "[DUEL] 3...");

@@ -15,6 +15,12 @@ namespace aimLOCK;
 
 public class UIManager
 {
+    private readonly record struct ServerInfoCounts(
+        int PlayerCount,
+        int RankedInMatchCount,
+        int UnrankedInMatchCount
+    );
+
     private readonly aimLOCK server;
     private readonly HashSet<ulong> hiddenServerInfo = new();
 
@@ -38,7 +44,10 @@ public class UIManager
             ReconcileHud(controller));
     }
 
-    private void ReconcileHud(CCitadelPlayerController controller)
+    private void ReconcileHud(
+        CCitadelPlayerController controller,
+        ServerInfoCounts? counts = null
+    )
     {
         if (!controller.IsValid)
             return;
@@ -53,20 +62,26 @@ public class UIManager
         }
 
         HideMatchHud(controller);
-        ShowServerInfo(controller);
+        ShowServerInfo(controller, counts);
     }
 
     /* Server Information HUD */
 
-    private UINode Layout(ulong steamId)
+    private ServerInfoCounts GetServerInfoCounts(int playerCount)
     {
-        int playerCount = Players.GetAll().Count();
-        int rankedInMatchCount = server.ActiveMatches.Values
-            .Distinct()
-            .Count(match => match.QueueType == MatchQueueType.Ranked) * 2;
-        int unrankedInMatchCount = server.ActiveMatches.Values
-            .Distinct()
-            .Count(match => match.QueueType == MatchQueueType.Unranked) * 2;
+        var matches = server.ActiveMatches.Values.Distinct().ToArray();
+        return new ServerInfoCounts(
+            playerCount,
+            matches.Count(match => match.QueueType == MatchQueueType.Ranked) * 2,
+            matches.Count(match => match.QueueType == MatchQueueType.Unranked) * 2
+        );
+    }
+
+    private UINode Layout(ulong steamId, ServerInfoCounts counts)
+    {
+        int playerCount = counts.PlayerCount;
+        int rankedInMatchCount = counts.RankedInMatchCount;
+        int unrankedInMatchCount = counts.UnrankedInMatchCount;
         DateTimeOffset localNow = GetLocalTime(steamId);
         string currentDate = localNow.ToString(
             "MM/dd/yyyy",
@@ -141,11 +156,7 @@ public class UIManager
 
     private void ScheduleClockRefresh()
     {
-        server.ScheduleOnce(1.Seconds(), () =>
-        {
-            ScheduleClockRefresh();
-            RefreshClock();
-        });
+        server.ScheduleOnce(1.Seconds(), RefreshClock);
     }
 
     private DateTimeOffset GetLocalTime(ulong steamId)
@@ -156,6 +167,8 @@ public class UIManager
 
     private void RefreshClock()
     {
+        ScheduleClockRefresh();
+        DateTimeOffset utcNow = DateTimeOffset.UtcNow;
         foreach (var controller in Players.GetAll())
         {
             if (
@@ -166,7 +179,10 @@ public class UIManager
                 continue;
             }
 
-            DateTimeOffset localNow = GetLocalTime(controller.PlayerSteamId);
+            DateTimeOffset localNow = TimeZoneInfo.ConvertTime(
+                utcNow,
+                server.PlayerManager.GetTimeZone(controller.PlayerSteamId)
+            );
             UI.Panel("queuepanel").Set(
                 controller.Recipients,
                 "date",
@@ -182,8 +198,10 @@ public class UIManager
 
     public void RefreshHud()
     {
-        foreach (var controller in Players.GetAll())
-            ShowServerInfo(controller);
+        var players = Players.GetAll().ToArray();
+        var counts = GetServerInfoCounts(players.Length);
+        foreach (var controller in players)
+            ShowServerInfo(controller, counts);
     }
 
     public void RestoreHudAfterMatch(DuelMatch match)
@@ -208,12 +226,12 @@ public class UIManager
                 }
 
                 hiddenServerInfo.Remove(controller.PlayerSteamId);
-                HideMatchHud(controller);
-                ShowServerInfo(controller);
             }
 
-            foreach (var controller in Players.GetAll())
-                ReconcileHud(controller);
+            var players = Players.GetAll().ToArray();
+            var counts = GetServerInfoCounts(players.Length);
+            foreach (var controller in players)
+                ReconcileHud(controller, counts);
         }
 
         RestoreParticipants();
@@ -282,11 +300,15 @@ public class UIManager
 
     public void ShowQueuePanel(params dynamic?[] players)
     {
+        var counts = GetServerInfoCounts(Players.GetAll().Count());
         foreach (var player in players)
-            ShowServerInfo(player);
+            ShowServerInfo(player, counts);
     }
 
-    private void ShowServerInfo(dynamic? player)
+    private void ShowServerInfo(
+        dynamic? player,
+        ServerInfoCounts? counts = null
+    )
     {
         if (player == null)
             return;
@@ -305,7 +327,8 @@ public class UIManager
         }
 
         ulong steamId = player.PlayerSteamId;
-        panel.BuildLayout(player.Recipients, Layout(steamId));
+        var layoutCounts = counts ?? GetServerInfoCounts(Players.GetAll().Count());
+        panel.BuildLayout(player.Recipients, Layout(steamId, layoutCounts));
     }
 
     /* Duel Scoreboard */

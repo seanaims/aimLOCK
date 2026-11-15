@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -17,6 +18,7 @@ public sealed class LeaderboardManager
     private const float FontSize = 68f;
     private const float HeaderFontSize = 80f;
     private const float WorldUnitsPerPx = 0.3f;
+    private const float TopPanelsVerticalOffset = 2f * FontSize * WorldUnitsPerPx;
     private const float PreviousBodyColumnOffset = 160f;
     private const float PreviousHeaderColumnOffset = 80f;
     private const float BackgroundDepthOffset = -1f;
@@ -106,6 +108,22 @@ public sealed class LeaderboardManager
                     }
                 }
 
+                if (!isLeaderboardText && panelIndex == 3)
+                {
+                    for (
+                        int lineIndex = 0;
+                        lineIndex < EntriesPerLeaderboard;
+                        lineIndex++
+                    )
+                    {
+                        if (IsLegacyGuildEloRowText(entityPosition, lineIndex))
+                        {
+                            isLeaderboardText = true;
+                            break;
+                        }
+                    }
+                }
+
                 if (isLeaderboardText)
                     break;
             }
@@ -128,15 +146,13 @@ public sealed class LeaderboardManager
             1,
             (int)Math.Ceiling(longestLine / 2d) + BackgroundHorizontalPadding
         );
-        int backgroundLineCount = panels.Max(
-            panel => panel.Lines.Length
-        ) + BackgroundVerticalPadding;
+        int backgroundLineCount =
+            panels.Max(panel => panel.Lines.Length) + BackgroundVerticalPadding;
 
         for (int i = 0; i < bodyTexts.Length; i++)
         {
             LeaderboardPanelContent panel = panels[i];
             panelLineCounts[i] = panel.Lines.Length + 1;
-            string bodyMessage = BuildBodyMessage(panel.Lines);
             string headerMessage = BuildHeaderMessage(
                 panel.Title,
                 panelLineCounts[i]
@@ -149,6 +165,7 @@ public sealed class LeaderboardManager
                 panelLineCounts[i]
             );
 
+            string bodyMessage = BuildBodyMessage(panel.Lines);
             var bodyText = bodyTexts[i];
             if (bodyText is { IsValid: true })
             {
@@ -222,30 +239,6 @@ public sealed class LeaderboardManager
             var bodyText = bodyTexts[i];
             var headerText = headerTexts[i];
             var backgroundText = backgroundTexts[i];
-            if (i == 3)
-            {
-                if (
-                    bodyText is not { IsValid: true } ||
-                    headerText is not { IsValid: true } ||
-                    backgroundText is not { IsValid: true }
-                )
-                {
-                    allPanelsMoved = false;
-                }
-                else
-                {
-                    bodyText.Teleport(position: GetBodyPosition(i));
-                    headerText.Teleport(
-                        position: GetHeaderPosition(i, panelLineCounts[i])
-                    );
-                    backgroundText.Teleport(
-                        position: GetBackgroundPosition(i, panelLineCounts[i])
-                    );
-                }
-
-                continue;
-            }
-
             if (
                 bodyText is not { IsValid: true } ||
                 headerText is not { IsValid: true } ||
@@ -274,13 +267,35 @@ public sealed class LeaderboardManager
             backgroundTexts.All(text => text is { IsValid: true });
     }
 
-    private Vector3 GetPanelPosition(int index) =>
-        index == 3
+    private Vector3 GetPanelPosition(int index)
+    {
+        Vector3 panelPosition = index == 3
             ? new Vector3(88f, -9615f, position.Z)
             : position + new Vector3(PanelSpacing * index, 0f, 0f);
 
+        return index < 3
+            ? panelPosition + new Vector3(TopPanelsVerticalOffset, 0f, 0f)
+            : panelPosition;
+    }
+
     private Vector3 GetBodyPosition(int index) =>
         GetPanelPosition(index);
+
+    private bool IsLegacyGuildEloRowText(Vector3 entityPosition, int lineIndex)
+    {
+        Vector3 bodyPosition = GetBodyPosition(3);
+        float rowSpacing = FontSize * WorldUnitsPerPx;
+        float maxHalfWidth = rowSpacing * 50f;
+        float previousX = bodyPosition.X + rowSpacing * (lineIndex + 1);
+        float latestX = bodyPosition.X +
+            rowSpacing * 1.5f * (lineIndex + 1);
+        return Math.Abs(entityPosition.Z - bodyPosition.Z) <= 5f &&
+            Math.Abs(entityPosition.Y - bodyPosition.Y) <= maxHalfWidth &&
+            (
+                Math.Abs(entityPosition.X - previousX) <= 5f ||
+                Math.Abs(entityPosition.X - latestX) <= 5f
+            );
+    }
 
     private Vector3 GetHeaderPosition(int index, int lineCount) =>
         GetPreviousHeaderPosition(index, lineCount);
@@ -384,7 +399,7 @@ public sealed class LeaderboardManager
         {
             BuildWinRateMessage(winRateLeaders),
             BuildWinCountMessage(winLeaders),
-            BuildEloMessage(eloLeaders.ToArray()),
+            BuildEloMessage(eloLeaders),
             BuildGuildEloMessage()
         };
     }
@@ -452,9 +467,9 @@ public sealed class LeaderboardManager
     }
 
     private LeaderboardPanelContent BuildEloMessage(
-        RankedEloStats[] leaders)
+        IReadOnlyList<RankedEloStats> leaders)
     {
-        if (leaders.Length == 0)
+        if (leaders.Count == 0)
         {
             return new LeaderboardPanelContent(
                 "TOP RANKED ELO",
@@ -462,8 +477,8 @@ public sealed class LeaderboardManager
             );
         }
 
-        var lines = new string[leaders.Length];
-        for (int i = 0; i < leaders.Length; i++)
+        var lines = new string[leaders.Count];
+        for (int i = 0; i < leaders.Count; i++)
         {
             RankedEloStats player = leaders[i];
             lines[i] = string.Format(
@@ -483,7 +498,6 @@ public sealed class LeaderboardManager
     private LeaderboardPanelContent BuildGuildEloMessage()
     {
         var leaders = server.GuildManager.GetLeaderboardEntries()
-            .Where(guild => guild.MemberSteamIds.Length >= 4)
             .Select(guild => new
             {
                 Guild = guild,
@@ -502,7 +516,7 @@ public sealed class LeaderboardManager
         {
             return new LeaderboardPanelContent(
                 "TOP GUILD ELO",
-                new[] { "No guilds with 4+ members yet." }
+                new[] { "No guilds yet." }
             );
         }
 
@@ -515,18 +529,19 @@ public sealed class LeaderboardManager
                 entry.Guild.Tag,
                 StringComparison.Ordinal
             )
-                ? $"[{entry.Guild.Tag}]"
-                : $"{entry.Guild.Name} [{entry.Guild.Tag}]";
+                ? string.Empty
+                : $"{entry.Guild.Name} ";
+            string tag = $"[{entry.Guild.Tag}]";
             int averageRating = (int)Math.Round(
                 entry.AverageRating,
                 MidpointRounding.AwayFromZero
             );
-            lines[i] = string.Format(
+            string rating = string.Format(
                 CultureInfo.InvariantCulture,
-                "{0} - {1} Elo",
-                guildName,
+                " - {0} Elo",
                 averageRating
             );
+            lines[i] = guildName + tag + rating;
         }
 
         return new LeaderboardPanelContent("TOP GUILD ELO", lines);
@@ -585,8 +600,5 @@ public sealed class LeaderboardManager
 
     private sealed record LeaderboardPosition(float X, float Y, float Z);
 
-    private sealed record LeaderboardPanelContent(
-        string Title,
-        string[] Lines
-    );
+    private sealed record LeaderboardPanelContent(string Title, string[] Lines);
 }
