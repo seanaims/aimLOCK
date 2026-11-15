@@ -38,6 +38,23 @@ Commands are entered in chat with a leading `/`. `/help [page]` and `/commands [
 | `/tp arena <number|name>` | Teleport to an arena by number or name. Requires `aimlock.teleport`. |
 | `/spawn` | Return to spawn after a two-second countdown. Using it during a duel forfeits the duel. |
 
+### Arenas
+
+| Number | Arena name |
+| --- | --- |
+| 1 | `clock` |
+| 2 | `boxes` |
+| 3 | `stocks` |
+| 4 | `forest` |
+| 5 | `railroad` |
+| 6 | `bridge` |
+| 7 | `cola` |
+| 8 | `tunnel` |
+| 9 | `purple` |
+| 10 | `sewer` |
+| 11 | `front_door` |
+| 12 | `clock2` |
+
 ### Stats and leaderboards
 
 | Command | Description |
