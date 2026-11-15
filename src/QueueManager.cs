@@ -49,6 +49,12 @@ public class QueueManager
             return;
         }
 
+        if (server.PlayerManager.TryGetActiveMatch(controller, out _))
+        {
+            caller.Reply("You are already in a match.");
+            return;
+        }
+
         bool alreadyQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
             .Any(x => x.SteamId == controller.PlayerSteamId);
@@ -496,13 +502,6 @@ public class QueueManager
                     usePingMatching
                 )
                 {
-                    if (!server.PingManager.TryGetPing(firstPlayer, out int firstPing)
-                        || !server.PingManager.TryGetPing(secondPlayer, out int secondPing))
-                    {
-                        continue;
-                    }
-
-                    pingDifference = Math.Abs((long)firstPing - secondPing);
                     DateTimeOffset oldestEntry = firstQueued.Entry.EnqueuedAt
                         <= secondQueued.Entry.EnqueuedAt
                             ? firstQueued.Entry.EnqueuedAt
@@ -510,8 +509,22 @@ public class QueueManager
                     int allowedDifference = GetAllowedPingDifference(
                         Math.Max(0d, (now - oldestEntry).TotalSeconds)
                     );
-                    if (pingDifference > allowedDifference)
+
+                    int firstPing = 0;
+                    int secondPing = 0;
+                    bool hasPings =
+                        server.PingManager.TryGetPing(firstPlayer, out firstPing) &&
+                        server.PingManager.TryGetPing(secondPlayer, out secondPing);
+                    if (hasPings)
+                    {
+                        pingDifference = Math.Abs((long)firstPing - secondPing);
+                        if (pingDifference > allowedDifference)
+                            continue;
+                    }
+                    else if (allowedDifference != int.MaxValue)
+                    {
                         continue;
+                    }
                 }
 
                 DateTimeOffset pairOldestEntry = firstQueued.Entry.EnqueuedAt
@@ -548,6 +561,7 @@ public class QueueManager
         queue.RemoveAt(selectedFirstIndex);
 
         server.UIManager.RefreshHud();
+        TryStartMatch(queueType);
     }
 
     public bool TryGetAvailableArena(out int arenaIndex)
@@ -677,11 +691,16 @@ public class QueueManager
 
         void InitializeMatchInArena()
         {
-            player1.ChangeTeam(2);
-            player2.ChangeTeam(3);
+            if (match.Finished)
+                return;
 
-            var pawn1 = player1.GetHeroPawn();
-            var pawn2 = player2.GetHeroPawn();
+            if (player1.IsValid)
+                player1.ChangeTeam(2);
+            if (player2.IsValid)
+                player2.ChangeTeam(3);
+
+            var pawn1 = player1.IsValid ? player1.GetHeroPawn() : null;
+            var pawn2 = player2.IsValid ? player2.GetHeroPawn() : null;
 
             if (pawn1 == null || pawn2 == null)
             {
