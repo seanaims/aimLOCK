@@ -106,94 +106,82 @@ public sealed class PlayerTagManager
 
     public void Initialize()
     {
-        MigrateKnownPlayerNames();
+        MigrateNameKeyedTags();
         EnsureStaleTagEntitiesRemoved();
 
         foreach (var player in Players.GetAll())
             RefreshPlayerTag(player);
     }
 
-    public void SetTag(string playerName, PlayerTag tag)
+    public void SetTag(ulong steamId, PlayerTag tag)
     {
-        string normalizedName = NormalizePlayerName(playerName);
-        var onlinePlayers = Players.GetAll().ToArray();
-        ulong[] steamIds = ResolvePlayerSteamIds(normalizedName, onlinePlayers);
-        var updatedTags = new Dictionary<string, PlayerTag>(
-            tags,
-            StringComparer.OrdinalIgnoreCase
-        )
+        var updatedStableTags = new Dictionary<ulong, PlayerTag>(stableTags)
         {
-            [normalizedName] = tag
+            [steamId] = tag
         };
-        var updatedStableTags = new Dictionary<ulong, PlayerTag>(stableTags);
-        foreach (ulong steamId in steamIds)
-            updatedStableTags[steamId] = tag;
 
-        SaveTags(updatedTags);
         SaveStableTags(updatedStableTags);
-        ReplaceTags(updatedTags);
         ReplaceStableTags(updatedStableTags);
-        RefreshOnlinePlayers(normalizedName, onlinePlayers);
+        RefreshOnlinePlayer(steamId);
     }
 
-    public void RemoveTag(string playerName)
+    public bool RemoveTag(ulong steamId)
     {
-        string normalizedName = NormalizePlayerName(playerName);
-        var onlinePlayers = Players.GetAll().ToArray();
-        ulong[] steamIds = ResolvePlayerSteamIds(normalizedName, onlinePlayers);
-        var updatedTags = new Dictionary<string, PlayerTag>(
-            tags,
-            StringComparer.OrdinalIgnoreCase
-        );
-        bool removedNameTag = updatedTags.Remove(normalizedName);
-
         var updatedStableTags = new Dictionary<ulong, PlayerTag>(stableTags);
-        bool removedStableTag = false;
-        foreach (ulong steamId in steamIds)
-            removedStableTag |= updatedStableTags.Remove(steamId);
-
-        if (!removedNameTag && !removedStableTag)
-        {
-            RefreshOnlinePlayers(normalizedName, onlinePlayers);
-            return;
-        }
-
-        SaveTags(updatedTags);
-        SaveStableTags(updatedStableTags);
-        ReplaceTags(updatedTags);
-        ReplaceStableTags(updatedStableTags);
-        RefreshOnlinePlayers(normalizedName, onlinePlayers);
-    }
-
-    public bool GrantTag(string playerName, PlayerTag tag)
-    {
-        string normalizedName = NormalizePlayerName(playerName);
-        var onlinePlayers = Players.GetAll().ToArray();
-        ulong[] steamIds = ResolvePlayerSteamIds(normalizedName, onlinePlayers)
-            .Where(steamId => steamId != ulong.MaxValue)
-            .ToArray();
-        if (steamIds.Length == 0)
+        if (!updatedStableTags.Remove(steamId))
             return false;
 
+        SaveStableTags(updatedStableTags);
+        ReplaceStableTags(updatedStableTags);
+        RefreshOnlinePlayer(steamId);
+        return true;
+    }
+
+    public void GrantTag(ulong steamId, PlayerTag tag)
+    {
         var updatedGrants = grantedTags.ToDictionary(
             entry => entry.Key,
             entry => new HashSet<PlayerTag>(entry.Value)
         );
-        foreach (ulong steamId in steamIds)
+        if (!updatedGrants.TryGetValue(steamId, out var playerTags))
         {
-            if (!updatedGrants.TryGetValue(steamId, out var playerTags))
-            {
-                playerTags = new HashSet<PlayerTag>();
-                updatedGrants[steamId] = playerTags;
-            }
-
-            playerTags.Add(tag);
+            playerTags = new HashSet<PlayerTag>();
+            updatedGrants[steamId] = playerTags;
         }
+
+        playerTags.Add(tag);
+        SaveGrantedTags(updatedGrants);
+        ReplaceGrantedTags(updatedGrants);
+    }
+
+    public bool RevokeTag(ulong steamId, PlayerTag tag)
+    {
+        var updatedGrants = grantedTags.ToDictionary(
+            entry => entry.Key,
+            entry => new HashSet<PlayerTag>(entry.Value)
+        );
+        if (
+            !updatedGrants.TryGetValue(steamId, out var playerTags) ||
+            !playerTags.Remove(tag)
+        )
+        {
+            return false;
+        }
+
+        if (playerTags.Count == 0)
+            updatedGrants.Remove(steamId);
 
         SaveGrantedTags(updatedGrants);
         ReplaceGrantedTags(updatedGrants);
+
+        if (stableTags.TryGetValue(steamId, out PlayerTag equippedTag) && equippedTag == tag)
+            RemoveTag(steamId);
+
         return true;
     }
+
+    public PlayerTag? GetTag(ulong steamId) =>
+        stableTags.TryGetValue(steamId, out PlayerTag tag) ? tag : null;
 
     public bool CanUseTag(ulong steamId, PlayerTag tag) =>
         grantedTags.TryGetValue(steamId, out var playerTags) &&
@@ -234,28 +222,14 @@ public sealed class PlayerTagManager
 
     public void SetTagVisibility(CCitadelPlayerController player, bool visible)
     {
-        string playerName = NormalizePlayerName(player.PlayerName);
-        var updatedHiddenTags = new HashSet<string>(
-            hiddenTags,
-            StringComparer.OrdinalIgnoreCase
-        );
         var updatedHiddenSteamIds = new HashSet<ulong>(hiddenSteamIds);
 
         if (visible)
-        {
-            updatedHiddenTags.Remove(playerName);
             updatedHiddenSteamIds.Remove(player.PlayerSteamId);
-        }
         else
-        {
             updatedHiddenSteamIds.Add(player.PlayerSteamId);
-        }
 
-        SaveHiddenTags(updatedHiddenTags);
         SaveHiddenSteamIds(updatedHiddenSteamIds);
-        hiddenTags.Clear();
-        foreach (string hiddenPlayerName in updatedHiddenTags)
-            hiddenTags.Add(hiddenPlayerName);
         hiddenSteamIds.Clear();
         foreach (ulong hiddenSteamId in updatedHiddenSteamIds)
             hiddenSteamIds.Add(hiddenSteamId);
@@ -272,18 +246,11 @@ public sealed class PlayerTagManager
 
         EnsureStaleTagEntitiesRemoved();
         ulong steamId = player.PlayerSteamId;
-        string playerName = NormalizePlayerName(player.PlayerName);
-        MigratePlayerTagToStableId(playerName, steamId);
-        if (hiddenTags.Contains(playerName) && hiddenSteamIds.Add(steamId))
-            PersistHiddenSteamIds();
+        string playerName = player.PlayerName;
 
         if (
             hiddenSteamIds.Contains(steamId) ||
-            hiddenTags.Contains(playerName) ||
-            (
-                !stableTags.TryGetValue(steamId, out PlayerTag tag) &&
-                !tags.TryGetValue(playerName, out tag)
-            )
+            !stableTags.TryGetValue(steamId, out PlayerTag tag)
         )
         {
             RemoveTagEntity(steamId);
@@ -689,30 +656,22 @@ public sealed class PlayerTagManager
         return yaw < 0f ? yaw + 360f : yaw;
     }
 
-    private void RefreshOnlinePlayers(
-        string playerName,
-        IEnumerable<CCitadelPlayerController> onlinePlayers
-    )
+    private void RefreshOnlinePlayer(ulong steamId)
     {
-        var matchingPlayers = onlinePlayers
-            .Where(candidate => string.Equals(
-                NormalizePlayerName(candidate.PlayerName),
-                playerName,
-                StringComparison.OrdinalIgnoreCase
-            ))
-            .ToArray();
-
-        foreach (var player in matchingPlayers)
-            RefreshPlayerTag(player);
+        foreach (var player in Players.GetAll())
+        {
+            if (player.PlayerSteamId == steamId)
+                RefreshPlayerTag(player);
+        }
     }
 
-    private ulong[] ResolvePlayerSteamIds(
+    private ulong[] ResolveLegacyName(
         string playerName,
         IEnumerable<CCitadelPlayerController> onlinePlayers
     ) =>
         onlinePlayers
-            .Where(player => string.Equals(
-                NormalizePlayerName(player.PlayerName),
+            .Where(player => !player.IsBot && string.Equals(
+                player.PlayerName?.Trim(),
                 playerName,
                 StringComparison.OrdinalIgnoreCase
             ))
@@ -731,90 +690,83 @@ public sealed class PlayerTagManager
             .Distinct()
             .ToArray();
 
-    private void MigratePlayerTagToStableId(string playerName, ulong steamId)
+    /* One-time move of name-keyed tags to SteamIDs */
+
+    // Name-keyed tags let anyone take a tag by joining under its holder's name.
+    // Only names that exactly one known player has used are moved; the rest are dropped.
+    private void MigrateNameKeyedTags()
     {
-        if (stableTags.ContainsKey(steamId) ||
-            !tags.TryGetValue(playerName, out PlayerTag tag))
+        if (tags.Count == 0 && hiddenTags.Count == 0)
+            return;
+
+        var onlinePlayers = Players.GetAll().ToArray();
+        var updatedStableTags = new Dictionary<ulong, PlayerTag>(stableTags);
+        var updatedHiddenSteamIds = new HashSet<ulong>(hiddenSteamIds);
+
+        foreach (var entry in tags)
         {
+            ulong[] steamIds = ResolveLegacyName(entry.Key, onlinePlayers);
+            if (steamIds.Length != 1)
+            {
+                Console.WriteLine(
+                    $"Failed to migrate the {GetTagToken(entry.Value)} tag for \"{entry.Key}\": " +
+                    $"{steamIds.Length} players match that name. Set it again with /tag."
+                );
+                continue;
+            }
+
+            updatedStableTags.TryAdd(steamIds[0], entry.Value);
+        }
+
+        foreach (string playerName in hiddenTags)
+        {
+            ulong[] steamIds = ResolveLegacyName(playerName, onlinePlayers);
+            if (steamIds.Length == 1)
+                updatedHiddenSteamIds.Add(steamIds[0]);
+        }
+
+        try
+        {
+            BackUpLegacyFile(tagsFilePath);
+            BackUpLegacyFile(visibilityFilePath);
+            SaveStableTags(updatedStableTags);
+            SaveHiddenSteamIds(updatedHiddenSteamIds);
+            SaveTags(new Dictionary<string, PlayerTag>());
+            SaveHiddenTags(new HashSet<string>());
+        }
+        catch (IOException ex)
+        {
+            Console.WriteLine($"Failed to migrate name-keyed player tags: {ex}");
+            return;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.WriteLine($"Access denied migrating name-keyed player tags: {ex}");
             return;
         }
 
-        stableTags[steamId] = tag;
-        try
+        ReplaceStableTags(updatedStableTags);
+        hiddenSteamIds.Clear();
+        foreach (ulong steamId in updatedHiddenSteamIds)
+            hiddenSteamIds.Add(steamId);
+        tags.Clear();
+        hiddenTags.Clear();
+
+        Console.WriteLine("[aimLOCK] Overhead tags are now saved by SteamID. Current holders:");
+        foreach (var entry in stableTags)
         {
-            SaveStableTags(stableTags);
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine(
-                $"Failed to migrate the tag for SteamID {steamId}: {ex}"
-            );
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine(
-                $"Access denied migrating the tag for SteamID {steamId}: {ex}"
-            );
+            string name = server.PlayerRecords.TryGetValue(entry.Key, out var record)
+                ? record.LastKnownName
+                : "unknown";
+            Console.WriteLine($"[aimLOCK]   {entry.Key} ({name}): {GetTagToken(entry.Value)}");
         }
     }
 
-    private void MigrateKnownPlayerNames()
+    // The emptied file stays in place so MigrateLegacyFile never copies the old one back.
+    private static void BackUpLegacyFile(string path)
     {
-        var onlinePlayers = Players.GetAll().ToArray();
-        bool tagsChanged = false;
-        foreach (var entry in tags)
-        {
-            foreach (ulong steamId in ResolvePlayerSteamIds(entry.Key, onlinePlayers))
-            {
-                if (stableTags.ContainsKey(steamId))
-                    continue;
-
-                stableTags[steamId] = entry.Value;
-                tagsChanged = true;
-            }
-        }
-
-        if (tagsChanged)
-        {
-            try
-            {
-                SaveStableTags(stableTags);
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine($"Failed to migrate player tags: {ex}");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine($"Access denied migrating player tags: {ex}");
-            }
-        }
-
-        bool visibilityChanged = false;
-        foreach (string playerName in hiddenTags)
-        {
-            foreach (ulong steamId in ResolvePlayerSteamIds(playerName, onlinePlayers))
-                visibilityChanged |= hiddenSteamIds.Add(steamId);
-        }
-
-        if (visibilityChanged)
-            PersistHiddenSteamIds();
-    }
-
-    private void PersistHiddenSteamIds()
-    {
-        try
-        {
-            SaveHiddenSteamIds(hiddenSteamIds);
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to migrate hidden player tags: {ex}");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Access denied migrating hidden player tags: {ex}");
-        }
+        if (File.Exists(path))
+            File.Copy(path, $"{path}.migrated-{DateTime.UtcNow:yyyyMMdd-HHmmss}", overwrite: false);
     }
 
     private void RemoveTagEntity(ulong steamId)
@@ -881,13 +833,6 @@ public sealed class PlayerTagManager
         uint Color,
         float HorizontalOffset
     );
-
-    private void ReplaceTags(Dictionary<string, PlayerTag> updatedTags)
-    {
-        tags.Clear();
-        foreach (var entry in updatedTags)
-            tags[entry.Key] = entry.Value;
-    }
 
     private void ReplaceStableTags(Dictionary<ulong, PlayerTag> updatedTags)
     {

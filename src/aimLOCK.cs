@@ -765,7 +765,7 @@ public class aimLOCK : DeadworksPluginBase
             caller.Reply("/scoreboard <on|off> - Show or hide the server info UI.");
             caller.Reply("/timezone [IANA ID] - View or set your local time zone.");
             caller.Reply("/tag <tagname> - Equip a tag an admin granted you; /tag list shows your available tags.");
-            caller.Reply("/tag give <playername> <tagname> - Grant tag access (aimlock.tags.manage).");
+            caller.Reply("/tag give|revoke <player|SteamID64> <tagname> - Grant or take away tag access (aimlock.tags.manage).");
             caller.Reply("/tagoff - Hide your own overhead tag.");
             caller.Reply("/tagon - Show your overhead tag again.");
             caller.Reply("Moderation uses the Deadworks Admin plugin: /kick, /ban, /unban, /gag (text chat), /mute (voice), /who (permission required).");
@@ -1685,7 +1685,7 @@ public class aimLOCK : DeadworksPluginBase
 
     [Command(
         "tag",
-        Description = "Equip an admin-granted overhead tag or grant access: tag <tagname|list|give>.",
+        Description = "Equip an admin-granted overhead tag or manage access: tag <tagname|list|give|revoke>.",
         SuppressChat = true
     )]
     public void PlayerTagCommand(Caller caller, params string[] arguments)
@@ -1693,33 +1693,31 @@ public class aimLOCK : DeadworksPluginBase
         if (arguments.Length == 0)
         {
             caller.Reply(
-                "Use /tag <tagname> or /tag list. Admins: /tag give <player name> <tagname>."
+                "Use /tag <tagname> or /tag list. Admins: /tag give|revoke <player|SteamID64> <tagname>."
             );
             return;
         }
 
-        if (string.Equals(arguments[0], "give", StringComparison.OrdinalIgnoreCase))
+        bool isGive = string.Equals(arguments[0], "give", StringComparison.OrdinalIgnoreCase);
+        bool isRevoke = string.Equals(arguments[0], "revoke", StringComparison.OrdinalIgnoreCase);
+        if (isGive || isRevoke)
         {
             if (!caller.HasPermission("aimlock.tags.manage"))
             {
-                caller.Reply("Only admins can grant overhead tag access.");
+                caller.Reply("Only admins can change overhead tag access.");
                 return;
             }
 
-            if (
-                arguments.Length < 3 ||
-                string.IsNullOrWhiteSpace(string.Join(" ", arguments.Skip(1).Take(arguments.Length - 2)))
-            )
+            string targetName = arguments.Length < 3
+                ? ""
+                : string.Join(" ", arguments.Skip(1).Take(arguments.Length - 2)).Trim();
+            if (string.IsNullOrWhiteSpace(targetName))
             {
-                caller.Reply("Use /tag give <player name> <tagname>.");
+                caller.Reply($"Use /tag {arguments[0].ToLowerInvariant()} <player|SteamID64> <tagname>.");
                 return;
             }
 
-            string targetName = string.Join(
-                " ",
-                arguments.Skip(1).Take(arguments.Length - 2)
-            ).Trim();
-            if (!PlayerTagManager.TryParseTag(arguments[^1], out PlayerTag grantedTag))
+            if (!PlayerTagManager.TryParseTag(arguments[^1], out PlayerTag accessTag))
             {
                 caller.Reply(
                     "Choose a tag: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, or GUILDTAG."
@@ -1727,30 +1725,36 @@ public class aimLOCK : DeadworksPluginBase
                 return;
             }
 
-            try
+            if (!TryResolveTagTarget(targetName, out ulong targetId, out string targetLabel, out string error))
             {
-                if (!PlayerTagManager.GrantTag(targetName, grantedTag))
+                caller.Reply(error);
+                return;
+            }
+
+            string token = PlayerTagManager.GetTagToken(accessTag);
+            if (isGive)
+            {
+                if (TryChangeTags(caller, $"grant a tag to {targetLabel}", () =>
+                    PlayerTagManager.GrantTag(targetId, accessTag)))
                 {
                     caller.Reply(
-                        $"No online player or saved player record matches \"{targetName}\"."
+                        $"Granted {token} tag access to {targetLabel}. " +
+                        $"They can equip it with /tag {token}."
                     );
-                    return;
                 }
 
+                return;
+            }
+
+            bool revoked = false;
+            if (TryChangeTags(caller, $"revoke a tag from {targetLabel}", () =>
+                revoked = PlayerTagManager.RevokeTag(targetId, accessTag)))
+            {
                 caller.Reply(
-                    $"Granted {PlayerTagManager.GetTagToken(grantedTag)} tag access to {targetName}. " +
-                    $"They can equip it with /tag {PlayerTagManager.GetTagToken(grantedTag)}."
+                    revoked
+                        ? $"Revoked {token} tag access from {targetLabel}."
+                        : $"{targetLabel} does not have {token} tag access."
                 );
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine($"Failed to grant a tag to {targetName}: {ex}");
-                caller.Reply("Could not save the tag grant.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine($"Access denied granting a tag to {targetName}: {ex}");
-                caller.Reply("Could not save the tag grant.");
             }
 
             return;
@@ -1783,24 +1787,10 @@ public class aimLOCK : DeadworksPluginBase
 
             if (string.Equals(arguments[0], "off", StringComparison.OrdinalIgnoreCase))
             {
-                try
+                if (TryChangeTags(caller, $"remove the tag for {player.PlayerName}", () =>
+                    PlayerTagManager.RemoveTag(player.PlayerSteamId)))
                 {
-                    PlayerTagManager.RemoveTag(player.PlayerName);
                     caller.Reply("Your overhead tag was removed.");
-                }
-                catch (IOException ex)
-                {
-                    Console.WriteLine(
-                        $"Failed to remove tag for {player.PlayerName}: {ex}"
-                    );
-                    caller.Reply("Could not save the tag change.");
-                }
-                catch (UnauthorizedAccessException ex)
-                {
-                    Console.WriteLine(
-                        $"Access denied removing tag for {player.PlayerName}: {ex}"
-                    );
-                    caller.Reply("Could not save the tag change.");
                 }
 
                 return;
@@ -1831,26 +1821,12 @@ public class aimLOCK : DeadworksPluginBase
                 return;
             }
 
-            try
+            if (TryChangeTags(caller, $"set the tag for {player.PlayerName}", () =>
+                PlayerTagManager.SetTag(player.PlayerSteamId, ownTag)))
             {
-                PlayerTagManager.SetTag(player.PlayerName, ownTag);
                 caller.Reply(
                     $"Your overhead tag is now {PlayerTagManager.GetTagToken(ownTag)}."
                 );
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine(
-                    $"Failed to set tag for {player.PlayerName}: {ex}"
-                );
-                caller.Reply("Could not save the tag change.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine(
-                    $"Access denied setting tag for {player.PlayerName}: {ex}"
-                );
-                caller.Reply("Could not save the tag change.");
             }
 
             return;
@@ -1864,49 +1840,47 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        string normalizedName = string.Join(
+        string lookup = string.Join(
             " ",
             arguments.Take(arguments.Length - 1)
         ).Trim();
         string tag = arguments[^1];
-        if (string.IsNullOrWhiteSpace(normalizedName))
+        if (string.IsNullOrWhiteSpace(lookup))
         {
-            caller.Reply("A player name is required.");
+            caller.Reply("A player name or SteamID64 is required.");
             return;
         }
 
-        if (string.Equals(tag, "off", StringComparison.OrdinalIgnoreCase))
-        {
-            try
-            {
-                PlayerTagManager.RemoveTag(normalizedName);
-                caller.Reply($"Removed the overhead tag for {normalizedName}.");
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine($"Failed to remove tag for {normalizedName}: {ex}");
-                caller.Reply("Could not save the tag change.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine($"Access denied removing tag for {normalizedName}: {ex}");
-                caller.Reply("Could not save the tag change.");
-            }
-
-            return;
-        }
-
-        if (!PlayerTagManager.TryParseTag(tag, out PlayerTag playerTag))
+        bool removing = string.Equals(tag, "off", StringComparison.OrdinalIgnoreCase);
+        PlayerTag playerTag = default;
+        if (!removing && !PlayerTagManager.TryParseTag(tag, out playerTag))
         {
             caller.Reply(
-                "Use /tag <playername> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG|off>."
+                "Use /tag <player|SteamID64> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG|off>."
             );
             return;
         }
 
-        try
+        if (!TryResolveTagTarget(lookup, out ulong steamId, out string label, out string resolveError))
         {
-            PlayerTagManager.SetTag(normalizedName, playerTag);
+            caller.Reply(resolveError);
+            return;
+        }
+
+        if (removing)
+        {
+            if (TryChangeTags(caller, $"remove the tag for {label}", () =>
+                PlayerTagManager.RemoveTag(steamId)))
+            {
+                caller.Reply($"Removed the overhead tag for {label}.");
+            }
+
+            return;
+        }
+
+        if (TryChangeTags(caller, $"set the tag for {label}", () =>
+            PlayerTagManager.SetTag(steamId, playerTag)))
+        {
             string displayTag = playerTag == PlayerTag.Aimlock
                 ? "aimlock.xyz"
                 : playerTag == PlayerTag.Supporter
@@ -1914,18 +1888,88 @@ public class aimLOCK : DeadworksPluginBase
                     : playerTag == PlayerTag.GuildTag
                         ? "guild tag"
                         : $"[{PlayerTagManager.GetTagToken(playerTag)}]";
-            caller.Reply($"Set the overhead tag for {normalizedName} to {displayTag}.");
+            caller.Reply($"Set the overhead tag for {label} to {displayTag}.");
+        }
+    }
+
+    // Exactly one online player by full name, or a SteamID64 for anyone else.
+    private bool TryResolveTagTarget(
+        string lookup,
+        out ulong steamId,
+        out string label,
+        out string error
+    )
+    {
+        steamId = 0;
+        label = lookup;
+        error = "";
+
+        CCitadelPlayerController[] matches = Players.GetAll()
+            .Where(player =>
+                player.IsValid &&
+                !player.IsBot &&
+                string.Equals(
+                    player.PlayerName?.Trim(),
+                    lookup,
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            .ToArray();
+        if (matches.Length == 1)
+        {
+            steamId = matches[0].PlayerSteamId;
+            label = matches[0].PlayerName;
+            return true;
+        }
+
+        if (matches.Length > 1)
+        {
+            error = $"More than one online player is named \"{lookup}\"; use their SteamID64.";
+            return false;
+        }
+
+        if (
+            lookup.Length == 17 &&
+            ulong.TryParse(
+                lookup,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out ulong parsedId
+            ) &&
+            parsedId >= 76561197960265728UL
+        )
+        {
+            steamId = parsedId;
+            label = PlayerRecords.TryGetValue(parsedId, out var record) &&
+                !string.IsNullOrWhiteSpace(record.LastKnownName)
+                    ? $"{record.LastKnownName} ({parsedId})"
+                    : lookup;
+            return true;
+        }
+
+        error = $"No online player is named \"{lookup}\". For offline players, use their SteamID64.";
+        return false;
+    }
+
+    private static bool TryChangeTags(Caller caller, string action, Action change)
+    {
+        try
+        {
+            change();
+            return true;
         }
         catch (IOException ex)
         {
-            Console.WriteLine($"Failed to set tag for {normalizedName}: {ex}");
+            Console.WriteLine($"Failed to {action}: {ex}");
             caller.Reply("Could not save the tag change.");
         }
         catch (UnauthorizedAccessException ex)
         {
-            Console.WriteLine($"Access denied setting tag for {normalizedName}: {ex}");
+            Console.WriteLine($"Access denied trying to {action}: {ex}");
             caller.Reply("Could not save the tag change.");
         }
+
+        return false;
     }
 
     private static string GetPenaltyTimeLeft(Penalty penalty)

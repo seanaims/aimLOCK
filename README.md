@@ -75,8 +75,9 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 | `/timezone <IANA ID>` | Set your time zone, for example `/timezone America/New_York`. IDs are case-insensitive; daylight-saving changes follow the selected zone's rules. |
 | `/tag <tagname>` | Equip an overhead tag an admin has granted you. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. |
 | `/tag list` | List the overhead tags you can use. |
-| `/tag give <player name> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. |
-| `/tag <player name> <tagname\|off>` | Directly set or remove a player's overhead tag. Requires `aimlock.tags.manage`. |
+| `/tag give <player name\|SteamID64> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. Names must match one online player exactly; use the SteamID64 for offline players. |
+| `/tag revoke <player name\|SteamID64> <tagname>` | Take away tag access, and remove the tag if they are wearing it. Requires `aimlock.tags.manage`. |
+| `/tag <player name\|SteamID64> <tagname\|off>` | Directly set or remove a player's overhead tag. Requires `aimlock.tags.manage`. |
 | `/tagoff` | Hide your own overhead tag. |
 | `/tagon` | Show your overhead tag again. |
 | `/fixationmax` | Unlock and fully upgrade Fixation in Signature3, with a 999-stack cap for all online players. Requires `aimlock.fixation.max`. |
@@ -87,7 +88,7 @@ Kicks, bans, and mutes use the Deadworks Admin plugin: `/kick`, `/ban`, `/unban`
 
 ### Guilds
 
-Use `/guild help` for the short in-game reference. Guild tags are 1-5 characters; new guilds are invite-only by default.
+Use `/guild help` for the short in-game reference. Guild tags are 1-5 letters or numbers, and staff tags such as OWNER, STAFF, YT and TTV are reserved; new guilds are invite-only by default.
 
 | Command | Description |
 | --- | --- |
