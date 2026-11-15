@@ -1103,7 +1103,12 @@ public class PlayerManager
     public string GetMatchParticipantName(CBasePlayerController player) =>
         practiceBots.TryGetValue(player.EntityHandle, out var bot)
             ? bot.MatchKey
-            : player is CCitadelPlayerController controller
+            : (
+                player as CCitadelPlayerController ??
+                Players.GetAll().FirstOrDefault(candidate =>
+                    candidate.EntityHandle == player.EntityHandle
+                )
+            ) is { } controller
                 ? controller.PlayerSteamId.ToString(CultureInfo.InvariantCulture)
                 : player.PlayerName;
 
