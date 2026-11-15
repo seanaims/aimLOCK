@@ -3978,42 +3978,31 @@ public class PlayerManager
         );
     }
 
+    public const string RecordsFileName = "records.json";
+    private static readonly string RecordsFilePath = JsonStore.PathFor(RecordsFileName);
+
     public void LoadRecords()
     {
-        try
-        {
-            const string recordFile = "aimlock_records.json";
-            if (!File.Exists(recordFile))
-                return;
+        // A file that fails to load is backed up and locked by JsonStore, so
+        // the next SaveRecords cannot overwrite it with an empty dictionary.
+        var loaded = JsonStore.Load(
+            RecordsFilePath,
+            () => new Dictionary<ulong, PlayerRecord>(),
+            PlayerRecordJsonOptions
+        );
 
-            string json = File.ReadAllText(recordFile);
-            var loaded = JsonSerializer.Deserialize<Dictionary<ulong, PlayerRecord>>(json);
+        server.PlayerRecords.Clear();
+        foreach (var pair in loaded)
+            server.PlayerRecords[pair.Key] = pair.Value;
 
-            if (loaded == null)
-                return;
-
-            server.PlayerRecords.Clear();
-            foreach (var pair in loaded)
-                server.PlayerRecords[pair.Key] = pair.Value;
-
-            Console.WriteLine($"Loaded {server.PlayerRecords.Count} player records.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Failed to load records: {ex}");
-        }
+        Console.WriteLine($"Loaded {server.PlayerRecords.Count} player records.");
     }
 
     private bool SaveRecords()
     {
         try
         {
-            string json = JsonSerializer.Serialize(
-                server.PlayerRecords,
-                PlayerRecordJsonOptions
-            );
-
-            File.WriteAllText("aimlock_records.json", json);
+            JsonStore.Save(RecordsFilePath, server.PlayerRecords, PlayerRecordJsonOptions);
             return true;
         }
         catch (Exception ex)

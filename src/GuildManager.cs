@@ -17,12 +17,8 @@ public sealed class GuildManager
     };
 
     private readonly object syncRoot = new();
-    private readonly string dataFilePath = Path.GetFullPath(
-        Path.Combine(
-            AppContext.BaseDirectory,
-            "aimlock_guilds.json"
-        )
-    );
+    public const string DataFileName = "guilds.json";
+    private readonly string dataFilePath = JsonStore.PathFor(DataFileName);
     private readonly RankedEloManager rankedElo;
     private List<GuildData> guilds;
 
@@ -146,6 +142,9 @@ public sealed class GuildManager
                 return $"The guild tag [{tag}] is already in use.";
 
             var updatedGuilds = CloneGuilds(guilds);
+            // A member may not also hold invites; leaving them in made
+            // LoadGuilds reject the whole file on the next start.
+            RemoveInvites(updatedGuilds, player.PlayerSteamId);
             updatedGuilds.Add(new GuildData
             {
                 Name = tag,
@@ -795,16 +794,30 @@ public sealed class GuildManager
         guilds = updatedGuilds;
     }
 
-    private List<GuildData> LoadGuilds()
-    {
-        if (!File.Exists(dataFilePath))
-            return new List<GuildData>();
+    private List<GuildData> LoadGuilds() =>
+        JsonStore.Load(
+            dataFilePath,
+            () => new List<GuildData>(),
+            JsonOptions,
+            ValidateGuilds
+        );
 
-        using var stream = File.OpenRead(dataFilePath);
-        List<GuildData> loadedGuilds =
-            JsonSerializer.Deserialize<List<GuildData>>(stream, JsonOptions)
-            ?? throw new InvalidDataException(
-                $"Guild data is empty or invalid: {dataFilePath}"
+    private static List<GuildData> ValidateGuilds(List<GuildData> loadedGuilds)
+    {
+        // Files written before the Create fix can contain invites for players
+        // who are already members. That's stale, not corrupt: drop them.
+        var allMemberIds = loadedGuilds
+            .SelectMany(guild => guild.Members)
+            .Select(member => member.SteamId)
+            .ToHashSet();
+        int staleInvites = 0;
+        foreach (GuildData guild in loadedGuilds)
+            staleInvites += guild.Invites.RemoveAll(
+                invite => allMemberIds.Contains(invite.SteamId)
+            );
+        if (staleInvites > 0)
+            Console.WriteLine(
+                $"[aimLOCK] Dropped {staleInvites} stale guild invite(s) for players already in a guild."
             );
 
         var identifiers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -864,29 +877,8 @@ public sealed class GuildManager
         return loadedGuilds;
     }
 
-    private void SaveGuilds(List<GuildData> updatedGuilds)
-    {
-        string? directory = Path.GetDirectoryName(dataFilePath);
-        if (string.IsNullOrWhiteSpace(directory))
-            throw new InvalidOperationException(
-                $"Could not determine the guild data directory: {dataFilePath}"
-            );
-        Directory.CreateDirectory(directory);
-
-        string temporaryPath = dataFilePath + ".tmp";
-        using (var stream = new FileStream(
-            temporaryPath,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None
-        ))
-        {
-            JsonSerializer.Serialize(stream, updatedGuilds, JsonOptions);
-            stream.Flush(true);
-        }
-
-        File.Move(temporaryPath, dataFilePath, overwrite: true);
-    }
+    private void SaveGuilds(List<GuildData> updatedGuilds) =>
+        JsonStore.Save(dataFilePath, updatedGuilds, JsonOptions);
 
     public sealed class GuildData
     {

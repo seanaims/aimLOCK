@@ -37,11 +37,8 @@ public sealed class LeaderboardManager
     };
 
     private readonly aimLOCK server;
-    private readonly string positionFilePath = Path.Combine(
-        AppContext.BaseDirectory,
-        "aimLOCK",
-        "leaderboard-position.json"
-    );
+    private readonly string positionFilePath =
+        JsonStore.PathFor("leaderboard-position.json");
 
     private Vector3 position;
     private readonly CPointWorldText?[] bodyTexts = new CPointWorldText?[4];
@@ -549,39 +546,25 @@ public sealed class LeaderboardManager
 
     private Vector3 LoadPosition()
     {
-        if (!File.Exists(positionFilePath))
-            return DefaultPosition;
-
-        string json = File.ReadAllText(positionFilePath);
-        var savedPosition = JsonSerializer.Deserialize<LeaderboardPosition>(json)
-            ?? throw new InvalidDataException(
-                $"Leaderboard position data is empty or invalid: {positionFilePath}"
-            );
-        var loadedPosition = new Vector3(
-            savedPosition.X,
-            savedPosition.Y,
-            savedPosition.Z
+        var saved = JsonStore.Load(
+            positionFilePath,
+            () => new LeaderboardPosition(DefaultPosition.X, DefaultPosition.Y, DefaultPosition.Z),
+            JsonOptions,
+            candidate =>
+            {
+                ValidatePosition(new Vector3(candidate.X, candidate.Y, candidate.Z));
+                return candidate;
+            }
         );
-        ValidatePosition(loadedPosition);
-        return loadedPosition;
+        return new Vector3(saved.X, saved.Y, saved.Z);
     }
 
-    private void SavePosition(Vector3 newPosition)
-    {
-        string directory = Path.GetDirectoryName(positionFilePath)
-            ?? throw new InvalidOperationException(
-                $"Could not determine the leaderboard position directory: {positionFilePath}"
-            );
-        Directory.CreateDirectory(directory);
-
-        string temporaryPath = positionFilePath + ".tmp";
-        string json = JsonSerializer.Serialize(
+    private void SavePosition(Vector3 newPosition) =>
+        JsonStore.Save(
+            positionFilePath,
             new LeaderboardPosition(newPosition.X, newPosition.Y, newPosition.Z),
             JsonOptions
         );
-        File.WriteAllText(temporaryPath, json);
-        File.Move(temporaryPath, positionFilePath, overwrite: true);
-    }
 
     private static void ValidatePosition(Vector3 candidate)
     {
