@@ -1295,7 +1295,7 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        if (ActiveMatches.TryGetValue(player.PlayerName, out var activeMatch))
+        if (PlayerManager.TryGetActiveMatch(player, out var activeMatch))
         {
             bool isBotMatch =
                 PlayerManager.FindMatchParticipant(activeMatch.Player1)?.IsBot == true ||
@@ -1310,7 +1310,9 @@ public class aimLOCK : DeadworksPluginBase
                     return;
 
                 if (
-                    PlayerManager.ForfeitMatch(player.PlayerName)
+                    PlayerManager.ForfeitMatch(
+                        PlayerManager.GetMatchParticipantName(player)
+                    )
                 )
                 {
                     UIManager.RestoreServerInfoAfterSpawn(player);
@@ -2266,7 +2268,7 @@ public enum MatchQueueType
     Unranked
 }
 
-public sealed record QueueEntry(string PlayerName)
+public sealed record QueueEntry(ulong SteamId)
 {
     public DateTimeOffset EnqueuedAt { get; init; } = DateTimeOffset.UtcNow;
 }

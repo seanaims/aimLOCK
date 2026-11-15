@@ -237,8 +237,8 @@ public class PlayerManager
     private readonly List<CBeam> practiceBotZoneBoundaryBeams = new();
     private readonly List<CBeam> duelArenaRadiusBeams = new();
     private readonly Vector3[] duelArenaSphereCenters;
-    private readonly Dictionary<string, (int ArenaIndex, bool IsInside)>
-        duelArenaBoundaryStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<ulong, (int ArenaIndex, bool IsInside)>
+        duelArenaBoundaryStates = new();
     private readonly Dictionary<string, TimeZoneInfo> resolvedTimeZones =
         new(StringComparer.Ordinal);
 
@@ -351,7 +351,7 @@ public class PlayerManager
             return;
         }
 
-        if (server.ActiveMatches.ContainsKey(player.PlayerName))
+        if (TryGetActiveMatch(player, out _))
         {
             reply("You are already in a match.");
             return;
@@ -359,9 +359,7 @@ public class PlayerManager
 
         bool alreadyQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
-            .Any(entry => StringComparer.OrdinalIgnoreCase.Equals(
-                entry.PlayerName,
-                player.PlayerName));
+            .Any(entry => entry.SteamId == player.PlayerSteamId);
         if (alreadyQueued)
         {
             reply("Leave your current queue with /leave before starting a bot match.");
@@ -770,7 +768,7 @@ public class PlayerManager
         return participant is { IsBot: true }
             ? GetPracticeBotDisplayName(participant) ?? participant.PlayerName
             : participant == null
-                ? participantName
+                ? GetOfflineParticipantName(participantName)
                 : server.GuildManager.FormatPlayerName(participant);
     }
 
@@ -848,7 +846,7 @@ public class PlayerManager
         )
             return true;
 
-        if (server.ActiveMatches.TryGetValue(player.PlayerName, out match!))
+        if (server.ActiveMatches.TryGetValue(GetMatchParticipantName(player), out match!))
             return true;
 
         match = null!;
@@ -911,10 +909,7 @@ public class PlayerManager
 
         if (
             server.RankedQueue.Concat(server.UnrankedQueue).Any(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    player.PlayerName
-                )
+                entry.SteamId == player.PlayerSteamId
             )
         )
         {
@@ -1019,7 +1014,7 @@ public class PlayerManager
     {
         var participant = FindMatchParticipant(participantName);
         if (participant == null)
-            return participantName;
+            return GetOfflineParticipantName(participantName);
 
         return GetPracticeBotDisplayName(participant) ??
             server.GuildManager.FormatPlayerName(participant);
@@ -1108,7 +1103,9 @@ public class PlayerManager
     public string GetMatchParticipantName(CBasePlayerController player) =>
         practiceBots.TryGetValue(player.EntityHandle, out var bot)
             ? bot.MatchKey
-            : player.PlayerName;
+            : player is CCitadelPlayerController controller
+                ? controller.PlayerSteamId.ToString(CultureInfo.InvariantCulture)
+                : player.PlayerName;
 
     public string? GetPracticeBotDisplayName(
         CBasePlayerController player
@@ -1153,13 +1150,26 @@ public class PlayerManager
         }
 
         return players.FirstOrDefault(player =>
+            !player.IsBot &&
             string.Equals(
-                player.PlayerName,
+                player.PlayerSteamId.ToString(CultureInfo.InvariantCulture),
                 participantName,
-                StringComparison.OrdinalIgnoreCase
+                StringComparison.Ordinal
             )
         );
     }
+
+    private string GetOfflineParticipantName(string participantName) =>
+        ulong.TryParse(
+            participantName,
+            NumberStyles.None,
+            CultureInfo.InvariantCulture,
+            out ulong steamId
+        ) &&
+        server.PlayerRecords.TryGetValue(steamId, out var record) &&
+        !string.IsNullOrWhiteSpace(record.LastKnownName)
+            ? record.LastKnownName
+            : participantName;
 
     private IEnumerable<CCitadelPlayerController> GetMatchParticipants(
         DuelMatch match
@@ -1459,7 +1469,7 @@ public class PlayerManager
 
         Vector3 position = pawn.Position;
         if (!duelArenaBoundaryStates.TryGetValue(
-            controller.PlayerName,
+            controller.PlayerSteamId,
             out var boundaryState
         ))
         {
@@ -1495,7 +1505,7 @@ public class PlayerManager
                 nearestArenaIndex,
                 nearestDistanceSquared <= interiorRadius * interiorRadius
             );
-            duelArenaBoundaryStates[controller.PlayerName] = boundaryState;
+            duelArenaBoundaryStates[controller.PlayerSteamId] = boundaryState;
         }
         else if (
             Vector3.DistanceSquared(
@@ -1504,7 +1514,7 @@ public class PlayerManager
             ) > DuelArenaOuterRadiusSquared
         )
         {
-            duelArenaBoundaryStates.Remove(controller.PlayerName);
+            duelArenaBoundaryStates.Remove(controller.PlayerSteamId);
             return null;
         }
 
@@ -1544,12 +1554,12 @@ public class PlayerManager
             nearestDistanceSquared > detectionRadius * detectionRadius
         )
         {
-            duelArenaBoundaryStates.Remove(player.PlayerName);
+            duelArenaBoundaryStates.Remove(player.PlayerSteamId);
             return;
         }
 
         float interiorRadius = arenaSphereRadius - DuelArenaPlayerMargin;
-        duelArenaBoundaryStates[player.PlayerName] = (
+        duelArenaBoundaryStates[player.PlayerSteamId] = (
             nearestArenaIndex,
             nearestDistanceSquared <= interiorRadius * interiorRadius
         );
@@ -2368,17 +2378,11 @@ public class PlayerManager
         string playerName = GetMatchParticipantName(controller);
         bool queueChanged =
             server.RankedQueue.RemoveAll(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    playerName
-                )
+                entry.SteamId == controller.PlayerSteamId
             ) > 0;
         queueChanged |=
             server.UnrankedQueue.RemoveAll(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    playerName
-                )
+                entry.SteamId == controller.PlayerSteamId
             ) > 0;
 
         server.PendingRespawns.Remove(playerName);
@@ -2396,7 +2400,7 @@ public class PlayerManager
         playersInsidePracticeBotZones.RemoveWhere(
             entry => entry.PlayerHandle == controller.EntityHandle
         );
-        duelArenaBoundaryStates.Remove(controller.PlayerName);
+        duelArenaBoundaryStates.Remove(controller.PlayerSteamId);
 
         if (
             TryGetActiveMatch(controller, out var match) &&
@@ -3539,7 +3543,7 @@ public class PlayerManager
         CCitadelPlayerController loser)
     {
         bool player1Won = StringComparer.OrdinalIgnoreCase.Equals(
-            winner.PlayerName,
+            GetMatchParticipantName(winner),
             match.Player1
         );
         CCitadelPlayerController player1 = player1Won ? winner : loser;

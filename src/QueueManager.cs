@@ -51,9 +51,7 @@ public class QueueManager
 
         bool alreadyQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
-            .Any(x => StringComparer.OrdinalIgnoreCase.Equals(
-                x.PlayerName,
-                controller.PlayerName));
+            .Any(x => x.SteamId == controller.PlayerSteamId);
 
         if (alreadyQueued)
         {
@@ -62,7 +60,7 @@ public class QueueManager
         }
 
         var queue = GetQueue(queueType);
-        queue.Add(new QueueEntry(controller.PlayerName));
+        queue.Add(new QueueEntry(controller.PlayerSteamId));
 
         server.UIManager.RefreshHud();
 
@@ -88,8 +86,7 @@ public class QueueManager
             return;
 
         var player = server.RankedQueue.FirstOrDefault(x =>
-            StringComparer.OrdinalIgnoreCase.Equals(
-                x.PlayerName, controller.PlayerName));
+            x.SteamId == controller.PlayerSteamId);
 
         if (player != null)
         {
@@ -98,8 +95,7 @@ public class QueueManager
         else
         {
             player = server.UnrankedQueue.FirstOrDefault(x =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    x.PlayerName, controller.PlayerName));
+                x.SteamId == controller.PlayerSteamId);
             if (player == null)
             {
                 caller.Reply("You are not currently in a queue.");
@@ -146,7 +142,7 @@ public class QueueManager
         Action<string> reply
     )
     {
-        if (server.ActiveMatches.ContainsKey(player.PlayerName))
+        if (server.PlayerManager.TryGetActiveMatch(player, out _))
         {
             reply("You are already in a match.");
             return false;
@@ -164,9 +160,7 @@ public class QueueManager
 
         bool alreadyQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
-            .Any(entry => StringComparer.OrdinalIgnoreCase.Equals(
-                entry.PlayerName,
-                player.PlayerName));
+            .Any(entry => entry.SteamId == player.PlayerSteamId);
         if (alreadyQueued)
         {
             reply("Leave your current queue with /leave before starting a bot match.");
@@ -407,14 +401,8 @@ public class QueueManager
         bool eitherQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
             .Any(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    initiator.PlayerName
-                ) ||
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    target.PlayerName
-                )
+                entry.SteamId == initiator.PlayerSteamId ||
+                entry.SteamId == target.PlayerSteamId
             );
         if (eitherQueued)
         {
@@ -462,20 +450,18 @@ public class QueueManager
         if (queue.Count < 2 || !TryGetAvailableArena(out int arenaIndex))
             return;
 
-        var playersByName = Players.GetAll()
+        var playersBySteamId = Players.GetAll()
             .Where(player => !player.IsBot)
-            .GroupBy(player => player.PlayerName, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() == 1)
+            .GroupBy(player => player.PlayerSteamId)
             .ToDictionary(
                 group => group.Key,
-                group => group.Single(),
-                StringComparer.OrdinalIgnoreCase
+                group => group.First()
             );
         var queuedPlayers = queue
             .Select((entry, index) => new QueuedPlayer(
                 entry,
                 index,
-                playersByName.TryGetValue(entry.PlayerName, out var player)
+                playersBySteamId.TryGetValue(entry.SteamId, out var player)
                     ? player
                     : null
             ))
