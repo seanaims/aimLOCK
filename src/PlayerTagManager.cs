@@ -174,14 +174,17 @@ public sealed class PlayerTagManager
         SaveGrantedTags(updatedGrants);
         ReplaceGrantedTags(updatedGrants);
 
-        if (stableTags.TryGetValue(steamId, out PlayerTag equippedTag) && equippedTag == tag)
+        if (
+            stableTags.TryGetValue(steamId, out PlayerTag equippedTag) &&
+            equippedTag == tag
+        )
+        {
             RemoveTag(steamId);
+        }
 
         return true;
     }
 
-    public PlayerTag? GetTag(ulong steamId) =>
-        stableTags.TryGetValue(steamId, out PlayerTag tag) ? tag : null;
 
     public bool CanUseTag(ulong steamId, PlayerTag tag) =>
         grantedTags.TryGetValue(steamId, out var playerTags) &&
@@ -690,10 +693,8 @@ public sealed class PlayerTagManager
             .Distinct()
             .ToArray();
 
-    /* One-time move of name-keyed tags to SteamIDs */
+    /* Name-keyed tag migration */
 
-    // Name-keyed tags let anyone take a tag by joining under its holder's name.
-    // Only names that exactly one known player has used are moved; the rest are dropped.
     private void MigrateNameKeyedTags()
     {
         if (tags.Count == 0 && hiddenTags.Count == 0)
@@ -758,15 +759,22 @@ public sealed class PlayerTagManager
             string name = server.PlayerRecords.TryGetValue(entry.Key, out var record)
                 ? record.LastKnownName
                 : "unknown";
-            Console.WriteLine($"[aimLOCK]   {entry.Key} ({name}): {GetTagToken(entry.Value)}");
+            Console.WriteLine(
+                $"[aimLOCK]   {entry.Key} ({name}): {GetTagToken(entry.Value)}"
+            );
         }
     }
 
-    // The emptied file stays in place so MigrateLegacyFile never copies the old one back.
     private static void BackUpLegacyFile(string path)
     {
-        if (File.Exists(path))
-            File.Copy(path, $"{path}.migrated-{DateTime.UtcNow:yyyyMMdd-HHmmss}", overwrite: false);
+        if (!File.Exists(path))
+            return;
+
+        File.Copy(
+            path,
+            $"{path}.migrated-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
+            overwrite: false
+        );
     }
 
     private void RemoveTagEntity(ulong steamId)

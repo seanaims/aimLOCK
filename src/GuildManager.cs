@@ -750,7 +750,6 @@ public sealed class GuildManager
         source.FirstOrDefault(guild =>
             string.Equals(guild.Tag, tag, StringComparison.OrdinalIgnoreCase));
 
-    // Overhead staff tags look like guild tags, so these can't be claimed by a guild.
     private static readonly string[] ReservedTags =
     {
         "OWNER",
