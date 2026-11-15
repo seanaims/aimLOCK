@@ -83,13 +83,7 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 
 ### Chat moderation
 
-| Command | Description |
-| --- | --- |
-| `/kick <player name> [reason]` | Kick an online player by exact name or unique name prefix. Requires `admin.moderation.kick`. |
-| `/mute <player name> <duration> <reason>` | Mute a player from text chat for a finite duration such as `10m`, `2h`, or `1d`. Requires `aimlock.chat.mute`; the player privately sees the reason and time remaining when they try to chat. |
-| `/unmute <player name\|SteamID64>` | Lift an active text chat mute. Requires `aimlock.chat.mute`. |
-| `/ban <player name> <duration> <reason>` | Ban an online player for a finite duration such as `10m`, `2h`, or `1d`. Requires `admin.moderation.ban`; the ban immediately kicks them. |
-| `/unban <player name\|SteamID64>` | Lift an active ban by saved player name or SteamID64. Requires `admin.moderation.ban`. |
+Kicks, bans, and mutes use the Deadworks Admin plugin: `/kick`, `/ban`, `/unban`, `/gag` and `/ungag` (text chat), `/mute` and `/unmute` (voice), `/who`. Durations are in minutes. A gagged player privately sees the reason and time remaining when they try to chat.
 
 ### Guilds
 
