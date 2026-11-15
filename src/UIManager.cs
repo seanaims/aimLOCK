@@ -114,44 +114,70 @@ public class UIManager
                             .WithStyle("color", "#555555")
                     ),
 
-                UI.Label("separator", "─────────────────")
+                UI.Label("playercount", $"{playerCount} online")
                     .WithStyle("font-size", "16px")
-                    .WithStyle("color", "#fefafc")
-                    .WithStyle("horizontal-align", "center"),
-
-                UI.Label("playercount", $"Players Online: {playerCount}")
-                    .WithStyle("font-size", "18px")
-                    .WithStyle("color", "#FFFFFFFF")
+                    .WithStyle("color", "#AAAAAA")
                     .WithStyle("horizontal-align", "center")
-                    .WithStyle("text-align", "center"),
-
-                UI.Label("separator", "─────────────────")
-                    .WithStyle("font-size", "16px")
-                    .WithStyle("color", "#fefafc")
-                    .WithStyle("horizontal-align", "center"),
+                    .WithStyle("margin-bottom", "10px"),
 
                 UI.Label(
-                    "overallinfo",
-                    $"\nRanked Queue: {server.RankedQueue.Count}" +
-                    $"\nIn Match: {rankedInMatchCount}\n" +
-                    $"\nUnranked Queue: {server.UnrankedQueue.Count}" +
-                    $"\nIn Match: {unrankedInMatchCount}\n"
+                    "rankedinfo",
+                    $"Ranked   {server.RankedQueue.Count} queued · {rankedInMatchCount} in match"
                 )
-                    .WithStyle("horizontal-align", "center")
-                    .WithStyle("text-align", "center")
-                    .WithStyle("font-size", "18px")
+                    .WithStyle("font-size", "17px")
                     .WithStyle("color", "#FFFFFFFF"),
 
-                UI.Label("date", currentDate)
-                    .WithStyle("font-size", "14px")
-                    .WithStyle("color", "#AAAAAA")
-                    .WithStyle("margin-top", "8px"),
+                UI.Label(
+                    "unrankedinfo",
+                    $"Unranked   {server.UnrankedQueue.Count} queued · {unrankedInMatchCount} in match"
+                )
+                    .WithStyle("font-size", "17px")
+                    .WithStyle("color", "#FFFFFFFF"),
 
-                UI.Label("time", currentTime)
-                    .WithStyle("font-size", "14px")
-                    .WithStyle("color", "#AAAAAA")
-                    .WithStyle("margin-top", "8px")
+                UI.Label("queuestatus", GetQueueStatus(steamId, DateTimeOffset.UtcNow))
+                    .WithStyle("font-size", "17px")
+                    .WithStyle("font-weight", "bold")
+                    .WithStyle("color", "#7FD4FF")
+                    .WithStyle("margin-top", "10px"),
+
+                UI.Horizontal()
+                    .WithStyle("horizontal-align", "center")
+                    .WithStyle("margin-top", "10px")
+                    .Add(
+                        UI.Label("date", currentDate)
+                            .WithStyle("font-size", "14px")
+                            .WithStyle("color", "#777777"),
+
+                        UI.Label("time", currentTime)
+                            .WithStyle("font-size", "14px")
+                            .WithStyle("color", "#777777")
+                            .WithStyle("margin-left", "8px")
+                    )
             );
+    }
+
+    private string GetQueueStatus(ulong steamId, DateTimeOffset now)
+    {
+        foreach (
+            (List<QueueEntry> queue, string queueName) in new[]
+            {
+                (server.RankedQueue, "Ranked"),
+                (server.UnrankedQueue, "Unranked")
+            }
+        )
+        {
+            int index = queue.FindIndex(entry => entry.SteamId == steamId);
+            if (index < 0)
+                continue;
+
+            TimeSpan waited = now - queue[index].EnqueuedAt;
+            if (waited < TimeSpan.Zero)
+                waited = TimeSpan.Zero;
+
+            return $"In {queueName} queue: #{index + 1} · {(int)waited.TotalMinutes}:{waited.Seconds:00}";
+        }
+
+        return "/join ranked or /join unranked";
     }
 
     private void ScheduleClockRefresh()
@@ -192,6 +218,11 @@ public class UIManager
                 controller.Recipients,
                 "time",
                 localNow.ToString("hh:mm:ss tt", CultureInfo.InvariantCulture)
+            );
+            UI.Panel("queuepanel").Set(
+                controller.Recipients,
+                "queuestatus",
+                GetQueueStatus(controller.PlayerSteamId, utcNow)
             );
         }
     }
