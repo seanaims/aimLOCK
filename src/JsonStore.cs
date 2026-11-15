@@ -18,9 +18,13 @@ public static class JsonStore
     private static readonly HashSet<string> lockedPaths =
         new(StringComparer.OrdinalIgnoreCase);
 
-    public static string DataDirectory { get; } = Path.Combine(
-        AppContext.BaseDirectory,
-        "aimLOCK"
+    // BaseDirectory can be empty inside the plugin host; GetFullPath then
+    // resolves against the server's working directory, like the old code did.
+    public static string DataDirectory { get; } = Path.GetFullPath(
+        Path.Combine(
+            AppContext.BaseDirectory,
+            "aimLOCK"
+        )
     );
 
     public static string PathFor(string fileName) =>
