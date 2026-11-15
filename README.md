@@ -10,7 +10,7 @@ Matchmaking can use server-reported ping readings from the server-console `statu
 
 When a match ends, only that duel's participants and its registered spectators are returned to Midtown spawn. A player who disconnects is removed with their hero and controlled pawns; leaving a duel records a forfeit. Server-info UI is restored after matches, and the duel countdown is private to the participants.
 
-Each active arena displays its current duel score above the arena, including players' guild tags. The final score remains visible until both participants have left, then the scoreboard is removed. New matches use only free arenas; queued matches wait for an arena, and practice-bot matches cannot start while all arenas are occupied.
+Each active arena displays its current duel score above the arena, including players' guild tags. The final score remains visible until both participants have left, then the scoreboard is removed. New matches use only free arenas; queued matches wait for an arena, and practice-bot matches cannot start while all arenas are occupied. You can play a practice-bot match while queued; when the queue finds an opponent, the bot match ends and the real match starts.
 
 Server pausing is disabled at startup.
 

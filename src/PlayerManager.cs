@@ -357,14 +357,6 @@ public class PlayerManager
             return;
         }
 
-        bool alreadyQueued = server.RankedQueue
-            .Concat(server.UnrankedQueue)
-            .Any(entry => entry.SteamId == player.PlayerSteamId);
-        if (alreadyQueued)
-        {
-            reply("Leave your current queue with /leave before starting a bot match.");
-            return;
-        }
 
         var playerPawn = player.GetHeroPawn();
         if (playerPawn is not { IsValid: true })
@@ -853,6 +845,10 @@ public class PlayerManager
         match = null!;
         return false;
     }
+
+    public bool IsBotMatch(DuelMatch match) =>
+        FindMatchParticipant(match.Player1)?.IsBot == true ||
+        FindMatchParticipant(match.Player2)?.IsBot == true;
 
     public bool IsSpectating(CCitadelPlayerController player) =>
         spectatingMatches.ContainsKey(player.PlayerSteamId);

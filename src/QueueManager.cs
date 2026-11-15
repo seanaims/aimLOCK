@@ -49,7 +49,10 @@ public class QueueManager
             return;
         }
 
-        if (server.PlayerManager.TryGetActiveMatch(controller, out _))
+        if (
+            server.PlayerManager.TryGetActiveMatch(controller, out var activeMatch) &&
+            !server.PlayerManager.IsBotMatch(activeMatch)
+        )
         {
             caller.Reply("You are already in a match.");
             return;
@@ -164,14 +167,6 @@ public class QueueManager
             return false;
         }
 
-        bool alreadyQueued = server.RankedQueue
-            .Concat(server.UnrankedQueue)
-            .Any(entry => entry.SteamId == player.PlayerSteamId);
-        if (alreadyQueued)
-        {
-            reply("Leave your current queue with /leave before starting a bot match.");
-            return false;
-        }
 
         int arenaIndex = Array.IndexOf(server.DuelLocations, arena);
         if (!IsArenaAvailable(arenaIndex))
@@ -453,8 +448,10 @@ public class QueueManager
     {
         var queue = GetQueue(queueType);
 
-        if (queue.Count < 2 || !TryGetAvailableArena(out int arenaIndex))
+        if (queue.Count < 2)
             return;
+
+        bool hasArena = TryGetAvailableArena(out int arenaIndex);
 
         var playersBySteamId = Players.GetAll()
             .Where(player => !player.IsBot)
@@ -471,7 +468,13 @@ public class QueueManager
                     ? player
                     : null
             ))
-            .Where(item => item.Player != null)
+            .Where(item =>
+                item.Player != null &&
+                (
+                    !server.PlayerManager.TryGetActiveMatch(item.Player, out var match) ||
+                    server.PlayerManager.IsBotMatch(match)
+                )
+            )
             .ToArray();
 
         int selectedFirstIndex = -1;
@@ -552,6 +555,22 @@ public class QueueManager
         }
 
         if (selectedFirstIndex < 0 || player1 == null || player2 == null)
+            return;
+
+        /* End practice bot matches; finishing a match runs the queue again */
+        foreach (var player in new[] { player1, player2 })
+        {
+            if (!server.PlayerManager.TryGetActiveMatch(player, out _))
+                continue;
+
+            Chat.PrintToChat(player, "Match found! Ending your bot match.");
+            server.PlayerManager.ForfeitMatch(
+                server.PlayerManager.GetMatchParticipantName(player)
+            );
+            return;
+        }
+
+        if (!hasArena)
             return;
 
         if (!StartMatch(player1, player2, queueType, arenaIndex))
