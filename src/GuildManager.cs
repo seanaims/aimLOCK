@@ -129,8 +129,8 @@ public sealed class GuildManager
             return "Usage: /guild create <tag>.";
 
         string tag = string.Join(" ", arguments).Trim();
-        if (!IsValidTag(tag, 5))
-            return "Guild tags must be 1-5 characters.";
+        if (GetNewTagProblem(tag) is { } tagProblem)
+            return tagProblem;
 
         lock (syncRoot)
         {
@@ -391,8 +391,8 @@ public sealed class GuildManager
     )
     {
         string newTag = requestedTag.Trim();
-        if (!IsValidTag(newTag, 5))
-            return "Guild tags must be 1-5 characters.";
+        if (GetNewTagProblem(newTag) is { } tagProblem)
+            return tagProblem;
 
         lock (syncRoot)
         {
@@ -602,7 +602,7 @@ public sealed class GuildManager
         "decline [tag|name], leave, lookup [tag|name], members [tag|name], " +
         "list, mode <open|invite>, newtag <tag>, rename <name>, " +
         "kick <member>, transfer <member>, disband confirm. " +
-        "Tags are 1-5 characters.";
+        "Tags are 1-5 letters or numbers.";
 
     private static CCitadelPlayerController? FindOnlinePlayer(
         string query,
@@ -749,6 +749,31 @@ public sealed class GuildManager
     ) =>
         source.FirstOrDefault(guild =>
             string.Equals(guild.Tag, tag, StringComparison.OrdinalIgnoreCase));
+
+    // Overhead staff tags look like guild tags, so these can't be claimed by a guild.
+    private static readonly string[] ReservedTags =
+    {
+        "OWNER",
+        "STAFF",
+        "ADMIN",
+        "MOD",
+        "DEV",
+        "YT",
+        "TTV",
+        "AIMLOCK"
+    };
+
+    private static string? GetNewTagProblem(string tag)
+    {
+        if (!IsValidTag(tag, 5))
+            return "Guild tags must be 1-5 characters.";
+        if (!tag.All(char.IsAsciiLetterOrDigit))
+            return "Guild tags can only use letters A-Z and numbers.";
+        if (ReservedTags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+            return $"The guild tag [{tag}] is reserved.";
+
+        return null;
+    }
 
     private static bool IsValidTag(string tag, int maxLength)
     {
