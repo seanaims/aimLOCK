@@ -3983,8 +3983,7 @@ public class PlayerManager
 
     public void LoadRecords()
     {
-        // A file that fails to load is backed up and locked by JsonStore, so
-        // the next SaveRecords cannot overwrite it with an empty dictionary.
+
         var loaded = JsonStore.Load(
             RecordsFilePath,
             () => new Dictionary<ulong, PlayerRecord>(),

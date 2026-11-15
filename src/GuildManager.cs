@@ -142,8 +142,6 @@ public sealed class GuildManager
                 return $"The guild tag [{tag}] is already in use.";
 
             var updatedGuilds = CloneGuilds(guilds);
-            // A member may not also hold invites; leaving them in made
-            // LoadGuilds reject the whole file on the next start.
             RemoveInvites(updatedGuilds, player.PlayerSteamId);
             updatedGuilds.Add(new GuildData
             {
@@ -804,8 +802,8 @@ public sealed class GuildManager
 
     private static List<GuildData> ValidateGuilds(List<GuildData> loadedGuilds)
     {
-        // Files written before the Create fix can contain invites for players
-        // who are already members. That's stale, not corrupt: drop them.
+        // Old saves can have invites for players who are already members.
+
         var allMemberIds = loadedGuilds
             .SelectMany(guild => guild.Members)
             .Select(member => member.SteamId)

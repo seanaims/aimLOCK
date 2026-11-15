@@ -913,8 +913,6 @@ public sealed class PlayerTagManager
         return playerName.Trim();
     }
 
-    // Each loader keeps only valid entries. A file that cannot be parsed is
-    // backed up and locked by JsonStore, so later saves cannot wipe it.
 
     private void LoadTags()
     {

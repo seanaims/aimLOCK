@@ -140,17 +140,15 @@ public class aimLOCK : DeadworksPluginBase
         Timer.Once(2.Seconds(), PlayerTagManager.Initialize);
     }
 
-    // Older versions wrote data to three different places: the process working
-    // directory (records), the plugin host directory root (guilds, tags), and
-    // BaseDirectory/aimLOCK (Elo, leaderboard). Everything now lives in
-    // JsonStore.DataDirectory; copy old files over once.
+    /* Move data files from older versions into the aimLOCK folder */
+
     private static void MigrateLegacyDataFiles()
     {
         string baseDirectory = AppContext.BaseDirectory;
 
         JsonStore.MigrateLegacyFile(
             PlayerManager.RecordsFileName,
-            "aimlock_records.json", // relative: resolved against the working directory, like the old code
+            "aimlock_records.json",
             Path.Combine(baseDirectory, "aimlock_records.json")
         );
         JsonStore.MigrateLegacyFile(
