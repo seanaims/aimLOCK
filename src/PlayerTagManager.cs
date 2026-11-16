@@ -64,26 +64,18 @@ public sealed class PlayerTagManager
     };
 
     private readonly aimLOCK server;
-    private readonly string tagsFilePath = Path.Combine(
-        AppContext.BaseDirectory,
-        "aimlock_player_tags.json"
-    );
-    private readonly string stableTagsFilePath = Path.Combine(
-        AppContext.BaseDirectory,
-        "aimlock_player_tags_by_id.json"
-    );
-    private readonly string grantedTagsFilePath = Path.Combine(
-        AppContext.BaseDirectory,
-        "aimlock_player_tag_grants.json"
-    );
-    private readonly string visibilityFilePath = Path.Combine(
-        AppContext.BaseDirectory,
-        "aimlock_player_tag_visibility.json"
-    );
-    private readonly string stableVisibilityFilePath = Path.Combine(
-        AppContext.BaseDirectory,
-        "aimlock_player_tag_visibility_by_id.json"
-    );
+    public const string TagsFileName = "player-tags.json";
+    public const string StableTagsFileName = "player-tags-by-id.json";
+    public const string GrantedTagsFileName = "player-tag-grants.json";
+    public const string VisibilityFileName = "player-tag-visibility.json";
+    public const string StableVisibilityFileName = "player-tag-visibility-by-id.json";
+
+    private readonly string tagsFilePath = JsonStore.PathFor(TagsFileName);
+    private readonly string stableTagsFilePath = JsonStore.PathFor(StableTagsFileName);
+    private readonly string grantedTagsFilePath = JsonStore.PathFor(GrantedTagsFileName);
+    private readonly string visibilityFilePath = JsonStore.PathFor(VisibilityFileName);
+    private readonly string stableVisibilityFilePath =
+        JsonStore.PathFor(StableVisibilityFileName);
     private readonly Dictionary<string, PlayerTag> tags =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ulong, PlayerTag> stableTags = new();
@@ -975,222 +967,95 @@ public sealed class PlayerTagManager
         return playerName.Trim();
     }
 
+
     private void LoadTags()
     {
-        if (!File.Exists(tagsFilePath))
-            return;
-
-        try
+        var loaded = JsonStore.Load(
+            tagsFilePath,
+            () => new Dictionary<string, PlayerTag>(),
+            JsonOptions
+        );
+        foreach (var entry in loaded)
         {
-            var loaded = JsonSerializer.Deserialize<Dictionary<string, PlayerTag>>(
-                File.ReadAllText(tagsFilePath)
-            );
-            if (loaded == null)
-                throw new InvalidDataException("The tag file is empty.");
-
-            foreach (var entry in loaded)
-            {
-                if (Enum.IsDefined(typeof(PlayerTag), entry.Value))
-                    tags[NormalizePlayerName(entry.Key)] = entry.Value;
-            }
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to load player tags: {ex}");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Failed to access player tags: {ex}");
-        }
-        catch (JsonException ex)
-        {
-            Console.WriteLine($"Failed to parse player tags: {ex}");
+            if (Enum.IsDefined(typeof(PlayerTag), entry.Value))
+                tags[NormalizePlayerName(entry.Key)] = entry.Value;
         }
     }
 
     private void LoadHiddenTags()
     {
-        if (!File.Exists(visibilityFilePath))
-            return;
-
-        try
+        var loaded = JsonStore.Load(
+            visibilityFilePath,
+            () => new HashSet<string>(),
+            JsonOptions
+        );
+        foreach (string playerName in loaded)
         {
-            var loaded = JsonSerializer.Deserialize<HashSet<string>>(
-                File.ReadAllText(visibilityFilePath)
-            );
-            if (loaded == null)
-                throw new InvalidDataException(
-                    "The player tag visibility file is empty."
-                );
-
-            foreach (string playerName in loaded)
-            {
-                if (!string.IsNullOrWhiteSpace(playerName))
-                    hiddenTags.Add(NormalizePlayerName(playerName));
-            }
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to load player tag visibility: {ex}");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Failed to access player tag visibility: {ex}");
-        }
-        catch (JsonException ex)
-        {
-            Console.WriteLine($"Failed to parse player tag visibility: {ex}");
+            if (!string.IsNullOrWhiteSpace(playerName))
+                hiddenTags.Add(NormalizePlayerName(playerName));
         }
     }
 
     private void LoadStableTags()
     {
-        if (!File.Exists(stableTagsFilePath))
-            return;
-
-        try
+        var loaded = JsonStore.Load(
+            stableTagsFilePath,
+            () => new Dictionary<ulong, PlayerTag>(),
+            JsonOptions
+        );
+        foreach (var entry in loaded)
         {
-            var loaded = JsonSerializer.Deserialize<Dictionary<ulong, PlayerTag>>(
-                File.ReadAllText(stableTagsFilePath)
-            );
-            if (loaded == null)
-                throw new InvalidDataException(
-                    "The stable player tag file is empty."
-                );
-
-            foreach (var entry in loaded)
-            {
-                if (Enum.IsDefined(typeof(PlayerTag), entry.Value))
-                    stableTags[entry.Key] = entry.Value;
-            }
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to load stable player tags: {ex}");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Failed to access stable player tags: {ex}");
-        }
-        catch (JsonException ex)
-        {
-            Console.WriteLine($"Failed to parse stable player tags: {ex}");
+            if (Enum.IsDefined(typeof(PlayerTag), entry.Value))
+                stableTags[entry.Key] = entry.Value;
         }
     }
 
     private void LoadGrantedTags()
     {
-        if (!File.Exists(grantedTagsFilePath))
-            return;
+        var loaded = JsonStore.Load(
+            grantedTagsFilePath,
+            () => new Dictionary<ulong, HashSet<PlayerTag>>(),
+            JsonOptions
+        );
+        foreach (var entry in loaded)
+        {
+            if (entry.Key == 0 || entry.Key == ulong.MaxValue || entry.Value == null)
+                continue;
 
-        try
-        {
-            var loaded = JsonSerializer.Deserialize<
-                Dictionary<ulong, HashSet<PlayerTag>>
-            >(File.ReadAllText(grantedTagsFilePath));
-            if (loaded == null)
-                throw new InvalidDataException(
-                    "The granted player tag file is empty."
-                );
-
-            foreach (var entry in loaded)
-            {
-                if (entry.Key == 0 || entry.Key == ulong.MaxValue)
-                    continue;
-
-                PlayerTag[] validTags = entry.Value
-                    .Where(tag => Enum.IsDefined(typeof(PlayerTag), tag))
-                    .Distinct()
-                    .ToArray();
-                if (validTags.Length > 0)
-                    grantedTags[entry.Key] = new HashSet<PlayerTag>(validTags);
-            }
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to load granted player tags: {ex}");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Failed to access granted player tags: {ex}");
-        }
-        catch (JsonException ex)
-        {
-            Console.WriteLine($"Failed to parse granted player tags: {ex}");
+            PlayerTag[] validTags = entry.Value
+                .Where(tag => Enum.IsDefined(typeof(PlayerTag), tag))
+                .Distinct()
+                .ToArray();
+            if (validTags.Length > 0)
+                grantedTags[entry.Key] = new HashSet<PlayerTag>(validTags);
         }
     }
 
     private void LoadHiddenSteamIds()
     {
-        if (!File.Exists(stableVisibilityFilePath))
-            return;
-
-        try
-        {
-            var loaded = JsonSerializer.Deserialize<HashSet<ulong>>(
-                File.ReadAllText(stableVisibilityFilePath)
-            );
-            if (loaded == null)
-                throw new InvalidDataException(
-                    "The stable player tag visibility file is empty."
-                );
-
-            foreach (ulong steamId in loaded)
-                hiddenSteamIds.Add(steamId);
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to load stable tag visibility: {ex}");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Failed to access stable tag visibility: {ex}");
-        }
-        catch (JsonException ex)
-        {
-            Console.WriteLine($"Failed to parse stable tag visibility: {ex}");
-        }
+        var loaded = JsonStore.Load(
+            stableVisibilityFilePath,
+            () => new HashSet<ulong>(),
+            JsonOptions
+        );
+        foreach (ulong steamId in loaded)
+            hiddenSteamIds.Add(steamId);
     }
 
-    private void SaveHiddenTags(HashSet<string> hiddenTagsToSave)
-    {
-        string temporaryPath = visibilityFilePath + ".tmp";
-        string json = JsonSerializer.Serialize(hiddenTagsToSave, JsonOptions);
-        File.WriteAllText(temporaryPath, json);
-        File.Move(temporaryPath, visibilityFilePath, overwrite: true);
-    }
+    private void SaveHiddenTags(HashSet<string> hiddenTagsToSave) =>
+        JsonStore.Save(visibilityFilePath, hiddenTagsToSave, JsonOptions);
 
-    private void SaveHiddenSteamIds(HashSet<ulong> hiddenSteamIdsToSave)
-    {
-        string temporaryPath = stableVisibilityFilePath + ".tmp";
-        string json = JsonSerializer.Serialize(hiddenSteamIdsToSave, JsonOptions);
-        File.WriteAllText(temporaryPath, json);
-        File.Move(temporaryPath, stableVisibilityFilePath, overwrite: true);
-    }
+    private void SaveHiddenSteamIds(HashSet<ulong> hiddenSteamIdsToSave) =>
+        JsonStore.Save(stableVisibilityFilePath, hiddenSteamIdsToSave, JsonOptions);
 
-    private void SaveTags(Dictionary<string, PlayerTag> tagsToSave)
-    {
-        string temporaryPath = tagsFilePath + ".tmp";
-        string json = JsonSerializer.Serialize(tagsToSave, JsonOptions);
-        File.WriteAllText(temporaryPath, json);
-        File.Move(temporaryPath, tagsFilePath, overwrite: true);
-    }
+    private void SaveTags(Dictionary<string, PlayerTag> tagsToSave) =>
+        JsonStore.Save(tagsFilePath, tagsToSave, JsonOptions);
 
-    private void SaveStableTags(Dictionary<ulong, PlayerTag> tagsToSave)
-    {
-        string temporaryPath = stableTagsFilePath + ".tmp";
-        string json = JsonSerializer.Serialize(tagsToSave, JsonOptions);
-        File.WriteAllText(temporaryPath, json);
-        File.Move(temporaryPath, stableTagsFilePath, overwrite: true);
-    }
+    private void SaveStableTags(Dictionary<ulong, PlayerTag> tagsToSave) =>
+        JsonStore.Save(stableTagsFilePath, tagsToSave, JsonOptions);
 
     private void SaveGrantedTags(
         Dictionary<ulong, HashSet<PlayerTag>> grantsToSave
-    )
-    {
-        string temporaryPath = grantedTagsFilePath + ".tmp";
-        string json = JsonSerializer.Serialize(grantsToSave, JsonOptions);
-        File.WriteAllText(temporaryPath, json);
-        File.Move(temporaryPath, grantedTagsFilePath, overwrite: true);
-    }
+    ) =>
+        JsonStore.Save(grantedTagsFilePath, grantsToSave, JsonOptions);
 }

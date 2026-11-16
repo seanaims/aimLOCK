@@ -122,6 +122,9 @@ public class aimLOCK : DeadworksPluginBase
     {
         Console.WriteLine("aimLOCKED and loaded.");
 
+        JsonStore.ResetLocks();
+        MigrateLegacyDataFiles();
+
         Queue = new QueueManager(this);
         PlayerManager = new PlayerManager(this);
         PlayerManager.RemoveExistingBots();
@@ -135,6 +138,43 @@ public class aimLOCK : DeadworksPluginBase
         LeaderboardManager = new LeaderboardManager(this);
         UIManager.RefreshHud();
         Timer.Once(2.Seconds(), PlayerTagManager.Initialize);
+    }
+
+    /* Move data files from older versions into the aimLOCK folder */
+
+    private static void MigrateLegacyDataFiles()
+    {
+        string baseDirectory = AppContext.BaseDirectory;
+
+        JsonStore.MigrateLegacyFile(
+            PlayerManager.RecordsFileName,
+            "aimlock_records.json",
+            Path.Combine(baseDirectory, "aimlock_records.json")
+        );
+        JsonStore.MigrateLegacyFile(
+            GuildManager.DataFileName,
+            Path.Combine(baseDirectory, "aimlock_guilds.json")
+        );
+        JsonStore.MigrateLegacyFile(
+            PlayerTagManager.TagsFileName,
+            Path.Combine(baseDirectory, "aimlock_player_tags.json")
+        );
+        JsonStore.MigrateLegacyFile(
+            PlayerTagManager.StableTagsFileName,
+            Path.Combine(baseDirectory, "aimlock_player_tags_by_id.json")
+        );
+        JsonStore.MigrateLegacyFile(
+            PlayerTagManager.GrantedTagsFileName,
+            Path.Combine(baseDirectory, "aimlock_player_tag_grants.json")
+        );
+        JsonStore.MigrateLegacyFile(
+            PlayerTagManager.VisibilityFileName,
+            Path.Combine(baseDirectory, "aimlock_player_tag_visibility.json")
+        );
+        JsonStore.MigrateLegacyFile(
+            PlayerTagManager.StableVisibilityFileName,
+            Path.Combine(baseDirectory, "aimlock_player_tag_visibility_by_id.json")
+        );
     }
 
     public override void OnStartupServer()

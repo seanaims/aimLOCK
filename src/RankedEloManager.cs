@@ -23,13 +23,9 @@ public sealed class RankedEloManager
 
     public RankedEloManager(string? dataFilePath = null)
     {
-        this.dataFilePath = Path.GetFullPath(
-            dataFilePath ?? Path.Combine(
-                AppContext.BaseDirectory,
-                "aimLOCK",
-                "ranked-elo.json"
-            )
-        );
+        this.dataFilePath = dataFilePath == null
+            ? JsonStore.PathFor("ranked-elo.json")
+            : Path.GetFullPath(dataFilePath);
         players = LoadPlayers();
     }
 
@@ -256,27 +252,24 @@ public sealed class RankedEloManager
         }
     }
 
-    private Dictionary<string, StoredPlayer> LoadPlayers()
+    private Dictionary<string, StoredPlayer> LoadPlayers() =>
+        JsonStore.Load(
+            dataFilePath,
+            () => new Dictionary<string, StoredPlayer>(StringComparer.Ordinal),
+            JsonOptions,
+            ValidatePlayers
+        );
+
+    private static Dictionary<string, StoredPlayer> ValidatePlayers(
+        Dictionary<string, StoredPlayer> storedPlayers)
     {
-        if (!File.Exists(dataFilePath))
-            return new Dictionary<string, StoredPlayer>(StringComparer.Ordinal);
-
-        using var stream = File.OpenRead(dataFilePath);
-        var storedPlayers =
-            JsonSerializer.Deserialize<Dictionary<string, StoredPlayer>>(
-                stream,
-                JsonOptions
-            ) ?? throw new InvalidDataException(
-                $"Ranked Elo data is empty or invalid: {dataFilePath}"
-            );
-
         var loadedPlayers = new Dictionary<string, StoredPlayer>(
             StringComparer.Ordinal
         );
 
         foreach (var entry in storedPlayers)
         {
-            string playerId = ValidateSteamId(entry.Key, nameof(dataFilePath));
+            string playerId = ValidateSteamId(entry.Key, "ranked-elo.json");
             StoredPlayer player = entry.Value;
 
             if (
@@ -297,28 +290,8 @@ public sealed class RankedEloManager
         return loadedPlayers;
     }
 
-    private void SavePlayers(Dictionary<string, StoredPlayer> updatedPlayers)
-    {
-        string directory = Path.GetDirectoryName(dataFilePath)
-            ?? throw new InvalidOperationException(
-                $"Could not determine the ranked Elo data directory: {dataFilePath}"
-            );
-        Directory.CreateDirectory(directory);
-
-        string temporaryPath = dataFilePath + ".tmp";
-        using (var stream = new FileStream(
-            temporaryPath,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None
-        ))
-        {
-            JsonSerializer.Serialize(stream, updatedPlayers, JsonOptions);
-            stream.Flush(true);
-        }
-
-        File.Move(temporaryPath, dataFilePath, overwrite: true);
-    }
+    private void SavePlayers(Dictionary<string, StoredPlayer> updatedPlayers) =>
+        JsonStore.Save(dataFilePath, updatedPlayers, JsonOptions);
 
     private static string ValidateSteamId(string steamId64, string parameterName)
     {
