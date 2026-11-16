@@ -25,11 +25,13 @@ public sealed class GuildManager
     );
     private readonly RankedEloManager rankedElo;
     private List<GuildData> guilds;
+    private Dictionary<ulong, GuildData> memberIndex = new();
 
     public GuildManager(RankedEloManager rankedElo)
     {
         this.rankedElo = rankedElo;
         guilds = LoadGuilds();
+        RebuildMemberIndex();
     }
 
     public string FormatPlayerName(CCitadelPlayerController player) =>
@@ -39,17 +41,18 @@ public sealed class GuildManager
     {
         lock (syncRoot)
         {
-            GuildData? guild = FindGuildForMember(guilds, steamId);
-            return guild == null
-                ? playerName
-                : $"[{guild.Tag}] {playerName}";
+            return memberIndex.TryGetValue(steamId, out GuildData? guild)
+                ? $"[{guild.Tag}] {playerName}"
+                : playerName;
         }
     }
 
     public string? GetMemberTag(ulong steamId)
     {
         lock (syncRoot)
-            return FindGuildForMember(guilds, steamId)?.Tag;
+            return memberIndex.TryGetValue(steamId, out GuildData? guild)
+                ? guild.Tag
+                : null;
     }
 
     public IReadOnlyList<GuildLeaderboardEntry> GetLeaderboardEntries()
@@ -793,6 +796,19 @@ public sealed class GuildManager
     {
         SaveGuilds(updatedGuilds);
         guilds = updatedGuilds;
+        RebuildMemberIndex();
+    }
+
+    private void RebuildMemberIndex()
+    {
+        var index = new Dictionary<ulong, GuildData>();
+        foreach (GuildData guild in guilds)
+        {
+            foreach (GuildMember member in guild.Members)
+                index[member.SteamId] = guild;
+        }
+
+        memberIndex = index;
     }
 
     private List<GuildData> LoadGuilds()

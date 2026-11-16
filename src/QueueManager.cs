@@ -680,7 +680,9 @@ public class QueueManager
             ArenaPosition = arena,
             ArenaIndex = arenaIndex,
             Score1 = 0,
-            Score2 = 0
+            Score2 = 0,
+            Player1Controller = player1,
+            Player2Controller = player2
         };
 
         server.PendingRespawns.Remove(player1MatchKey);
@@ -714,6 +716,11 @@ public class QueueManager
                 server.Queue.TryStartMatches();
                 return;
             }
+
+            match.Player1OriginalMaxHealth =
+                PlayerManager.GetNetworkedMaxHealth(pawn1);
+            match.Player2OriginalMaxHealth =
+                PlayerManager.GetNetworkedMaxHealth(pawn2);
 
             pawn1.RemoveModifier("modifier_speed_boost");
             pawn2.RemoveModifier("modifier_speed_boost");

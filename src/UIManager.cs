@@ -169,9 +169,11 @@ public class UIManager
     {
         ScheduleClockRefresh();
         DateTimeOffset utcNow = DateTimeOffset.UtcNow;
+        var panel = UI.Panel("queuepanel");
         foreach (var controller in Players.GetAll())
         {
             if (
+                controller.IsBot ||
                 server.PlayerManager.TryGetActiveMatch(controller, out _) ||
                 hiddenServerInfo.Contains(controller.PlayerSteamId)
             )
@@ -183,13 +185,14 @@ public class UIManager
                 utcNow,
                 server.PlayerManager.GetTimeZone(controller.PlayerSteamId)
             );
-            UI.Panel("queuepanel").Set(
-                controller.Recipients,
+            var recipients = controller.Recipients;
+            panel.Set(
+                recipients,
                 "date",
                 localNow.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture)
             );
-            UI.Panel("queuepanel").Set(
-                controller.Recipients,
+            panel.Set(
+                recipients,
                 "time",
                 localNow.ToString("hh:mm:ss tt", CultureInfo.InvariantCulture)
             );

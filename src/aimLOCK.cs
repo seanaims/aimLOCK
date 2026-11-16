@@ -655,6 +655,14 @@ public class aimLOCK : DeadworksPluginBase
         PlayerManager.ProcessUsercmds(args);
     }
 
+    public override void OnAbilityAttempt(AbilityAttemptEvent args)
+    {
+        args.BlockedButtons = 
+            InputButton.Ability1 |
+            InputButton.Ability2 |
+            InputButton.Ability4;
+    }
+
     /* Debug Hero Change */
 
     [GameEventHandler("player_hero_changed")]
@@ -2562,6 +2570,20 @@ public sealed class DuelMatch
 
     public int ArenaIndex;
     public Vector3 ArenaPosition;
+
+    // Cached so recurring per-match work does not have to scan every online
+    // player by name. Controllers stay valid for the lifetime of a match.
+    public CCitadelPlayerController? Player1Controller;
+    public CCitadelPlayerController? Player2Controller;
+
+    // Throttles re-applying the duel max health when the engine drops it.
+    public long Player1NextMaxHealthRepairAt;
+    public long Player2NextMaxHealthRepairAt;
+
+    // Networked max health before the duel raised it to DuelMaxHealth.
+    // Restored when the match ends so the overhead bar is correct again.
+    public int Player1OriginalMaxHealth;
+    public int Player2OriginalMaxHealth;
 }
 
 public sealed class PlayerRecord

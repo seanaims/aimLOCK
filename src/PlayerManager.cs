@@ -131,7 +131,9 @@ public class PlayerManager
     private const float DuelBlitzBulletsFireRatePercent =
         DefaultBlitzBulletsFireRatePercent / 2f;
     private const int DuelMaxHealth = 2800;
-    private const double DuelHealthCapCheckIntervalSeconds = 0.05;
+    private const double DuelHealthCapCheckIntervalSeconds = 0.1;
+    private const long DuelMaxHealthRepairIntervalMilliseconds = 1000;
+    private const long PracticeBotZoneCheckIntervalMilliseconds = 100;
     private static readonly string[] DuelItemStack =
     {
         "upgrade_blitz_bullets",
@@ -226,6 +228,9 @@ public class PlayerManager
     private readonly Dictionary<uint, PracticeBotState> practiceBots = new();
     private readonly Dictionary<uint, float> practiceBotStrafeSpeedOverrides =
         new();
+    private readonly Dictionary<uint, long> nextPracticeBotZoneCheckAt = new();
+    private readonly HashSet<DuelMatch> duelHealthMonitors = new();
+    private bool duelHealthMonitorRunning;
     private readonly Dictionary<
         int,
         (DuelMatch Match, CPointWorldText Background, CPointWorldText Text)
@@ -304,9 +309,23 @@ public class PlayerManager
             return;
 
         if (player.IsBot)
+        {
             ProcessPracticeBotUsercmds(args, controller, pawn, activeMatch);
-        else
-            ProcessPracticeBotDoorwayZone(player, pawn);
+            return;
+        }
+
+        // Zone entry only needs to be sampled a few times a second. Without
+        // this, every player runs three distance checks on every usercmd.
+        long now = Environment.TickCount64;
+        if (
+            nextPracticeBotZoneCheckAt.TryGetValue(player.EntityHandle, out long nextCheck)
+            && now < nextCheck
+        )
+            return;
+
+        nextPracticeBotZoneCheckAt[player.EntityHandle] =
+            now + PracticeBotZoneCheckIntervalMilliseconds;
+        ProcessPracticeBotDoorwayZone(player, pawn);
     }
 
     private void ProcessPracticeBotDoorwayZone(
@@ -2180,20 +2199,72 @@ public class PlayerManager
 
     private static void ClampHealthToMax(CCitadelPlayerPawn? pawn)
     {
-        if (pawn is { IsValid: true, IsAlive: true })
-            pawn.Health = Math.Min(pawn.Health, pawn.GetMaxHealth());
+        if (pawn is not { IsValid: true, IsAlive: true })
+            return;
+
+        pawn.Health = Math.Min(pawn.Health, pawn.GetMaxHealth());
     }
 
-    private static void ApplyDuelMaxHealth(CCitadelPlayerPawn pawn)
+    public static int GetNetworkedMaxHealth(CCitadelPlayerPawn pawn)
+    {
+        if (!pawn.IsValid)
+            return 0;
+
+        var schema = pawn.Schema;
+        return schema.IsValid ? schema.m_iMaxHealth : 0;
+    }
+
+    // m_iMaxHealth is the networked value the client uses as the overhead
+    // health bar's maximum. Modifier-driven max health changes do not always
+    // update it, which leaves the bar showing full health until the pawn
+    // drops below the stale maximum. Writing it directly keeps the bar in
+    // sync with the duel's 2800 HP pool.
+    private static void SetNetworkedMaxHealth(
+        CCitadelPlayerPawn pawn,
+        int maxHealth
+    )
+    {
+        if (!pawn.IsValid || maxHealth <= 0)
+            return;
+
+        var schema = pawn.Schema;
+        if (schema.IsValid && schema.m_iMaxHealth != maxHealth)
+            schema.m_iMaxHealth = maxHealth;
+    }
+
+    private static void RestoreDuelNetworkedMaxHealth(
+        CCitadelPlayerPawn? pawn,
+        int originalMaxHealth
+    )
+    {
+        if (pawn is not { IsValid: true })
+            return;
+
+        // If the pre-duel value could not be captured, fall back to the
+        // current effective maximum after the duel items were restored.
+        int restoredMaxHealth =
+            originalMaxHealth > 0 ? originalMaxHealth : pawn.GetMaxHealth();
+        SetNetworkedMaxHealth(pawn, restoredMaxHealth);
+        ClampHealthToMax(pawn);
+    }
+
+    private static void ApplyDuelMaxHealth(
+        CCitadelPlayerPawn pawn,
+        bool logWarnings = true,
+        bool clampHealth = true
+    )
     {
         const string modifierName =
             "upgrade_health/modifier_intrinsic_base";
 
         if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
         {
-            Console.WriteLine(
-                "[aimLOCK] Cannot set duel max health; upgrade_health is missing."
-            );
+            if (logWarnings)
+            {
+                Console.WriteLine(
+                    "[aimLOCK] Cannot set duel max health; upgrade_health is missing."
+                );
+            }
             return;
         }
 
@@ -2201,9 +2272,12 @@ public class PlayerManager
         int maxHealthWithoutHealthUpgrade = pawn.GetMaxHealth();
         if (maxHealthWithoutHealthUpgrade <= 0)
         {
-            Console.WriteLine(
-                $"[aimLOCK] Cannot set duel max health; effective max health without upgrade_health is {maxHealthWithoutHealthUpgrade}."
-            );
+            if (logWarnings)
+            {
+                Console.WriteLine(
+                    $"[aimLOCK] Cannot set duel max health; effective max health without upgrade_health is {maxHealthWithoutHealthUpgrade}."
+                );
+            }
             return;
         }
 
@@ -2214,45 +2288,146 @@ public class PlayerManager
         abilityValues["BonusHealth"] =
             DuelMaxHealth - maxHealthWithoutHealthUpgrade;
         pawn.AddModifier(modifierName, abilityValues: abilityValues);
+        // The engine's effective max health is independent of the networked
+        // m_iMaxHealth value, but the client overhead bar reads m_iMaxHealth.
+        // Modifier-driven max health changes did not update it reliably, which
+        // left the bar using the pawn's old maximum, so assert it explicitly.
+        SetNetworkedMaxHealth(pawn, DuelMaxHealth);
 
         int effectiveMaxHealth = pawn.GetMaxHealth();
-        if (effectiveMaxHealth != DuelMaxHealth)
+        if (effectiveMaxHealth != DuelMaxHealth && logWarnings)
         {
             Console.WriteLine(
                 $"[aimLOCK] Duel max health is {effectiveMaxHealth}, expected {DuelMaxHealth} after the upgrade_health bonus."
             );
         }
-        ClampHealthToMax(pawn);
+        if (clampHealth)
+          ClampHealthToMax(pawn);
     }
 
     private static void SetDuelStartingHealth(CCitadelPlayerPawn pawn)
     {
+        // Keep the client bar maximum at the duel value even when the engine
+        // already reports the right effective max (for example right after a
+        // respawn reset the networked value).
+        SetNetworkedMaxHealth(pawn, DuelMaxHealth);
         pawn.Health = Math.Min(DuelMaxHealth, pawn.GetMaxHealth());
     }
 
     public void StartDuelHealthCapMonitor(DuelMatch match)
     {
-        void MonitorHealthCap()
-        {
-            if (match.Finished)
-                return;
+        if (match.Finished || !duelHealthMonitors.Add(match))
+            return;
 
-            foreach (var player in GetMatchParticipants(match))
+        if (duelHealthMonitorRunning)
+            return;
+
+        // One shared timer covers every active duel instead of one timer per
+        // match. At 30 players this replaces hundreds of callbacks per second
+        // with a single low-frequency sweep.
+        duelHealthMonitorRunning = true;
+        MonitorDuelHealthCaps();
+    }
+
+    private void MonitorDuelHealthCaps()
+    {
+        try
+        {
+            List<DuelMatch>? finishedMatches = null;
+            foreach (var match in duelHealthMonitors)
             {
-                var pawn = player.GetHeroPawn();
-                if (pawn is { IsValid: true, IsAlive: true })
+                if (match.Finished)
                 {
-                    ClampHealthToMax(pawn);
+                    (finishedMatches ??= new List<DuelMatch>()).Add(match);
+                    continue;
                 }
+
+                ClampMatchParticipantHealth(
+                    match.Player1,
+                    match.Player1Controller,
+                    ref match.Player1NextMaxHealthRepairAt
+                );
+                ClampMatchParticipantHealth(
+                    match.Player2,
+                    match.Player2Controller,
+                    ref match.Player1NextMaxHealthRepairAt
+                );
             }
 
-            server.ScheduleOnce(
-                DuelHealthCapCheckIntervalSeconds.Seconds(),
-                MonitorHealthCap
-            );
+            if (finishedMatches != null)
+            {
+                foreach (var match in finishedMatches)
+                    duelHealthMonitors.Remove(match);
+            }
+        }
+        finally
+        {
+            // Keep the shared sweep alive even if a single participant lookup
+            // throws; otherwise one bad match would stop health capping for
+            // every other duel on the server.
+            if (duelHealthMonitors.Count == 0)
+            {
+                duelHealthMonitorRunning = false;
+            }
+            else
+            {
+                server.ScheduleOnce(
+                    DuelHealthCapCheckIntervalSeconds.Seconds(),
+                    MonitorDuelHealthCaps
+                );
+            }
+        }
+    }
+
+    private void ClampMatchParticipantHealth(
+        string participantName,
+        CCitadelPlayerController? cachedPlayer,
+        ref long nextMaxHealthRepairAt
+    )
+    {
+        var player = cachedPlayer is { IsValid: true }
+            ? cachedPlayer
+            : FindMatchParticipant(participantName);
+        if (player is not { IsValid: true })
+            return;
+
+                var pawn = player.GetHeroPawn();
+        if (pawn is not { IsValid: true, IsAlive: true })
+            return;
+
+        if (pawn.GetMaxHealth() != DuelMaxHealth)
+        {
+            // The effective max health can drop after the duel's health
+            // modifier is refreshed (for example when the item system
+            // re-applies upgrade_health). Re-assert it. The throttle avoids
+            // modifier churn if the engine keeps overriding it.
+            long now = Environment.TickCount64;
+            if (now >= nextMaxHealthRepairAt)
+            {
+                nextMaxHealthRepairAt =
+                    now + DuelMaxHealthRepairIntervalMilliseconds;
+                ApplyDuelMaxHealth(
+                    pawn,
+                    logWarnings: false,
+                    clampHealth: false
+                );
+            }
+
+            // Don't clamp to a wrong max: that would delete health that
+            // belongs to the 2800 HP duel pool. Retry on a later tick once the
+            // max is restored.
+            if (pawn.GetMaxHealth() != DuelMaxHealth)
+                return;
+        }
+        else if (GetNetworkedMaxHealth(pawn) != DuelMaxHealth)
+        {
+            // The effective max is right but the networked value the client
+            // draws the bar from drifted. This is a single field write, so it
+            // does not need the repair throttle.
+            SetNetworkedMaxHealth(pawn, DuelMaxHealth);
         }
 
-        MonitorHealthCap();
+        ClampHealthToMax(pawn);
     }
 
     public void PrepareDuelMatchHealth(DuelMatch match)
@@ -2274,7 +2449,22 @@ public class PlayerManager
 
         ApplyDuelMaxHealth(pawn1);
         ApplyDuelMaxHealth(pawn2);
-        ResetDuelCurrentHealth(match);
+
+        // The item system can re-apply upgrade_health shortly after the first
+        // application, which drops the effective max health again. Confirm the
+        // max is stable before setting current health, exactly like the respawn
+        // path does, so current health never sits above the max shown by the
+        // overhead health bar.
+        RestoreDuelRespawnHealth(
+            match,
+            match.Player1,
+            startCountdown: false
+        );
+        RestoreDuelRespawnHealth(
+            match,
+            match.Player2,
+            startCountdown: false
+        );
     }
 
     private void SpawnAttachedEffect(CCitadelPlayerPawn pawn, string effectName)
@@ -2353,6 +2543,7 @@ public class PlayerManager
         initialAbilityCurrenciesGranted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
         MarkInitialHeroSelectionPending(controller);
+        nextPracticeBotZoneCheckAt.Remove(controllerHandle);
         server.ScheduleOnce(0.5.Seconds(), () =>
         {
             if (!controller.IsValid)
@@ -2393,6 +2584,7 @@ public class PlayerManager
         initialAbilityCurrenciesGranted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
         practiceBotStrafeSpeedOverrides.Remove(controllerHandle);
+        nextPracticeBotZoneCheckAt.Remove(controllerHandle);
         playersInsidePracticeBotZones.RemoveWhere(
             entry => entry.PlayerHandle == controller.EntityHandle
         );
@@ -3072,7 +3264,8 @@ public class PlayerManager
         DuelMatch match,
         string playerName,
         int attemptsRemaining = 12,
-        bool hasStableMaxHealth = false
+        bool hasStableMaxHealth = false,
+        bool startCountdown = true
     )
     {
         if (match.Finished)
@@ -3093,7 +3286,8 @@ public class PlayerManager
                 RestoreDuelRespawnHealth(
                     match,
                     playerName,
-                    attemptsRemaining - 1
+                    attemptsRemaining - 1,
+                    startCountdown: startCountdown
                 ));
             return;
         }
@@ -3107,7 +3301,8 @@ public class PlayerManager
             if (hasStableMaxHealth)
             {
                 SetDuelStartingHealth(pawn);
-                server.Queue.StartCountdown(match);
+                if (startCountdown)
+                    server.Queue.StartCountdown(match);
                 return;
             }
 
@@ -3116,7 +3311,8 @@ public class PlayerManager
                     match,
                     playerName,
                     attemptsRemaining - 1,
-                    hasStableMaxHealth: true
+                    hasStableMaxHealth: true,
+                    startCountdown: startCountdown
                 ));
             return;
         }
@@ -3126,7 +3322,8 @@ public class PlayerManager
             Console.WriteLine(
                 $"[aimLOCK] Duel max health remained {pawn.GetMaxHealth()} instead of {DuelMaxHealth} after respawning {playerName}."
             );
-            server.Queue.StartCountdown(match);
+            if (startCountdown)
+                server.Queue.StartCountdown(match);
             return;
         }
 
@@ -3134,7 +3331,8 @@ public class PlayerManager
             RestoreDuelRespawnHealth(
                 match,
                 playerName,
-                attemptsRemaining - 1
+                attemptsRemaining - 1,
+                startCountdown: startCountdown
             ));
     }
 
@@ -3143,10 +3341,12 @@ public class PlayerManager
         foreach (var player in GetMatchParticipants(match))
         {
             var pawn = player.GetHeroPawn();
-            if (pawn is { IsValid: true, IsAlive: true })
-            {
-                SetDuelStartingHealth(pawn);
-            }
+            if (pawn is not { IsValid: true, IsAlive: true })
+                continue;
+
+            if (pawn.GetMaxHealth() != DuelMaxHealth)
+                ApplyDuelMaxHealth(pawn);
+            SetDuelStartingHealth(pawn);
         }
     }
 
@@ -3422,17 +3622,29 @@ public class PlayerManager
         if (pawn1 != null)
         {
             RemoveDuelGlassCannon(pawn1, match.Player1HadGlassCannonItem);
-            ClampHealthToMax(pawn1);
+            RestoreDuelNetworkedMaxHealth(
+                pawn1,
+                match.Player1OriginalMaxHealth
+            );
         }
         if (pawn2 != null)
         {
             RemoveDuelGlassCannon(pawn2, match.Player2HadGlassCannonItem);
-            ClampHealthToMax(pawn2);
+            RestoreDuelNetworkedMaxHealth(
+                pawn2,
+                match.Player2OriginalMaxHealth
+            );
         }
         server.ScheduleOnce(0.1.Seconds(), () =>
         {
-            ClampHealthToMax(pawn1);
-            ClampHealthToMax(pawn2);
+            RestoreDuelNetworkedMaxHealth(
+                pawn1,
+                match.Player1OriginalMaxHealth
+            );
+            RestoreDuelNetworkedMaxHealth(
+                pawn2,
+                match.Player2OriginalMaxHealth
+            );
         });
         pawn1?.RemoveModifier("modifier_speed_boost");
         pawn2?.RemoveModifier("modifier_speed_boost");

@@ -29,10 +29,8 @@ public sealed class PlayerTagManager
         public CPointWorldText[] TagEntities { get; }
         public TagSegment[] Segments { get; }
         public int Version { get; }
-        public System.Action Callback { get; }
 
         public TagOrientationRefresh(
-            PlayerTagManager manager,
             CCitadelPlayerController player,
             CPointWorldText backgroundText,
             CPointWorldText[] tagEntities,
@@ -44,12 +42,12 @@ public sealed class PlayerTagManager
             TagEntities = tagEntities;
             Segments = segments;
             Version = version;
-            Callback = () => manager.RefreshTagOrientation(this);
         }
     }
 
     private const string EntityNamePrefix = "aimlock_player_tag_";
     private const int PawnRetries = 8;
+    private const double TagOrientationRefreshIntervalSeconds = 0.1;
     private const float TagHeight = 100f;
     private const float FontSize = 64f;
     private const float WorldUnitsPerPx = 0.2f;
@@ -97,10 +95,14 @@ public sealed class PlayerTagManager
     private readonly Dictionary<ulong, (Vector3 Position, Vector3 Angles)>
         lastTagTransforms = new();
     private readonly Dictionary<ulong, int> refreshVersions = new();
+    private readonly Dictionary<ulong, TagOrientationRefresh>
+        orientationRefreshes = new();
+    private readonly List<TagOrientationRefresh> orientationRefreshBuffer = new();
     private readonly HashSet<string> hiddenTags =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<ulong> hiddenSteamIds = new();
     private bool staleTagEntitiesRemoved;
+    private bool tagOrientationLoopRunning;
 
     public PlayerTagManager(aimLOCK server)
     {
@@ -355,8 +357,7 @@ public sealed class PlayerTagManager
                 existingTags,
                 segments
             );
-            ScheduleTagOrientationRefresh(new TagOrientationRefresh(
-                this,
+            TrackTagOrientationRefresh(new TagOrientationRefresh(
                 player,
                 activeBackground,
                 existingTags,
@@ -430,8 +431,7 @@ public sealed class PlayerTagManager
             tagEntities,
             segments
         );
-        ScheduleTagOrientationRefresh(new TagOrientationRefresh(
-            this,
+        TrackTagOrientationRefresh(new TagOrientationRefresh(
             player,
             backgroundText,
             tagEntities,
@@ -440,10 +440,48 @@ public sealed class PlayerTagManager
         ));
     }
 
-    private void ScheduleTagOrientationRefresh(
+    private void TrackTagOrientationRefresh(
         TagOrientationRefresh refresh)
     {
-        server.ScheduleOnce(0.1.Seconds(), refresh.Callback);
+        orientationRefreshes[refresh.Player.PlayerSteamId] = refresh;
+        if (tagOrientationLoopRunning)
+            return;
+
+        tagOrientationLoopRunning = true;
+        server.ScheduleOnce(
+            TagOrientationRefreshIntervalSeconds.Seconds(),
+            RunTagOrientationRefresh
+        );
+    }
+
+    private void RunTagOrientationRefresh()
+    {
+        // The loop stays marked as running while it executes so that refreshes
+        // tracked re-entrantly (for example from RefreshPlayerTag) do not
+        // schedule a second concurrent loop.
+        try
+        {
+            orientationRefreshBuffer.Clear();
+            orientationRefreshBuffer.AddRange(orientationRefreshes.Values);
+            foreach (TagOrientationRefresh refresh in orientationRefreshBuffer)
+                RefreshTagOrientation(refresh);
+        }
+        finally
+        {
+            orientationRefreshBuffer.Clear();
+
+            if (orientationRefreshes.Count > 0)
+            {
+                server.ScheduleOnce(
+                    TagOrientationRefreshIntervalSeconds.Seconds(),
+                    RunTagOrientationRefresh
+                );
+            }
+            else
+            {
+                tagOrientationLoopRunning = false;
+            }
+        }
     }
 
     private void RefreshTagOrientation(TagOrientationRefresh refresh)
@@ -464,12 +502,14 @@ public sealed class PlayerTagManager
             !ReferenceEquals(currentBackground, refresh.BackgroundText)
         )
         {
+            RemoveTagOrientationRefresh(steamId, refresh);
             return;
         }
 
         var pawn = refresh.Player.GetHeroPawn();
         if (pawn == null || !pawn.IsValid)
         {
+            RemoveTagOrientationRefresh(steamId, refresh);
             RefreshPlayerTag(refresh.Player);
             return;
         }
@@ -481,7 +521,19 @@ public sealed class PlayerTagManager
             refresh.TagEntities,
             refresh.Segments
         );
-        ScheduleTagOrientationRefresh(refresh);
+    }
+
+    private void RemoveTagOrientationRefresh(
+        ulong steamId,
+        TagOrientationRefresh refresh)
+    {
+        if (
+            orientationRefreshes.TryGetValue(steamId, out var current) &&
+            ReferenceEquals(current, refresh)
+        )
+        {
+            orientationRefreshes.Remove(steamId);
+        }
     }
 
     private static bool AreTagEntitiesValid(CPointWorldText[] tagEntities)
@@ -847,6 +899,7 @@ public sealed class PlayerTagManager
         activeTagValues.Remove(steamId);
         activeTagPawnHandles.Remove(steamId);
         lastTagTransforms.Remove(steamId);
+        orientationRefreshes.Remove(steamId);
     }
 
     private void EnsureStaleTagEntitiesRemoved()
@@ -860,6 +913,7 @@ public sealed class PlayerTagManager
         activeTagValues.Clear();
         activeTagPawnHandles.Clear();
         lastTagTransforms.Clear();
+        orientationRefreshes.Clear();
         staleTagEntitiesRemoved = true;
     }
 
