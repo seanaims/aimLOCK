@@ -11,6 +11,7 @@ namespace aimLOCK;
 
 public sealed class GuildManager
 {
+    private const int MaxGuildNameCharacters = 15;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
@@ -20,12 +21,17 @@ public sealed class GuildManager
     public const string DataFileName = "guilds.json";
     private readonly string dataFilePath = JsonStore.PathFor(DataFileName);
     private readonly RankedEloManager rankedElo;
+    private readonly PlayerTagManager playerTagManager;
     private List<GuildData> guilds;
     private Dictionary<ulong, GuildData> memberIndex = new();
 
-    public GuildManager(RankedEloManager rankedElo)
+    public GuildManager(
+        RankedEloManager rankedElo,
+        PlayerTagManager playerTagManager
+    )
     {
         this.rankedElo = rankedElo;
+        this.playerTagManager = playerTagManager;
         guilds = LoadGuilds();
         RebuildMemberIndex();
     }
@@ -42,6 +48,13 @@ public sealed class GuildManager
                 : playerName;
         }
     }
+
+    public string FormatPlayerNameWithSelectedTag(CCitadelPlayerController player) =>
+        playerTagManager.FormatPlayerNameWithSelectedTag(
+            player.PlayerSteamId,
+            player.PlayerName,
+            GetMemberTag(player.PlayerSteamId)
+        );
 
     public string? GetMemberTag(ulong steamId)
     {
@@ -132,8 +145,9 @@ public sealed class GuildManager
             return "Usage: /guild create <tag>.";
 
         string tag = string.Join(" ", arguments).Trim();
-        if (!IsValidTag(tag, 5))
-            return "Guild tags must be 1-5 characters.";
+        string? validationError = GetGuildTagValidationError(tag);
+        if (validationError != null)
+            return validationError;
 
         lock (syncRoot)
         {
@@ -145,7 +159,6 @@ public sealed class GuildManager
                 return $"The guild tag [{tag}] is already in use.";
 
             var updatedGuilds = CloneGuilds(guilds);
-            RemoveInvites(updatedGuilds, player.PlayerSteamId);
             updatedGuilds.Add(new GuildData
             {
                 Name = tag,
@@ -394,8 +407,9 @@ public sealed class GuildManager
     )
     {
         string newTag = requestedTag.Trim();
-        if (!IsValidTag(newTag, 5))
-            return "Guild tags must be 1-5 characters.";
+        string? validationError = GetGuildTagValidationError(newTag);
+        if (validationError != null)
+            return validationError;
 
         lock (syncRoot)
         {
@@ -434,8 +448,9 @@ public sealed class GuildManager
     )
     {
         string newName = requestedName.Trim();
-        if (newName.Length is < 2 or > 32)
-            return "Guild names must be 2-32 characters.";
+        int characterCount = StringInfo.ParseCombiningCharacters(newName).Length;
+        if (characterCount is < 2 or > MaxGuildNameCharacters)
+            return $"Guild names must be 2-{MaxGuildNameCharacters} characters.";
 
         lock (syncRoot)
         {
@@ -543,7 +558,11 @@ public sealed class GuildManager
             string[] members = guild.Members
                 .Select(member =>
                     $"{(member.SteamId == guild.OwnerSteamId ? "[Owner] " : "")}" +
-                    GetCurrentPlayerName(member))
+                    playerTagManager.FormatPlayerNameWithSelectedTag(
+                        member.SteamId,
+                        GetCurrentPlayerName(member),
+                        guild.Tag
+                    ))
                 .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             if (membersOnly)
@@ -605,7 +624,8 @@ public sealed class GuildManager
         "decline [tag|name], leave, lookup [tag|name], members [tag|name], " +
         "list, mode <open|invite>, newtag <tag>, rename <name>, " +
         "kick <member>, transfer <member>, disband confirm. " +
-        "Tags are 1-5 characters.";
+        $"Tags are 1-5 characters and cannot use built-in player tags; " +
+        $"names are 2-{MaxGuildNameCharacters} characters.";
 
     private static CCitadelPlayerController? FindOnlinePlayer(
         string query,
@@ -761,6 +781,15 @@ public sealed class GuildManager
             !tag.Any(char.IsControl);
     }
 
+    private static string? GetGuildTagValidationError(string tag)
+    {
+        if (!IsValidTag(tag, 5))
+            return "Guild tags must be 1-5 characters.";
+        if (PlayerTagManager.TryParseTag(tag, out _))
+            return $"The guild tag [{tag}] is reserved for built-in player tags.";
+        return null;
+    }
+
     private static void RemoveInvites(
         IEnumerable<GuildData> source,
         ulong steamId
@@ -818,8 +847,6 @@ public sealed class GuildManager
 
     private static List<GuildData> ValidateGuilds(List<GuildData> loadedGuilds)
     {
-        // Old saves can have invites for players who are already members.
-
         var allMemberIds = loadedGuilds
             .SelectMany(guild => guild.Members)
             .Select(member => member.SteamId)
