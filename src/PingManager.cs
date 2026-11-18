@@ -8,7 +8,11 @@ namespace aimLOCK;
 
 public sealed class PingManager
 {
+    // `status` prints every player to the server console, which is not free on a
+    // Windows console. Poll quickly only while someone is queued (matchmaking needs fresh
+    // pings); otherwise poll just often enough to keep readings from expiring.
     private const int PollIntervalSeconds = 5;
+    private const int IdlePollIntervalSeconds = 10;
     private const int PollTimeoutSeconds = 2;
     private static readonly TimeSpan ReadingLifetime = TimeSpan.FromSeconds(15);
     private const int SampleCount = 3;
@@ -20,6 +24,7 @@ public sealed class PingManager
     private bool _pollInProgress;
     private bool _warnedAboutMissingRows;
     private int _pollGeneration;
+    private int _scheduledPollToken;
 
     public PingManager(aimLOCK server)
     {
@@ -145,14 +150,17 @@ public sealed class PingManager
                 }
             }
 
-            var staleSampleIds = new List<ulong>();
+            List<ulong>? staleSampleIds = null;
             foreach (var sample in _samples)
             {
                 if (!connectedIds.Contains(sample.Key))
-                    staleSampleIds.Add(sample.Key);
+                    (staleSampleIds ??= new List<ulong>()).Add(sample.Key);
             }
-            foreach (ulong steamId in staleSampleIds)
-                _samples.Remove(steamId);
+            if (staleSampleIds != null)
+            {
+                foreach (ulong steamId in staleSampleIds)
+                    _samples.Remove(steamId);
+            }
 
             _latestReadings.Clear();
             DateTimeOffset capturedAt = DateTimeOffset.UtcNow;
@@ -286,8 +294,21 @@ public sealed class PingManager
 
     private void ScheduleNextPoll()
     {
-        if (_started)
-            server.ScheduleOnce(PollIntervalSeconds.Seconds(), Poll);
+        if (!_started)
+            return;
+
+        // Only the most recently scheduled poll may run. Without this, every /ping
+        // (Refresh) and every overlapping poll started an extra polling loop that never
+        // ended, so `status` ran more and more often the longer the server was up.
+        int token = ++_scheduledPollToken;
+        bool anyoneQueued =
+            server.RankedQueue.Count > 0 || server.UnrankedQueue.Count > 0;
+        int interval = anyoneQueued ? PollIntervalSeconds : IdlePollIntervalSeconds;
+        server.ScheduleOnce(interval.Seconds(), () =>
+        {
+            if (token == _scheduledPollToken)
+                Poll();
+        });
     }
 
     private sealed record StatusRow(string Name, int PingMs);
