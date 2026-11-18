@@ -186,7 +186,10 @@ public class UIManager
             );
     }
 
-    private string GetQueueStatus(ulong steamId, DateTimeOffset now)
+    private string GetQueueStatus(ulong steamId, DateTimeOffset now) =>
+        GetQueuePosition(steamId, now) ?? "/join ranked or /join unranked";
+
+    private string? GetQueuePosition(ulong steamId, DateTimeOffset now)
     {
         foreach (
             (List<QueueEntry> queue, string queueName) in new[]
@@ -207,7 +210,7 @@ public class UIManager
             return $"In {queueName} queue: #{index + 1} · {(int)waited.TotalMinutes}:{waited.Seconds:00}";
         }
 
-        return "/join ranked or /join unranked";
+        return null;
     }
 
     private void ScheduleClockRefresh()
@@ -233,13 +236,22 @@ public class UIManager
         DateTimeOffset utcNow = DateTimeOffset.UtcNow;
         foreach (var controller in Players.GetAll())
         {
-            if (
-                server.PlayerManager.TryGetActiveMatch(controller, out _) ||
-                hiddenServerInfo.Contains(controller.PlayerSteamId)
-            )
+            if (server.PlayerManager.TryGetActiveMatch(controller, out var activeMatch))
             {
+                if (!controller.IsBot && server.PlayerManager.IsBotMatch(activeMatch))
+                {
+                    UI.Panel("duelhud").Set(
+                        controller.Recipients,
+                        "duelqueue",
+                        GetQueuePosition(controller.PlayerSteamId, utcNow) ?? ""
+                    );
+                }
+
                 continue;
             }
+
+            if (hiddenServerInfo.Contains(controller.PlayerSteamId))
+                continue;
 
             ulong steamId = controller.PlayerSteamId;
             if (!serverInfoPanelState.TryGetValue(steamId, out bool built) || !built)
@@ -506,6 +518,24 @@ public class UIManager
                     .WithStyle("color", "#FF8A00")
                     .WithStyle("horizontal-align", "center")
             );
+
+        // Bot matches are the only ones a player can be queued during: show their
+        // queue position under the score (RefreshClock keeps it ticking).
+        if (p1.IsBot || p2.IsBot)
+        {
+            var human = p1.IsBot ? p2 : p1;
+            layout.Add(
+                UI.Label(
+                    "duelqueue",
+                    GetQueuePosition(human.PlayerSteamId, DateTimeOffset.UtcNow) ?? ""
+                )
+                    .WithStyle("font-size", "15px")
+                    .WithStyle("font-weight", "bold")
+                    .WithStyle("color", "#7FD4FF")
+                    .WithStyle("horizontal-align", "center")
+                    .WithStyle("margin-top", "4px")
+            );
+        }
 
         UI.Panel("duelhud").BuildLayout(p1.Recipients, layout);
         UI.Panel("duelhud").BuildLayout(p2.Recipients, layout);
