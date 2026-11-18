@@ -29,6 +29,8 @@ public sealed class LeaderboardManager
 
     private static readonly Vector3 DefaultPosition =
         new(-2642f, -9702f, 1481f);
+    private Vector3 ActiveMatchesPosition =>
+        new(201f, -9719f, position.Z);
     private static readonly Vector3 TextAngles = new(180f, 90f, 270f);
     private const uint HeaderColorABGR = 0xFF00A5FF;
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -45,6 +47,15 @@ public sealed class LeaderboardManager
     private readonly CPointWorldText?[] headerTexts = new CPointWorldText?[4];
     private readonly CPointWorldText?[] backgroundTexts = new CPointWorldText?[4];
     private readonly int[] panelLineCounts = new int[4];
+    private CPointWorldText? activeMatchesBodyText;
+    private CPointWorldText? activeMatchesHeaderText;
+    private CPointWorldText? activeMatchesBackgroundText;
+    private string? lastAppliedActiveMatchesState;
+    // Text and layout last pushed to the world-text entities. When a refresh would
+    // produce the same thing, nothing is re-sent to clients.
+    private string? lastAppliedState;
+    private bool refreshScheduled;
+    private const double DeferredRefreshDelaySeconds = 3;
 
     public LeaderboardManager(aimLOCK server)
     {
@@ -60,12 +71,24 @@ public sealed class LeaderboardManager
 
     private void RemoveExistingLeaderboardText()
     {
+        Vector3[] legacyGuildPositions =
+        {
+            new(88f, -9615f, position.Z),
+            new(-2710f, -9355f, 1215f)
+        };
+
         foreach (var entity in Entities.All)
         {
             if (!entity.Is<CPointWorldText>())
                 continue;
 
             Vector3 entityPosition = entity.Position;
+            if (IsActiveMatchesTextPosition(entityPosition))
+            {
+                entity.Remove();
+                continue;
+            }
+
             bool isLeaderboardText = false;
             for (int panelIndex = 0; panelIndex < bodyTexts.Length; panelIndex++)
             {
@@ -107,18 +130,10 @@ public sealed class LeaderboardManager
 
                 if (!isLeaderboardText && panelIndex == 3)
                 {
-                    for (
-                        int lineIndex = 0;
-                        lineIndex < EntriesPerLeaderboard;
-                        lineIndex++
-                    )
-                    {
-                        if (IsLegacyGuildEloRowText(entityPosition, lineIndex))
-                        {
-                            isLeaderboardText = true;
-                            break;
-                        }
-                    }
+                    isLeaderboardText = IsLegacyGuildEloPanelText(
+                        entityPosition,
+                        legacyGuildPositions
+                    );
                 }
 
                 if (isLeaderboardText)
@@ -133,9 +148,58 @@ public sealed class LeaderboardManager
     private static bool IsNear(Vector3 first, Vector3 second) =>
         Vector3.DistanceSquared(first, second) <= 25f;
 
+    private bool IsActiveMatchesTextPosition(Vector3 entityPosition)
+    {
+        if (IsNear(entityPosition, ActiveMatchesPosition))
+            return true;
+
+        for (
+            int panelLineCount = 2;
+            panelLineCount <= server.DuelLocations.Length + 1;
+            panelLineCount++
+        )
+        {
+            if (
+                IsNear(
+                    entityPosition,
+                    GetActiveMatchesHeaderPosition(panelLineCount)
+                ) ||
+                IsNear(
+                    entityPosition,
+                    GetActiveMatchesBackgroundPosition(panelLineCount)
+                )
+            )
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Refresh a few seconds from now, coalescing repeated requests. Used at match end,
+    /// so the sorting and world-text updates don't land on the same frame as the
+    /// teleports, team changes and HUD rebuilds of finishing a match.
+    /// </summary>
+    public void RequestRefresh()
+    {
+        if (refreshScheduled)
+            return;
+
+        refreshScheduled = true;
+        server.ScheduleOnce(DeferredRefreshDelaySeconds.Seconds(), () =>
+        {
+            refreshScheduled = false;
+            Refresh();
+        });
+    }
+
     public void Refresh()
     {
         LeaderboardPanelContent[] panels = BuildMessages();
+        string state = BuildAppliedState(panels);
+        if (state == lastAppliedState && AllPanelEntitiesValid())
+            return;
+
         int longestLine = panels
             .SelectMany(panel => panel.Lines.Append(panel.Title))
             .Max(line => line.Length);
@@ -222,6 +286,220 @@ public sealed class LeaderboardManager
                 }
             }
         }
+
+        lastAppliedState = state;
+        RefreshActiveMatches();
+    }
+
+    public void RefreshActiveMatches()
+    {
+        DuelMatch[] matches = server.ActiveMatches.Values
+            .Where(match => !match.Finished)
+            .Distinct()
+            .OrderBy(match => match.ArenaIndex)
+            .ToArray();
+        string[] lines = matches.Length == 0
+            ? new[] { "No active matches." }
+            : matches.Select(BuildActiveMatchLine).ToArray();
+        string state = string.Join('\n', lines);
+        if (
+            state == lastAppliedActiveMatchesState &&
+            activeMatchesBodyText is { IsValid: true } &&
+            activeMatchesHeaderText is { IsValid: true } &&
+            activeMatchesBackgroundText is { IsValid: true }
+        )
+            return;
+
+        int panelLineCount = lines.Length + 1;
+        int longestLine = Math.Max(
+            "ACTIVE MATCHES".Length,
+            lines.Max(line => line.Length)
+        );
+        int backgroundGlyphCount = Math.Max(
+            1,
+            (int)Math.Ceiling(longestLine / 2d) + BackgroundHorizontalPadding
+        );
+        string backgroundLine = new(BackgroundGlyph, backgroundGlyphCount);
+        string backgroundMessage = BuildBodyMessage(
+            Enumerable.Repeat(
+                backgroundLine,
+                lines.Length + BackgroundVerticalPadding
+            ).ToArray()
+        );
+        Vector3 backgroundPosition =
+            GetActiveMatchesBackgroundPosition(panelLineCount);
+
+        var backgroundText = activeMatchesBackgroundText;
+        if (backgroundText is { IsValid: true })
+        {
+            backgroundText.SetMessage(backgroundMessage);
+            backgroundText.Teleport(position: backgroundPosition);
+        }
+        else
+        {
+            backgroundText = CPointWorldText.Create(
+                backgroundMessage,
+                backgroundPosition,
+                fontSize: FontSize,
+                worldUnitsPerPx: WorldUnitsPerPx,
+                fontName: "RetailDemo-Regular",
+                reorientMode: 1
+            );
+            if (backgroundText == null)
+            {
+                Console.WriteLine(
+                    "[aimLOCK] Failed to create active matches background."
+                );
+                return;
+            }
+
+            activeMatchesBackgroundText = backgroundText;
+            backgroundText.Teleport(angles: TextAngles);
+        }
+
+        backgroundText.ColorABGR = (uint)BackgroundAlpha << 24;
+        backgroundText.Fullbright = true;
+        backgroundText.DepthOffset = BackgroundDepthOffset;
+        backgroundText.JustifyHorizontal = HorizontalJustify.Center;
+
+        string bodyMessage = BuildBodyMessage(lines);
+        var bodyText = activeMatchesBodyText;
+        if (bodyText is { IsValid: true })
+        {
+            bodyText.SetMessage(bodyMessage);
+        }
+        else
+        {
+            bodyText = CPointWorldText.Create(
+                bodyMessage,
+                ActiveMatchesPosition,
+                fontSize: FontSize,
+                worldUnitsPerPx: WorldUnitsPerPx,
+                fontName: "RetailDemo-Regular",
+                reorientMode: 1
+            );
+            if (bodyText == null)
+            {
+                Console.WriteLine("[aimLOCK] Failed to create active matches text.");
+                return;
+            }
+
+            activeMatchesBodyText = bodyText;
+            bodyText.JustifyHorizontal = HorizontalJustify.Center;
+            bodyText.Teleport(angles: TextAngles);
+        }
+
+        string headerMessage = BuildHeaderMessage(
+            "ACTIVE MATCHES",
+            panelLineCount
+        );
+        Vector3 headerPosition =
+            GetActiveMatchesHeaderPosition(panelLineCount);
+        var headerText = activeMatchesHeaderText;
+        if (headerText is { IsValid: true })
+        {
+            headerText.SetMessage(headerMessage);
+            headerText.ColorABGR = HeaderColorABGR;
+            headerText.Teleport(position: headerPosition);
+        }
+        else
+        {
+            headerText = CPointWorldText.Create(
+                headerMessage,
+                headerPosition,
+                fontSize: HeaderFontSize,
+                worldUnitsPerPx: WorldUnitsPerPx,
+                fontName: "RetailDemo-Bold",
+                reorientMode: 1
+            );
+            if (headerText == null)
+            {
+                Console.WriteLine(
+                    "[aimLOCK] Failed to create active matches heading."
+                );
+                return;
+            }
+
+            activeMatchesHeaderText = headerText;
+            headerText.JustifyHorizontal = HorizontalJustify.Center;
+            headerText.ColorABGR = HeaderColorABGR;
+            headerText.Teleport(angles: TextAngles);
+        }
+
+        lastAppliedActiveMatchesState = state;
+    }
+
+    private string BuildActiveMatchLine(DuelMatch match)
+    {
+        string participant1 = GetActiveMatchParticipantName(match.Player1);
+        string participant2 = GetActiveMatchParticipantName(match.Player2);
+        string arenaName =
+            (uint)match.ArenaIndex < (uint)aimLOCK.DuelArenaNames.Length
+                ? aimLOCK.DuelArenaNames[match.ArenaIndex]
+                : $"Arena {match.ArenaIndex + 1}";
+        string queueName = match.QueueType == MatchQueueType.Ranked
+            ? "Ranked"
+            : "Unranked";
+        return $"{arenaName} | {queueName} | {participant1} {match.Score1}-{match.Score2} {participant2}";
+    }
+
+    private string GetActiveMatchParticipantName(string participantName)
+    {
+        var player = server.PlayerManager.FindMatchParticipant(participantName);
+        return player == null
+            ? participantName
+            : server.PlayerManager.GetPracticeBotDisplayName(player) ??
+                server.GuildManager.FormatPlayerNameWithSelectedTag(player);
+    }
+
+    private Vector3 GetActiveMatchesHeaderPosition(int panelLineCount) =>
+        ActiveMatchesPosition + new Vector3(
+            (HeaderFontSize - FontSize) *
+            WorldUnitsPerPx *
+            (panelLineCount - 1),
+            0f,
+            0f
+        );
+
+    private Vector3 GetActiveMatchesBackgroundPosition(
+        int panelLineCount
+    )
+    {
+        float headerOffset =
+            GetActiveMatchesHeaderPosition(panelLineCount).X -
+            ActiveMatchesPosition.X;
+        return ActiveMatchesPosition + new Vector3(headerOffset * 0.75f, 0f, 0f);
+    }
+
+    private string BuildAppliedState(LeaderboardPanelContent[] panels)
+    {
+        var builder = new System.Text.StringBuilder();
+        builder.Append(position.X).Append(',').Append(position.Y).Append(',')
+            .Append(position.Z).Append('\n');
+        foreach (var panel in panels)
+        {
+            builder.Append(panel.Title).Append('\n');
+            foreach (string line in panel.Lines)
+                builder.Append(line).Append('\n');
+            builder.Append('\u0001');
+        }
+
+        return builder.ToString();
+    }
+
+    private bool AllPanelEntitiesValid()
+    {
+        for (int i = 0; i < bodyTexts.Length; i++)
+        {
+            if (
+                bodyTexts[i] is not { IsValid: true } ||
+                headerTexts[i] is not { IsValid: true } ||
+                backgroundTexts[i] is not { IsValid: true }
+            )
+                return false;
+        }
+
+        return true;
     }
 
     public bool MoveTo(Vector3 newPosition)
@@ -267,7 +545,7 @@ public sealed class LeaderboardManager
     private Vector3 GetPanelPosition(int index)
     {
         Vector3 panelPosition = index == 3
-            ? new Vector3(88f, -9615f, position.Z)
+            ? GetGuildEloPosition()
             : position + new Vector3(PanelSpacing * index, 0f, 0f);
 
         return index < 3
@@ -278,9 +556,12 @@ public sealed class LeaderboardManager
     private Vector3 GetBodyPosition(int index) =>
         GetPanelPosition(index);
 
-    private bool IsLegacyGuildEloRowText(Vector3 entityPosition, int lineIndex)
+    private static bool IsLegacyGuildEloRowText(
+        Vector3 entityPosition,
+        int lineIndex,
+        Vector3 bodyPosition
+    )
     {
-        Vector3 bodyPosition = GetBodyPosition(3);
         float rowSpacing = FontSize * WorldUnitsPerPx;
         float maxHalfWidth = rowSpacing * 50f;
         float previousX = bodyPosition.X + rowSpacing * (lineIndex + 1);
@@ -293,6 +574,74 @@ public sealed class LeaderboardManager
                 Math.Abs(entityPosition.X - latestX) <= 5f
             );
     }
+
+    private static bool IsLegacyGuildEloPanelText(
+        Vector3 entityPosition,
+        Vector3[] legacyGuildPositions
+    )
+    {
+        foreach (Vector3 bodyPosition in legacyGuildPositions)
+        {
+            if (
+                IsNear(entityPosition, bodyPosition) ||
+                IsNear(
+                    entityPosition,
+                    bodyPosition + new Vector3(0f, PreviousBodyColumnOffset, 0f)
+                )
+            )
+            {
+                return true;
+            }
+
+            for (
+                int lineCount = 2;
+                lineCount <= EntriesPerLeaderboard + 1;
+                lineCount++
+            )
+            {
+                float headerOffset = (HeaderFontSize - FontSize) *
+                    WorldUnitsPerPx *
+                    (lineCount - 1);
+                Vector3 headerPosition =
+                    bodyPosition + new Vector3(headerOffset, 0f, 0f);
+                if (
+                    IsNear(entityPosition, headerPosition) ||
+                    IsNear(
+                        entityPosition,
+                        headerPosition +
+                            new Vector3(0f, PreviousHeaderColumnOffset, 0f)
+                    ) ||
+                    IsNear(
+                        entityPosition,
+                        bodyPosition +
+                            new Vector3(headerOffset * 0.75f, 0f, 0f)
+                    )
+                )
+                {
+                    return true;
+                }
+            }
+
+            for (int lineIndex = 0; lineIndex < EntriesPerLeaderboard; lineIndex++)
+            {
+                if (
+                    IsLegacyGuildEloRowText(
+                        entityPosition,
+                        lineIndex,
+                        bodyPosition
+                    )
+                )
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private Vector3 GetGuildEloPosition() =>
+        new(-2779f, -9345f, position.Z);
 
     private Vector3 GetHeaderPosition(int index, int lineCount) =>
         GetPreviousHeaderPosition(index, lineCount);
@@ -546,25 +895,39 @@ public sealed class LeaderboardManager
 
     private Vector3 LoadPosition()
     {
-        var saved = JsonStore.Load(
+        var savedPosition = JsonStore.Load(
             positionFilePath,
-            () => new LeaderboardPosition(DefaultPosition.X, DefaultPosition.Y, DefaultPosition.Z),
+            () => new LeaderboardPosition(
+                DefaultPosition.X,
+                DefaultPosition.Y,
+                DefaultPosition.Z
+            ),
             JsonOptions,
             candidate =>
             {
-                ValidatePosition(new Vector3(candidate.X, candidate.Y, candidate.Z));
+                ValidatePosition(
+                    new Vector3(candidate.X, candidate.Y, candidate.Z)
+                );
                 return candidate;
             }
         );
-        return new Vector3(saved.X, saved.Y, saved.Z);
+        var loadedPosition = new Vector3(
+            savedPosition.X,
+            savedPosition.Y,
+            savedPosition.Z
+        );
+        ValidatePosition(loadedPosition);
+        return loadedPosition;
     }
 
-    private void SavePosition(Vector3 newPosition) =>
+    private void SavePosition(Vector3 newPosition)
+    {
         JsonStore.Save(
             positionFilePath,
             new LeaderboardPosition(newPosition.X, newPosition.Y, newPosition.Z),
             JsonOptions
         );
+    }
 
     private static void ValidatePosition(Vector3 candidate)
     {

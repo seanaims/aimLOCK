@@ -23,16 +23,7 @@ namespace aimLOCK;
 public class aimLOCK : DeadworksPluginBase
 {
     public override string Name => "aimLOCK";
-    private static readonly HashSet<string> EntityDesignerNamesToRemove = new(StringComparer.Ordinal)
-    {
-        "npc_boss_tier3",
-        "npc_boss_tier2",
-        "npc_boss_tier1",
-        "npc_barrack_boss",
-        "npc_base_defense_sentry",
-        "npc_trooper_boss",
-        "npc_trooper"
-    };
+
     private static readonly string[] StartupForceKillCommands =
     [
         "citadel_force_kill walkers",
@@ -41,14 +32,6 @@ public class aimLOCK : DeadworksPluginBase
         "citadel_force_kill troopers",
         "citadel_force_kill haunts"
     ];
-    private readonly HashSet<string> _missingNpcSpawnConVarsLogged =
-        new(StringComparer.Ordinal);
-    private readonly Queue<uint> _pendingEntityRemovals = new();
-    private readonly HashSet<uint> _pendingEntityRemovalHandles = new();
-    private bool _entityRemovalSweepRunning;
-    private bool _initialEntityRemovalSweepStarted;
-    private bool _entityCullingEnabled;
-    private int _entityCullingGeneration;
     private bool _rutgerForceFieldCastScheduled;
     private bool _rutgerForceFieldCastAttempted;
     private int? _previousSvInfiniteAmmo;
@@ -62,6 +45,8 @@ public class aimLOCK : DeadworksPluginBase
 
     public const int WIN_SCORE = 6;
     public const float DUEL_SPAWN_OFFSET = 65f;
+    private const string WelcomeMessage =
+        "[aimLOCK] Welcome! This server runs 1v1 duels. Join /join ranked to gain Elo or /join unranked for casual matches; use /leave to exit a queue. See /help 1 for queue commands.";
 
     public readonly Vector3[] DuelLocations =
     {
@@ -100,10 +85,16 @@ public class aimLOCK : DeadworksPluginBase
     private static readonly Vector3 RutgerForceFieldPosition =
         new(-1238f, -3606f, -472f);
 
-    public const float DUEL_GLASS_CANNON_DAMAGE = 300f;
-    public const float DUEL_GLASS_CANNON_HEALTH_LOSS = 0f;
+    // Server-side lifesteal (see PlayerManager.ApplyServerLifesteal): 100% by default,
+    // 85% in duels and bot matches (/lifesteal), or a player's own /handicap value.
+    // true = bullet damage only; false = all damage types except Fixation's.
+    public const bool DUEL_LIFESTEAL_BULLETS_ONLY = true;
+
+    // Duel bullet damage: bullets deal DUEL_BULLET_DAMAGE / BASE_DUEL_BULLET_DAMAGE
+    // times their normal damage during a duel (see PlayerManager.ApplyDuelBulletDamage).
     public const float BASE_DUEL_BULLET_DAMAGE = 25f;
-    public const float DUEL_BULLET_DAMAGE = 40f;
+    public const float DUEL_BULLET_DAMAGE = 25f; // 25 = normal damage (the 40 change is off)
+
     public const float DUEL_BULLET_VELOCITY = 100f;
 
     public readonly Random random = new();
@@ -117,6 +108,100 @@ public class aimLOCK : DeadworksPluginBase
     public PingManager PingManager { get; private set; } = null!;
     public PlayerTagManager PlayerTagManager { get; private set; } = null!;
     public GuildManager GuildManager { get; private set; } = null!;
+    public MapCleaner MapCleaner { get; private set; } = null!;
+    public ShopZoneFixer ShopZoneFixer { get; private set; } = null!;
+    public HazeHitboxFilter HazeHitboxFilter { get; } = new();
+
+    // Content addons mounted server-side and sent to clients, e.g. an edited Haze model
+    // with the right-side hitbox fixed. Put <name>.vpk in
+    // game/citadel/deadworks_server_addons/vpks/ and add "<name>" here.
+    private static readonly string[] ServerContentAddons = { };
+    public override IReadOnlyList<string> ContentAddons => ServerContentAddons;
+
+    /* Server Settings */
+
+    /// <summary>
+    /// The game resets its convars when the server hibernates (empty server), which
+    /// undid instant respawns, duplicate heroes and the NPC/breakable spawn switches.
+    /// Re-applied on startup and whenever a player joins; each one is only written
+    /// when it differs, so this is cheap to call.
+    /// </summary>
+    private void ApplyServerConVars(bool logChanges)
+    {
+        // Stay awake when empty: waking from hibernation cost an 18 s server frame in
+        // testing and resets every convar above.
+        SetConVarInt("sv_hibernate_when_empty", 0, logChanges);
+        MapCleaner.DisableSpawnConVars();
+        SetConVarFloat("citadel_player_spawn_time_max_respawn_time", -2f, logChanges);
+        SetConVarInt("citadel_allow_duplicate_heroes", 1, logChanges);
+        // Ability and item cooldowns capped at almost nothing, as other 1v1 servers do:
+        // Burst Fire is ready again on the next hit, so it never drops out. Only
+        // Fixation and items exist here.
+        SetConVarFloat("citadel_ability_cooldown_max", AbilityCooldownMax, logChanges);
+        // Copied from other 1v1 servers: no reloading, no comeback or difficulty
+        // gold, no slow-think limit, and bots never take over for players who leave.
+        SetConVarInt("sv_infinite_ammo", 1, logChanges);
+        SetConVarFloat("citadel_player_gold_comeback_multiplier", 0f, logChanges);
+        SetConVarFloat("citadel_player_gold_difficulty_multiplier", 0f, logChanges);
+        SetConVarFloat("think_limit", 0f, logChanges);
+        SetConVarFloat("citadel_bot_takeover_time", 0f, logChanges);
+    }
+
+    private const float AbilityCooldownMax = 0.001f;
+
+    private static void SetConVarInt(string name, int value, bool log)
+    {
+        var conVar = ConVar.Find(name);
+        if (conVar == null)
+        {
+            if (log)
+                Console.WriteLine($"[aimLOCK] Could not find {name}; skipped.");
+            return;
+        }
+
+        if (conVar.GetInt() == value)
+            return;
+
+        conVar.SetInt(value);
+        if (log)
+            Console.WriteLine($"[aimLOCK] Set {name} to {value}.");
+    }
+
+    private static void SetConVarFloat(string name, float value, bool log)
+    {
+        var conVar = ConVar.Find(name);
+        if (conVar == null)
+        {
+            if (log)
+                Console.WriteLine($"[aimLOCK] Could not find {name}; skipped.");
+            return;
+        }
+
+        if (conVar.GetFloat() == value)
+            return;
+
+        conVar.SetFloat(value);
+        if (log)
+            Console.WriteLine($"[aimLOCK] Set {name} to {value}.");
+    }
+
+    /* Precache */
+
+    public override void OnPrecacheResources()
+    {
+        // Load these at map load instead of the first time they're used. Without this
+        // the server loads the hero (on every player's connect hero swap) and the
+        // teleport/respawn particles (on every match start, respawn and /spawn) from
+        // disk mid-game, which is what spiked the server frame on load-in and teleports.
+        Precache.AddHero(Heroes.Haze);
+        if (HeroTypeExtensions.TryParse(PlayerManager.TemporaryConnectHeroName, out var temporaryHero))
+            Precache.AddHero(temporaryHero);
+
+        foreach (string particle in PlayerManager.PrecachedParticles)
+            Precache.AddResource(particle);
+        foreach (string model in PlayerManager.PrecachedModels)
+            Precache.AddResource(model);
+    }
 
     public override void OnLoad(bool isReload)
     {
@@ -125,22 +210,31 @@ public class aimLOCK : DeadworksPluginBase
         JsonStore.ResetLocks();
         MigrateLegacyDataFiles();
 
+        MapCleaner = new MapCleaner(this);
+        ShopZoneFixer = new ShopZoneFixer(this);
         Queue = new QueueManager(this);
         PlayerManager = new PlayerManager(this);
+        PlayerManager.StartDuelLoop();
         PlayerManager.RemoveExistingBots();
         PlayerManager.ClearInjectedSoulsFromConnectedPlayers();
         UIManager = new UIManager(this);
         RankedElo = new RankedEloManager();
         PingManager = new PingManager(this);
         PlayerTagManager = new PlayerTagManager(this);
-        GuildManager = new GuildManager(RankedElo);
+        GuildManager = new GuildManager(RankedElo, PlayerTagManager);
         PlayerManager.LoadRecords();
         LeaderboardManager = new LeaderboardManager(this);
         UIManager.RefreshHud();
         Timer.Once(2.Seconds(), PlayerTagManager.Initialize);
-    }
 
-    /* Move data files from older versions into the aimLOCK folder */
+        // Hot reload: the map is already loaded, so clean it up now.
+        if (isReload)
+        {
+            MapCleaner.DisableSpawnConVars();
+            Timer.Once(1.Seconds(), MapCleaner.StartSweep);
+            Timer.Once(2.Seconds(), ShopZoneFixer.Start);
+        }
+    }
 
     private static void MigrateLegacyDataFiles()
     {
@@ -179,54 +273,20 @@ public class aimLOCK : DeadworksPluginBase
 
     public override void OnStartupServer()
     {
-        int cullingGeneration = ++_entityCullingGeneration;
-        _pendingEntityRemovals.Clear();
-        _pendingEntityRemovalHandles.Clear();
-        _entityRemovalSweepRunning = false;
-        _initialEntityRemovalSweepStarted = false;
-        _entityCullingEnabled = true;
+        modifierSlowKinds.Clear();
+        fixationAbilityHandles.Clear();
+        PlayerManager?.ClearModifierTypeCache();
         DisableServerPausing();
-        DisableNpcSpawning("citadel_trooper_spawn_enabled");
-        DisableNpcSpawning("citadel_npc_spawn_enabled");
         DisableHeroKillGoldRewards();
         Timer.Once(3.Seconds(), () => RunStartupForceKillCommand(0));
 
-        var maxRespawnTime = ConVar.Find(
-            "citadel_player_spawn_time_max_respawn_time"
-        );
-        if (maxRespawnTime == null)
-        {
-            Console.WriteLine(
-                "[aimLOCK] Could not find citadel_player_spawn_time_max_respawn_time; instant respawns were not enabled."
-            );
-        }
-        else
-        {
-            maxRespawnTime.SetFloat(-2f);
-            Console.WriteLine("[aimLOCK] Enabled instant player respawns.");
-        }
-
-        var duplicateHeroes = ConVar.Find("citadel_allow_duplicate_heroes");
-        if (duplicateHeroes == null)
-        {
-            Console.WriteLine(
-                "[aimLOCK] Could not find citadel_allow_duplicate_heroes; duplicate heroes were not enabled."
-            );
-        }
-        else
-        {
-            duplicateHeroes.SetInt(1);
-            Console.WriteLine("[aimLOCK] Enabled duplicate heroes.");
-        }
+        ApplyServerConVars(logChanges: true);
 
         Timer.Once(2.Seconds(), PlayerManager.StartInitialSpawnRecoverySweep);
-        Timer.Once(
-            1.Seconds(),
-            () => QueueExistingEntityRemovalSweep(cullingGeneration)
-        );
+        Timer.Once(1.Seconds(), MapCleaner.StartSweep);
+        Timer.Once(2.Seconds(), ShopZoneFixer.Start);
         Timer.Once(1.Seconds(), PlayerManager.CreateDuelArenaRadiusMarkers);
-        Timer.Once(1.Seconds(), PlayerManager.RemovePracticeBotZoneBoundaries);
-        Timer.Once(1.Seconds(), PlayerManager.CreatePracticeBotDoorwayLabel);
+        Timer.Once(1.Seconds(), PlayerManager.CreateEntryZoneLabels);
         Timer.Once(2.Seconds(), LeaderboardManager.Initialize);
         PingManager.Start();
     }
@@ -259,144 +319,11 @@ public class aimLOCK : DeadworksPluginBase
 
     public override void OnUnload()
     {
-        _entityCullingEnabled = false;
-        _entityCullingGeneration++;
-        _pendingEntityRemovals.Clear();
-        _pendingEntityRemovalHandles.Clear();
-        _entityRemovalSweepRunning = false;
         PlayerManager.RemoveDuelArenaRadiusMarkers();
-        PlayerManager.RemovePracticeBotZoneBoundaries();
-        PlayerManager.RemovePracticeBotDoorwayLabel();
+        PlayerManager.RemoveEntryZoneLabels();
         PlayerManager.RemoveArenaScoreboards();
+        BackgroundFileWriter.Flush(TimeSpan.FromSeconds(5));
         base.OnUnload();
-    }
-
-    public override void OnEntitySpawned(EntitySpawnedEvent args)
-    {
-        if (
-            !_entityCullingEnabled ||
-            args.Entity is not CAI_BaseNPC entity ||
-            !ShouldRemoveEnemyNpc(entity)
-        )
-            return;
-
-        QueueEntityRemoval(entity.EntityHandle, _entityCullingGeneration);
-    }
-
-    private void QueueExistingEntityRemovalSweep(int generation)
-    {
-        if (
-            !_entityCullingEnabled ||
-            generation != _entityCullingGeneration ||
-            _initialEntityRemovalSweepStarted
-        )
-            return;
-
-        _initialEntityRemovalSweepStarted = true;
-        DisableNpcSpawning("citadel_trooper_spawn_enabled");
-        DisableNpcSpawning("citadel_npc_spawn_enabled");
-
-        int queued = 0;
-        foreach (var entity in Entities.ByClass<CAI_BaseNPC>())
-        {
-            if (
-                ShouldRemoveEnemyNpc(entity) &&
-                _pendingEntityRemovalHandles.Add(entity.EntityHandle)
-            )
-            {
-                _pendingEntityRemovals.Enqueue(entity.EntityHandle);
-                queued++;
-            }
-        }
-
-        if (queued > 0)
-            Console.WriteLine($"[aimLOCK] Queued {queued} enemy NPCs/objectives for staggered removal.");
-        if (_pendingEntityRemovals.Count > 0)
-        {
-            if (!_entityRemovalSweepRunning)
-            {
-                _entityRemovalSweepRunning = true;
-                Timer.NextTick(() => RemoveNextQueuedEntity(generation));
-            }
-        }
-    }
-
-    private void QueueEntityRemoval(uint entityHandle, int generation)
-    {
-        if (
-            !_entityCullingEnabled ||
-            generation != _entityCullingGeneration ||
-            !_pendingEntityRemovalHandles.Add(entityHandle)
-        )
-            return;
-
-        _pendingEntityRemovals.Enqueue(entityHandle);
-        if (_entityRemovalSweepRunning)
-            return;
-
-        _entityRemovalSweepRunning = true;
-        Timer.NextTick(() => RemoveNextQueuedEntity(generation));
-    }
-
-    private static bool ShouldRemoveEnemyNpc(CBaseEntity entity)
-    {
-        if (
-            !entity.IsValid ||
-            entity is CPointWorldText ||
-            entity is CCitadelPlayerBotNPCBrain
-        )
-            return false;
-
-        if (EntityDesignerNamesToRemove.Contains(entity.DesignerName))
-            return true;
-
-        if (entity is CAI_CitadelNPC citadelNpc)
-            return !citadelNpc.IsMinion && citadelNpc.Summoner == null;
-
-        return entity is CAI_BaseNPC;
-    }
-
-    private void RemoveNextQueuedEntity(int generation)
-    {
-        if (
-            !_entityCullingEnabled ||
-            generation != _entityCullingGeneration
-        )
-            return;
-
-        if (!_pendingEntityRemovals.TryDequeue(out uint entityHandle))
-            return;
-
-        _pendingEntityRemovalHandles.Remove(entityHandle);
-        var entity = CBaseEntity.FromHandle(entityHandle);
-        if (entity != null && ShouldRemoveEnemyNpc(entity))
-            entity.Remove();
-
-        if (_pendingEntityRemovals.Count > 0)
-            Timer.NextTick(() => RemoveNextQueuedEntity(generation));
-        else
-            _entityRemovalSweepRunning = false;
-    }
-
-    private void DisableNpcSpawning(string conVarName)
-    {
-        var conVar = ConVar.Find(conVarName);
-        if (conVar == null)
-        {
-            if (_missingNpcSpawnConVarsLogged.Add(conVarName))
-            {
-                Console.WriteLine(
-                    $"[aimLOCK] Could not find {conVarName}; NPC spawning was not disabled."
-                );
-            }
-            return;
-        }
-
-        if (conVar.GetInt() == 0)
-            return;
-
-        conVar.SetInt(0);
-        Console.WriteLine($"[aimLOCK] Set {conVarName} to 0.");
     }
 
     private void DisableServerPausing()
@@ -517,10 +444,312 @@ public class aimLOCK : DeadworksPluginBase
         Timer.Once(delay, callback);
     }
 
+    public void ScheduleNextTick(Action callback)
+    {
+        Timer.NextTick(callback);
+    }
+
+    /* Map Cleanup, Server-Side Lifesteal, Fixation */
+
+    // Fixation's slow (applied to the target every 20 stacks) is turned off; the
+    // spirit damage proc stays.
+    private const string FixationSlowModifierName = "ability_stacking_damage/slow";
+    private const string BurstFireBuffModifierName = "upgrade_burst_fire/modifier_burst_fire_buff";
+
+    // Modifier VData is shared per modifier type, so the name check is done once per
+    // type and cached by its native pointer. Reading the name allocated a new string on
+    // every modifier added on the server (every hit, buff and item proc).
+    // 0 = nothing to do, 1 = some slow, 2 = Fixation's slow, 3 = Burst Fire's buff.
+    // Cleared on map start.
+    private readonly Dictionary<nint, byte> modifierSlowKinds = new();
+
+    public override HookResult OnAddModifier(AddModifierEvent args)
+    {
+        nint vdata = args.ModifierVData.Handle;
+        if (!modifierSlowKinds.TryGetValue(vdata, out byte slowKind))
+        {
+            string name = args.ModifierVData.Name;
+            slowKind = name == FixationSlowModifierName
+                ? (byte)2
+                : name == BurstFireBuffModifierName
+                    ? (byte)3
+                    : name.Contains("slow", StringComparison.Ordinal) ? (byte)1 : (byte)0;
+            modifierSlowKinds[vdata] = slowKind;
+        }
+
+        if (slowKind == 0)
+            return HookResult.Continue;
+
+        if (slowKind == 3)
+            return HookResult.Continue;
+
+        if (slowKind == 2)
+            return HookResult.Stop;
+
+        // Some other slow: block it only if it comes from Fixation. Cached per ability
+        // handle so the ability's name isn't read again on every slow it applies.
+        uint abilityHandle = args.AbilityHandle;
+        if (abilityHandle == 0xFFFFFFFF)
+            return HookResult.Continue;
+
+        return IsFixationAbility(abilityHandle) ? HookResult.Stop : HookResult.Continue;
+    }
+
+    /// <summary>Whether an ability handle is a Fixation ability. Cached per handle.</summary>
+    public bool IsFixationAbility(uint abilityHandle)
+    {
+        if (fixationAbilityHandles.TryGetValue(abilityHandle, out bool isFixation))
+            return isFixation;
+
+        if (fixationAbilityHandles.Count > 512)
+            fixationAbilityHandles.Clear();
+
+        isFixation =
+            CBaseEntity.FromHandle(abilityHandle)?.As<CCitadelBaseAbility>()?.AbilityName ==
+            "ability_stacking_damage";
+        fixationAbilityHandles[abilityHandle] = isFixation;
+        return isFixation;
+    }
+
+    // Ability handle -> is it Fixation. Handles include a serial number, so a reused
+    // entity slot gets a new handle and never reads a stale answer.
+    private readonly Dictionary<uint, bool> fixationAbilityHandles = new();
+
+    public override void OnEntitySpawned(EntitySpawnedEvent args)
+    {
+        MapCleaner.OnEntitySpawned(args.Entity);
+    }
+
+    public override void OnModifierEvent(ModifierEvent args)
+    {
+        // Fires for every modifier event on the server; bail out before touching anything else.
+        if (args.Event == EModifierEvent.DamageTaken)
+            PlayerManager.ApplyServerLifesteal(args);
+        else if (args.Event == EModifierEvent.HealthTaken && ActiveMatches.Count != 0)
+            PlayerManager.BlockOtherDuelHealing(args);
+        else if (args.Event == EModifierEvent.GunFired)
+            PlayerManager.OnGunFired(args);
+    }
+
+    public override void OnPawnHeroInitialized(CCitadelPlayerPawn pawn)
+    {
+        // Bots: force the current Haze model right here, synchronously, so the hero
+        // setup can't leave the bot on the missing legacy model before the next
+        // network update goes out.
+        if (pawn.IsValid && pawn.HeroID == Heroes.Haze && pawn.Controller is not { IsBot: false })
+        {
+            pawn.SetModel(PlayerManager.HazeModel);
+            PlayerManager.OnPracticeBotHeroInitialized(pawn);
+        }
+
+        // Abilities were just (re)populated (spawn, respawn, hero reset): re-apply the loadout
+        // on the next tick, once the game has finished setting the pawn up.
+        uint pawnHandle = pawn.EntityHandle;
+        Timer.NextTick(() =>
+        {
+            var currentPawn = CBaseEntity.FromHandle<CCitadelPlayerPawn>(pawnHandle);
+            // Skip the temporary hero used during the connect swap; only Haze gets
+            // the loadout here (the other call sites cover Haze regardless).
+            if (
+                currentPawn is { IsValid: true } &&
+                currentPawn.HeroID == Heroes.Haze &&
+                currentPawn.Controller is { IsBot: false }
+            )
+                PlayerManager.ApplyHazeLoadout(currentPawn, force: true);
+        });
+    }
+
+    [Command(
+        "hitdebug",
+        Description = "Toggle printing hit group and position for bullet hits on Haze.",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void HitDebugCommand(Caller caller)
+    {
+        if (caller.Player is not { } player)
+        {
+            caller.Reply("You must be a player to use /hitdebug.");
+            return;
+        }
+
+        caller.Reply(HazeHitboxFilter.ToggleDebug(player)
+            ? "Hit debug on: shoot a Haze to see hit groups."
+            : "Hit debug off.");
+    }
+
+    [Command(
+        "lsdebug",
+        Description = "Toggle a once-a-second lifesteal report in chat (per-hit details in the server log).",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void LifestealDebugCommand(Caller caller)
+    {
+        if (caller.Player is not { } player)
+        {
+            caller.Reply("You must be a player to use /lsdebug.");
+            return;
+        }
+
+        caller.Reply(PlayerManager.ToggleLifestealDebug(player)
+            ? "Lifesteal debug on: a report prints every second while you deal or take damage."
+            : "Lifesteal debug off.");
+    }
+
+    [Command(
+        "hazehitgroup",
+        Description = "Toggle ignoring bullet hits on a Haze hit group: hazehitgroup <id|clear>.",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void HazeHitGroupCommand(Caller caller, string? hitGroup = null)
+    {
+        if (string.Equals(hitGroup, "clear", StringComparison.OrdinalIgnoreCase))
+        {
+            HazeHitboxFilter.ClearBlockedHitGroups();
+            caller.Reply("No Haze hit groups are blocked.");
+            return;
+        }
+
+        if (!int.TryParse(hitGroup, out int id))
+        {
+            caller.Reply(
+                "Blocked Haze hit groups: " +
+                (HazeHitboxFilter.BlockedHitGroups.Count == 0
+                    ? "none"
+                    : string.Join(", ", HazeHitboxFilter.BlockedHitGroups)) +
+                ". Use /hazehitgroup <id> or /hazehitgroup clear."
+            );
+            return;
+        }
+
+        caller.Reply(HazeHitboxFilter.ToggleBlockedHitGroup(id)
+            ? $"Bullet hits on Haze hit group {id} are now ignored."
+            : $"Haze hit group {id} is no longer ignored.");
+    }
+
+    [Command(
+        "bottest",
+        Description = "Debug: spawn a bare bot: bottest [hero] [lane] [ai] [fx] [rename] [arena] [playerfx].",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void BotTestCommand(Caller caller, params string[] arguments)
+    {
+        // Bare Deadworks bot: no match, rename, teleport, items or effects. Used to
+        // find out whether spawning a bot by itself crashes clients.
+        var pawn = caller.Player?.GetHeroPawn();
+        if (pawn is not { IsValid: true })
+        {
+            caller.Reply("You need a living hero to use /bottest.");
+            return;
+        }
+
+        string heroArgument = arguments.Length > 0 ? arguments[0].ToLowerInvariant() : "haze";
+        string heroName = heroArgument.StartsWith("hero_", StringComparison.Ordinal)
+            ? heroArgument
+            : "hero_" + heroArgument;
+        if (!HeroTypeExtensions.TryParse(heroName, out var hero))
+        {
+            caller.Reply($"Unknown hero \"{heroName}\". Try haze or inferno.");
+            return;
+        }
+
+        bool assignLane = arguments.Any(a => a.Equals("lane", StringComparison.OrdinalIgnoreCase));
+        bool keepAi = arguments.Any(a => a.Equals("ai", StringComparison.OrdinalIgnoreCase));
+        if (!keepAi && Bots.AiEnabled)
+            Bots.SetAiEnabled(false);
+
+        bool Has(string option) =>
+            arguments.Any(a => a.Equals(option, StringComparison.OrdinalIgnoreCase));
+
+        // "arena": spawn where /bot puts the bot (an arena far from you) instead of
+        // next to you.
+        Vector3 spawnPosition = pawn.Position + new Vector3(300f, 0f, 0f);
+        if (Has("arena"))
+        {
+            Vector3 arena = DuelLocations[random.Next(DuelLocations.Length)];
+            spawnPosition = PlayerManager.GetDuelArenaCenter(arena) +
+                new Vector3(DUEL_SPAWN_OFFSET, 0f, 0f);
+        }
+
+        // "playerfx": put the respawn effect on you, like /bot does at match start.
+        if (Has("playerfx"))
+            PlayerManager.CreateDebugEffect(pawn);
+
+        var bot = Bots.Add(
+            hero,
+            3,
+            spawnPosition,
+            BotDifficulty.Medium,
+            assignLane
+        );
+        if (bot is { IsValid: true })
+        {
+            if (arguments.Any(a => a.Equals("fx", StringComparison.OrdinalIgnoreCase)))
+                PlayerManager.CreateDebugEffect(bot);
+            if (
+                arguments.Any(a => a.Equals("rename", StringComparison.OrdinalIgnoreCase)) &&
+                bot.Controller is { } botController
+            )
+                botController.PlayerName = botController.PlayerName + " (Test)";
+        }
+
+        caller.Reply(bot == null
+            ? "Bot spawn failed."
+            : $"Spawned test bot {heroName} (lane {(assignLane ? "on" : "off")}, AI {(keepAi ? "on" : "off")}). Use /botclear to remove it.");
+    }
+
+    [Command(
+        "botclear",
+        Description = "Debug: kick every bot.",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void BotClearCommand(Caller caller)
+    {
+        PlayerManager.RemoveExistingBots();
+        caller.Reply("All bots kicked.");
+    }
+
+    [Command(
+        "fixdebug",
+        Description = "List Fixation modifiers (stacks and limit) on you and your duel opponent.",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void FixationDebugCommand(Caller caller) => PlayerManager.FixationDebugCommand(caller);
+
+    [Command(
+        "dumpents",
+        Description = "Write every entity designer name on the map to aimlock_entities.txt.",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void DumpEntitiesCommand(Caller caller)
+    {
+        try
+        {
+            caller.Reply($"Entity list written to {MapCleaner.DumpEntities()}.");
+        }
+        catch (IOException ex)
+        {
+            caller.Reply("Could not write the entity list.");
+            Console.WriteLine($"[aimLOCK] /dumpents failed: {ex}");
+        }
+    }
+
     /* Force Haze, Skip Team Selection */
 
     public override void OnClientFullConnect(ClientFullConnectEvent args)
     {
+        // The practice bot is spawned as Haze directly. It needs none of the player
+        // connect work (hero swap, HUD panels, overhead tag, guild name update).
+        if (args.Controller is { IsBot: true })
+            return;
+
+        ApplyServerConVars(logChanges: true);
         PlayerManager.OnPlayerConnect(args);
 
         if (args.Controller is { } connectedPlayer)
@@ -541,6 +770,12 @@ public class aimLOCK : DeadworksPluginBase
                     $"Access denied updating guild member name for {connectedPlayer.PlayerName}: {ex}"
                 );
             }
+
+            ScheduleOnce(2.Seconds(), () =>
+            {
+                if (connectedPlayer.IsValid)
+                    Chat.PrintToChat(connectedPlayer, WelcomeMessage);
+            });
         }
 
         if (_rutgerForceFieldCastScheduled
@@ -666,6 +901,14 @@ public class aimLOCK : DeadworksPluginBase
 
     public override void OnClientPutInServer(ClientPutInServerEvent args)
     {
+        // A player is joining: clear out leftover bots before their game is sent
+        // anything (a bot that already exists when a player joins crashes that player).
+        if (!args.IsBot)
+        {
+            PlayerManager.RemoveOrphanPracticeBots();
+            PlayerManager.RemoveUntrackedBots();
+        }
+
         if (args.Controller is { } controller)
             PlayerManager.OnPlayerPutInServer(controller);
     }
@@ -680,14 +923,30 @@ public class aimLOCK : DeadworksPluginBase
 
         Queue.OnPlayerDisconnect(controller);
         PlayerManager.OnPlayerDisconnect(controller);
+        HazeHitboxFilter.RemoveDebugSubscriber(controller);
         controller.RemoveWithPawns();
     }
 
     public override HookResult OnTakeDamage(TakeDamageEvent args)
     {
-        return PlayerManager.BlockPracticeBotDamage(args)
-            ? HookResult.Stop
-            : PlayerManager.ApplyDuelBulletDamage(args);
+        if (PlayerManager.BlockPracticeBotDamage(args) || HazeHitboxFilter.ShouldBlock(args))
+            return HookResult.Stop;
+
+        PlayerManager.ApplyDuelBulletDamage(args);
+        return HookResult.Continue;
+    }
+
+    public override HookResult OnModifyCurrency(ModifyCurrencyEvent args)
+    {
+        if (args.CurrencyType == ECurrencyType.EGold)
+            return PlayerManager.OnSoulsChanged(args);
+
+        return HookResult.Continue;
+    }
+
+    public override void OnCheckTransmit(CheckTransmitEvent args)
+    {
+        PlayerManager.HideOtherPlayersBots(args);
     }
 
     public override void OnProcessUsercmds(ProcessUsercmdsEvent args)
@@ -733,7 +992,8 @@ public class aimLOCK : DeadworksPluginBase
         if (page == 1)
         {
             caller.Reply("aimLOCK server commands (page 1/3):");
-            caller.Reply("/join <ranked|unranked> (alias: /queue) - Join a queue.");
+            caller.Reply("This is a 1v1 duel server: ranked tracks Elo; unranked is casual.");
+            caller.Reply("/join <ranked|unranked> (alias: /queue) - Join that queue.");
             caller.Reply("/leave - Leave your current queue.");
             caller.Reply("/pbmm <on|off> - Toggle ping-based matchmaking for your queue matches.");
             caller.Reply("Use /help 2 for stats and Elo, or /help 3 for duels, arenas, and other commands.");
@@ -757,14 +1017,14 @@ public class aimLOCK : DeadworksPluginBase
             caller.Reply("/bot [easy|medium|hard] - Start a bot match (default: hard).");
             caller.Reply("/botspeed <units/sec> - Set the practice bot's strafe speed (100-2500; default 2500).");
             caller.Reply("/arena [number|name] - List arenas or teleport to one.");
-            caller.Reply("/spectate (/spec) list | <player name> - List matches or spectate one until it ends.");
+            caller.Reply("/spectate (/spec) list | <player name> - List active matches or spectate one until it ends; the Midtown wall shows arena, queue, players, and score.");
             caller.Reply("/tp <player name|arena number|name> - Teleport to a player or arena (permission required).");
             caller.Reply("Arena names: clock, boxes, stocks, forest, railroad, bridge.");
             caller.Reply("More arenas: cola, tunnel, purple, sewer, front_door, clock2.");
             caller.Reply("/spawn - Return to spawn after a 2-second countdown; forfeits an active duel.");
             caller.Reply("/scoreboard <on|off> - Show or hide the server info UI.");
             caller.Reply("/timezone [IANA ID] - View or set your local time zone.");
-            caller.Reply("/tag <tagname> - Equip a tag an admin granted you; /tag list shows your available tags.");
+            caller.Reply("/tag <tagname|clear> - Equip or clear your tag; /tag list shows your available tags.");
             caller.Reply("/tag give|revoke <player|SteamID64> <tagname> - Grant or take away tag access (aimlock.tags.manage).");
             caller.Reply("/tagoff - Hide your own overhead tag.");
             caller.Reply("/tagon - Show your overhead tag again.");
@@ -805,8 +1065,117 @@ public class aimLOCK : DeadworksPluginBase
     }
 
     [Command(
+        "botmirror",
+        Description = "Toggle whether the practice bot copies the items you buy during a bot match (on by default).",
+        SuppressChat = true
+    )]
+    public void BotMirrorCommand(Caller caller)
+    {
+        if (caller.Player is not { } player)
+        {
+            caller.Reply("You must be a player to use /botmirror.");
+            return;
+        }
+
+        caller.Reply(PlayerManager.ToggleBotMirror(player)
+            ? "Bot mirror on: the bot buys every item you buy in a bot match."
+            : "Bot mirror off: the bot keeps its items when you buy.");
+    }
+
+    [Command(
+        "ab",
+        "allowbuy",
+        Description = "Allow buying items during your duels: ab <on|off> (off by default). Both players need it on.",
+        SuppressChat = true
+    )]
+    public void AllowBuyCommand(Caller caller, string? setting = null)
+    {
+        if (caller.Player is not { } player)
+        {
+            caller.Reply("You must be a player to use /ab.");
+            return;
+        }
+
+        bool allow;
+        if (string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase))
+            allow = true;
+        else if (string.Equals(setting, "off", StringComparison.OrdinalIgnoreCase))
+            allow = false;
+        else
+        {
+            caller.Reply(
+                $"Use /ab on or /ab off. It is {(PlayerManager.AllowsDuelBuying(player) ? "on" : "off")} for you."
+            );
+            return;
+        }
+
+        PlayerManager.SetAllowDuelBuying(player, allow);
+        caller.Reply(
+            (allow
+                ? "Buying in duels on. It applies when both players have it on."
+                : "Buying in duels off.") +
+            (PlayerManager.TryGetActiveMatch(player, out _) ? " This takes effect from your next duel." : "")
+        );
+    }
+
+    [Command(
+        "hidebots",
+        Description = "Test: hidebots <off|hero|all> hides practice bots from players outside their match (off is the default).",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void HideBotsCommand(Caller caller, string? setting = null)
+    {
+        PlayerManager.BotHideMode mode;
+        switch (setting?.Trim().ToLowerInvariant())
+        {
+            case "off": mode = PlayerManager.BotHideMode.Off; break;
+            case "hero": mode = PlayerManager.BotHideMode.Hero; break;
+            case "all": mode = PlayerManager.BotHideMode.All; break;
+            default:
+                caller.Reply(
+                    $"Use /hidebots off, /hidebots hero or /hidebots all. It is {PlayerManager.PracticeBotHideMode.ToString().ToLowerInvariant()}."
+                );
+                return;
+        }
+
+        PlayerManager.SetPracticeBotHideMode(mode);
+        caller.Reply($"Practice bot hiding: {setting!.Trim().ToLowerInvariant()}. Resets to off on server restart.");
+    }
+
+    [Command(
+        "hidepassive",
+        Description = "Crash test: hidepassive <on|off> keeps the Fixation passive off the clients (on, the default) or sends it (off).",
+        Permission = "aimlock.debug",
+        SuppressChat = true
+    )]
+    public void HidePassiveCommand(Caller caller, string? setting = null)
+    {
+        bool hide;
+        if (string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase))
+            hide = true;
+        else if (string.Equals(setting, "off", StringComparison.OrdinalIgnoreCase))
+            hide = false;
+        else
+        {
+            caller.Reply(
+                $"Use /hidepassive on or /hidepassive off. It is {(PlayerManager.HideFixationPassive ? "on" : "off")}."
+            );
+            return;
+        }
+
+        int updated = PlayerManager.SetHideFixationPassive(hide);
+        caller.Reply(
+            (hide
+                ? "Fixation passive hidden again (no HUD icon)"
+                : "Fixation passive now sent to clients (the HUD icon comes back)") +
+            $"; Fixation redone for {updated} hero(es). Resets on server restart."
+        );
+    }
+
+    [Command(
         "duel",
-        Description = "Request a duel: duel <player name> [arena name].",
+        Description = "Request a duel: duel <player name> [arena name] [ls <0-100>]. In a duel: duel ls <0-100> to propose a lifesteal.",
         SuppressChat = true
     )]
     public void DuelCommand(Caller caller, params string[] arguments)
@@ -818,7 +1187,47 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
+        // "ls <number>" (or "lifesteal <number>") anywhere in the command sets the
+        // duel's lifesteal; the rest is the player name and arena as before.
+        float? lifesteal = null;
+        var rest = new List<string>(arguments.Length);
+        for (int i = 0; i < arguments.Length; i++)
+        {
+            bool isLifestealWord =
+                string.Equals(arguments[i], "ls", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(arguments[i], "lifesteal", StringComparison.OrdinalIgnoreCase);
+            if (isLifestealWord && i + 1 < arguments.Length)
+            {
+                if (!TryParsePercent(arguments[i + 1], out float percent))
+                {
+                    caller.Reply("The lifesteal must be a number from 0 to 100, for example /duel ls 100.");
+                    return;
+                }
+
+                lifesteal = percent;
+                i++;
+                continue;
+            }
+
+            if (isLifestealWord)
+            {
+                caller.Reply("Add a number after ls, for example /duel ls 100.");
+                return;
+            }
+
+            rest.Add(arguments[i]);
+        }
+
+        arguments = rest.ToArray();
         string targetName = string.Join(" ", arguments).Trim();
+
+        // No player named: a lifesteal proposal for the duel the player is in.
+        if (targetName.Length == 0 && lifesteal is { } proposal)
+        {
+            Queue.ProposeMatchLifesteal(player, proposal, message => caller.Reply(message));
+            return;
+        }
+
         int? arenaIndex = null;
         if (
             arguments.Length > 1 &&
@@ -847,13 +1256,14 @@ public class aimLOCK : DeadworksPluginBase
             player,
             targetName,
             arenaIndex,
-            message => caller.Reply(message)
+            message => caller.Reply(message),
+            lifesteal
         );
     }
 
     [Command(
         "accept",
-        Description = "Accept a pending duel request.",
+        Description = "Accept a pending duel request or a lifesteal proposal from your opponent.",
         SuppressChat = true
     )]
     public void AcceptDuelCommand(Caller caller)
@@ -1231,10 +1641,11 @@ public class aimLOCK : DeadworksPluginBase
 
     [Command(
         "handicap",
-        Description = "Toggle a 10 percentage-point reduction to your duel lifesteal: handicap [on|off].",
+        "handi",
+        Description = "Set your own duel lifesteal percent: handicap <number> (handicap off to clear).",
         SuppressChat = true
     )]
-    public void HandicapCommand(Caller caller, string? setting = null)
+    public void HandicapCommand(Caller caller, string? value = null)
     {
         var player = caller.Player;
         if (player == null)
@@ -1243,32 +1654,36 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        bool enabled;
-        if (string.IsNullOrWhiteSpace(setting))
+        float duelPercent = PlayerManager.DuelLifestealPercent;
+        float? percent;
+        if (string.Equals(value, "off", StringComparison.OrdinalIgnoreCase))
         {
-            enabled = !PlayerManager.IsHandicapEnabled(player);
+            percent = null;
         }
-        else if (string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase))
+        else if (TryParsePercent(value, out float parsed) && parsed <= duelPercent)
         {
-            enabled = true;
-        }
-        else if (string.Equals(setting, "off", StringComparison.OrdinalIgnoreCase))
-        {
-            enabled = false;
+            percent = parsed;
         }
         else
         {
-            caller.Reply("Use /handicap, /handicap on, or /handicap off.");
+            float? current = PlayerManager.GetHandicapLifestealPercent(player);
+            caller.Reply(
+                $"Use /handicap <number from 0 to {duelPercent:0.#}>, for example /handi {duelPercent:0.#}, " +
+                "or /handicap off. " +
+                (current is { } currentPercent
+                    ? $"Your duel lifesteal is set to {MathF.Min(currentPercent, duelPercent):0.#}%."
+                    : $"You have no handicap; your duel lifesteal is {duelPercent:0.#}%.")
+            );
             return;
         }
 
         try
         {
-            PlayerManager.SetHandicapEnabled(player, enabled);
+            PlayerManager.SetHandicapLifestealPercent(player, percent);
             caller.Reply(
-                enabled
-                    ? "Handicap enabled. Your duel bullet lifesteal is reduced from 50% to 40% until you turn it off."
-                    : "Handicap disabled. Your duel bullet lifesteal is back to 50%."
+                percent is { } saved
+                    ? $"Handicap set. Your duel lifesteal is {saved:0.#}% until you change it."
+                    : $"Handicap off. Your duel lifesteal is back to {duelPercent:0.#}%."
             );
         }
         catch (IOException ex)
@@ -1283,6 +1698,47 @@ public class aimLOCK : DeadworksPluginBase
             Console.WriteLine($"Invalid Steam ID for handicap setting: {ex}");
             caller.Reply("Your player account is not ready; try again shortly.");
         }
+    }
+
+    [Command(
+        "lifesteal",
+        "ls",
+        Description = "Set the lifesteal percent for duels and bot matches: lifesteal <number>.",
+        Permission = "aimlock.lifesteal",
+        SuppressChat = true
+    )]
+    public void LifestealCommand(Caller caller, string? value = null)
+    {
+        if (!TryParsePercent(value, out float percent))
+        {
+            caller.Reply(
+                "Use /lifesteal <number from 0 to 100>, for example /ls 85. " +
+                $"Duel and bot lifesteal is {PlayerManager.DuelLifestealPercent:0.#}%."
+            );
+            return;
+        }
+
+        PlayerManager.SetDuelLifestealPercent(percent);
+        caller.Reply(
+            $"Duel and bot lifesteal set to {percent:0.#}% until the server restarts. " +
+            "Lifesteal outside duels stays at 100%."
+        );
+    }
+
+    private static bool TryParsePercent(string? value, out float percent)
+    {
+        percent = 0f;
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        return float.TryParse(
+                value.Trim().TrimEnd('%'),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out percent
+            ) &&
+            percent >= 0f &&
+            percent <= 100f;
     }
 
     [Command("spawn", Description = "Return to spawn after a 2-second countdown or forfeit an active duel.")]
@@ -1342,7 +1798,7 @@ public class aimLOCK : DeadworksPluginBase
                 return;
 
             PlayerManager.StopSpectating(player);
-            player.ChangeTeam(2);
+            PlayerManager.EnsureTeam(player, 2);
             pawn.Teleport(MidtownSpawnPosition, null, null);
             UIManager.RestoreServerInfoAfterSpawn(player);
             caller.Reply("Returned to spawn.");
@@ -1687,7 +2143,7 @@ public class aimLOCK : DeadworksPluginBase
 
     [Command(
         "tag",
-        Description = "Equip an admin-granted overhead tag or manage access: tag <tagname|list|give|revoke>.",
+        Description = "Equip or clear an admin-granted overhead tag or manage access: tag <tagname|clear|list|give|revoke>.",
         SuppressChat = true
     )]
     public void PlayerTagCommand(Caller caller, params string[] arguments)
@@ -1695,7 +2151,7 @@ public class aimLOCK : DeadworksPluginBase
         if (arguments.Length == 0)
         {
             caller.Reply(
-                "Use /tag <tagname> or /tag list. Admins: /tag give|revoke <player name|SteamID64> <tagname>."
+                "Use /tag <tagname|clear> or /tag list. Admins: /tag give|revoke <player name|SteamID64> <tagname>."
             );
             return;
         }
@@ -1857,7 +2313,7 @@ public class aimLOCK : DeadworksPluginBase
                 return;
             }
 
-            if (string.Equals(arguments[0], "off", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(arguments[0], "clear", StringComparison.OrdinalIgnoreCase))
             {
                 try
                 {
@@ -1885,7 +2341,7 @@ public class aimLOCK : DeadworksPluginBase
             if (!PlayerTagManager.TryParseTag(arguments[0], out PlayerTag ownTag))
             {
                 caller.Reply(
-                    "Use /tag <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG>, /tag list, or /tagoff."
+                    "Use /tag <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG>, /tag clear, or /tagoff."
                 );
                 return;
             }
@@ -1935,7 +2391,7 @@ public class aimLOCK : DeadworksPluginBase
         if (!caller.HasPermission("aimlock.tags.manage"))
         {
             caller.Reply(
-                "Only admins can assign tags to other players. Use /tag <tagname> for yourself."
+                "Only admins can assign tags to other players. Use /tag <tagname|clear> for yourself."
             );
             return;
         }
@@ -1963,7 +2419,7 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
-        if (string.Equals(tag, "off", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(tag, "clear", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
@@ -1987,7 +2443,7 @@ public class aimLOCK : DeadworksPluginBase
         if (!PlayerTagManager.TryParseTag(tag, out PlayerTag playerTag))
         {
             caller.Reply(
-                "Use /tag <playername> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG|off>."
+                "Use /tag <playername> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG|clear>."
             );
             return;
         }
@@ -2226,6 +2682,8 @@ public sealed class DuelMatch
     public bool Player2HadBlitzBulletsItem;
     public bool Player1HadOpeningRoundsItem;
     public bool Player2HadOpeningRoundsItem;
+    public bool Player1HadHighVelocityRoundsItem;
+    public bool Player2HadHighVelocityRoundsItem;
     public bool Player1HadFleetfootItem;
     public bool Player2HadFleetfootItem;
     public bool Player1HadTitanicMagazineItem;
@@ -2234,17 +2692,19 @@ public sealed class DuelMatch
     public bool Player2HadCardioCalibratorItem;
     public bool Player1HadBurstFireItem;
     public bool Player2HadBurstFireItem;
-    public bool Player1HadFortitudeItem;
-    public bool Player2HadFortitudeItem;
     public bool Player1HadHealthItem;
     public bool Player2HadHealthItem;
-    public bool Player1HadGlassCannonItem;
-    public bool Player2HadGlassCannonItem;
     public int Score1;
     public int Score2;
     public bool CombatActive;
 
     public int ArenaIndex;
+    // Lifesteal both players agreed on for this duel (/duel ... ls N); null = the
+    // server's duel lifesteal.
+    public float? LifestealPercent;
+    // Whether players may buy items during this duel (both had /ab on when it started).
+    // Bot matches always allow it.
+    public bool BuyingAllowed;
     public Vector3 ArenaPosition;
 }
 
@@ -2255,6 +2715,9 @@ public sealed class PlayerRecord
     public string TimeZoneId { get; set; } = "UTC";
     public bool PingBasedMatchmakingEnabled { get; set; } = true;
     public bool HandicapEnabled { get; set; }
+    // The player's own duel lifesteal percent from /handicap. Null with HandicapEnabled
+    // set is an old on/off handicap (10 points under the duel value).
+    public float? HandicapLifestealPercent { get; set; }
 
     public int Wins { get; set; }
     public int Losses { get; set; }
