@@ -4300,8 +4300,15 @@ public class PlayerManager
             return HookResult.Continue;
         }
 
+        // A hero swap carries the souls over to a level 0 hero, and the game then walks
+        // the level up one step per tick, each with a "BOON RECEIVED" popup. Max boons
+        // first, so there is nothing left to level.
+        if (args.Source == ECurrencySource.EHeroSwap)
+            ApplyMaxBoons(pawn);
+
         if (args.Source == ECurrencySource.EStartingAmount)
         {
+            ApplyMaxBoons(pawn);
             pawn.SetCurrency(ECurrencyType.EGold, MaxSouls);
             return HookResult.Stop;
         }
@@ -4318,8 +4325,12 @@ public class PlayerManager
 
     private static void TopUpSouls(CCitadelPlayerPawn pawn)
     {
-        if (pawn.GetCurrency(ECurrencyType.EGold) != MaxSouls)
-            pawn.SetCurrency(ECurrencyType.EGold, MaxSouls);
+        if (pawn.GetCurrency(ECurrencyType.EGold) == MaxSouls)
+            return;
+
+        // Max boons before the souls, or the game levels up through them with popups.
+        ApplyMaxBoons(pawn);
+        pawn.SetCurrency(ECurrencyType.EGold, MaxSouls);
     }
 
     // Players (Steam ID) who turned bot mirror off with /botmirror. On by default.
