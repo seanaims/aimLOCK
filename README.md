@@ -76,6 +76,7 @@ to that queue:
 | --- | --- |
 | `/stats [player name\|SteamID64]` | View your unranked record, or another player's record. Accepts an exact name, a unique name prefix, or a SteamID64; it asks for a more specific name when more than one player matches. |
 | `/elo` | View your ranked Elo, ranked record, and ranked win rate. |
+| `/whois <player name>` | Show a player's SteamID64 and whether they are online. Accepts an exact name, a unique name prefix, or a SteamID64; works for offline players with a saved record. Requires `aimlock.whois`. |
 | `/ping` | View your latest server-reported ping. If no fresh unambiguous reading is available, the plugin refreshes the readings; try again shortly. |
 | `/leaderboardmove <x> <y> <z>` | Move the in-world leaderboard and save its position. Requires `aimlock.leaderboard.move`. |
 
@@ -89,7 +90,7 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 | `/timezone` | Show your saved time zone. |
 | `/timezone <IANA ID>` | Set your time zone, for example `/timezone America/New_York`. IDs are case-insensitive; daylight-saving changes follow the selected zone's rules. |
 | `/tag <tagname\|clear>` | Equip a granted overhead tag or clear your selected tag. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. |
-| `/tag list` | List the overhead tags you can use. |
+| `/tag list` | List the overhead tags you can use. Guild members can always use `GUILDTAG` for their own guild; it does not need to be granted. |
 | `/tag give <player name\|SteamID64> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. Names must match one online player exactly; use the SteamID64 for offline players. |
 | `/tag revoke <player name\|SteamID64> <tagname>` | Take away tag access, and remove the tag if they are wearing it. Requires `aimlock.tags.manage`. |
 | `/tag <player name\|SteamID64> <tagname\|clear>` | Directly set or clear a player's overhead tag. Requires `aimlock.tags.manage`. |

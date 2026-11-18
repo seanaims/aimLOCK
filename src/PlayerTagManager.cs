@@ -189,9 +189,12 @@ public sealed class PlayerTagManager
     }
 
 
+    // Guild members can always wear their own guild's tag; every other tag is granted.
     public bool CanUseTag(ulong steamId, PlayerTag tag) =>
-        grantedTags.TryGetValue(steamId, out var playerTags) &&
-        playerTags.Contains(tag);
+        (tag == PlayerTag.GuildTag &&
+            server.GuildManager.GetMemberTag(steamId) != null) ||
+        (grantedTags.TryGetValue(steamId, out var playerTags) &&
+            playerTags.Contains(tag));
 
     public string FormatPlayerNameWithSelectedTag(
         ulong steamId,
@@ -221,15 +224,18 @@ public sealed class PlayerTagManager
 
     public string GetGrantedTagList(ulong steamId)
     {
-        if (
-            !grantedTags.TryGetValue(steamId, out var playerTags) ||
-            playerTags.Count == 0
-        )
-        {
-            return "No overhead tags have been granted to you yet.";
-        }
+        var usableTags = grantedTags.TryGetValue(steamId, out var playerTags)
+            ? new HashSet<PlayerTag>(playerTags)
+            : new HashSet<PlayerTag>();
+        if (server.GuildManager.GetMemberTag(steamId) != null)
+            usableTags.Add(PlayerTag.GuildTag);
+        else
+            usableTags.Remove(PlayerTag.GuildTag);
 
-        string[] names = playerTags
+        if (usableTags.Count == 0)
+            return "No overhead tags have been granted to you yet.";
+
+        string[] names = usableTags
             .Select(GetTagToken)
             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
             .ToArray();

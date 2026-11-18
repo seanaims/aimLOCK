@@ -1004,6 +1004,7 @@ public class aimLOCK : DeadworksPluginBase
             caller.Reply("/stats [player] - View unranked wins, losses, and win rate.");
             caller.Reply("/elo - View ranked Elo, wins, losses, and win rate.");
             caller.Reply("/ping - View your server-reported ping.");
+            caller.Reply("/whois <player name> - Look up a player's SteamID64 (permission required).");
             caller.Reply("/resetelo <player name> - Reset Elo to 1000 and ranked wins/losses to 0-0 (permission required).");
             caller.Reply("/resetranked <player name> (alias: /resetrankedrecord) - Reset ranked wins/losses, keeping Elo (permission required).");
             caller.Reply("/resetunranked <player name> (alias: /resetunrankedrecord) - Reset unranked wins/losses (permission required).");
@@ -2011,6 +2012,33 @@ public class aimLOCK : DeadworksPluginBase
             Console.WriteLine($"Access denied resetting Elo for {targetName}: {ex}");
             caller.Reply("Could not save the Elo reset.");
         }
+    }
+
+    [Command(
+        "whois",
+        Description = "Look up a player's SteamID64 by exact name or unique name prefix.",
+        Permission = "aimlock.whois",
+        SuppressChat = true
+    )]
+    public void WhoIsCommand(Caller caller, string playerName)
+    {
+        if (!TryResolvePlayerSteamId(
+            playerName,
+            out ulong steamId,
+            out string targetName,
+            out string error
+        ))
+        {
+            caller.Reply(error);
+            return;
+        }
+
+        bool online = Players.GetAll()
+            .Any(player => !player.IsBot && player.PlayerSteamId == steamId);
+        caller.Reply(
+            $"{targetName}: {steamId.ToString(CultureInfo.InvariantCulture)} " +
+            $"({(online ? "online" : "offline")})"
+        );
     }
 
     [Command(

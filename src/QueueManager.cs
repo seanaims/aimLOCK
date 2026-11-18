@@ -1024,7 +1024,7 @@ public class QueueManager
         CCitadelPlayerController player,
         MatchQueueType queueType)
     {
-        string displayName = server.GuildManager.FormatPlayerName(player);
+        string displayName = server.GuildManager.FormatPlayerNameWithSelectedTag(player);
         if (player.IsBot)
             return displayName;
 
