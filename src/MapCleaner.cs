@@ -48,7 +48,8 @@ public sealed class MapCleaner
     private static readonly HashSet<string> ExactNamesToRemove = new(StringComparer.Ordinal)
     {
         "citadel_trigger_idol_return",
-        "citadel_point_talker_idol"
+        "citadel_point_talker_idol",
+        "citadel_invis_volume"      // map smoke zones that make players invisible
     };
 
     // Non-NPC prefixes: removed outright.
