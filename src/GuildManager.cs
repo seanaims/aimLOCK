@@ -624,7 +624,7 @@ public sealed class GuildManager
         "decline [tag|name], leave, lookup [tag|name], members [tag|name], " +
         "list, mode <open|invite>, newtag <tag>, rename <name>, " +
         "kick <member>, transfer <member>, disband confirm. " +
-        $"Tags are 1-5 characters and cannot use built-in player tags; " +
+        $"Tags are 1-5 letters or numbers and cannot use built-in player tags; " +
         $"names are 2-{MaxGuildNameCharacters} characters.";
 
     private static CCitadelPlayerController? FindOnlinePlayer(
@@ -773,6 +773,18 @@ public sealed class GuildManager
         source.FirstOrDefault(guild =>
             string.Equals(guild.Tag, tag, StringComparison.OrdinalIgnoreCase));
 
+    private static readonly string[] ReservedTags =
+    {
+        "OWNER",
+        "STAFF",
+        "ADMIN",
+        "MOD",
+        "DEV",
+        "YT",
+        "TTV",
+        "AIMLOCK"
+    };
+
     private static bool IsValidTag(string tag, int maxLength)
     {
         int characterCount = StringInfo.ParseCombiningCharacters(tag).Length;
@@ -785,7 +797,12 @@ public sealed class GuildManager
     {
         if (!IsValidTag(tag, 5))
             return "Guild tags must be 1-5 characters.";
-        if (PlayerTagManager.TryParseTag(tag, out _))
+        if (!tag.All(char.IsAsciiLetterOrDigit))
+            return "Guild tags can only use letters A-Z and numbers.";
+        if (
+            ReservedTags.Contains(tag, StringComparer.OrdinalIgnoreCase) ||
+            PlayerTagManager.TryParseTag(tag, out _)
+        )
             return $"The guild tag [{tag}] is reserved for built-in player tags.";
         return null;
     }

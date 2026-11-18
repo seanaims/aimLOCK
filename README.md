@@ -90,25 +90,20 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 | `/timezone <IANA ID>` | Set your time zone, for example `/timezone America/New_York`. IDs are case-insensitive; daylight-saving changes follow the selected zone's rules. |
 | `/tag <tagname\|clear>` | Equip a granted overhead tag or clear your selected tag. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. |
 | `/tag list` | List the overhead tags you can use. |
-| `/tag give <player name> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. |
-| `/tag <player name> <tagname\|clear>` | Directly set or clear a player's overhead tag. Requires `aimlock.tags.manage`. |
+| `/tag give <player name\|SteamID64> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. Names must match one online player exactly; use the SteamID64 for offline players. |
+| `/tag revoke <player name\|SteamID64> <tagname>` | Take away tag access, and remove the tag if they are wearing it. Requires `aimlock.tags.manage`. |
+| `/tag <player name\|SteamID64> <tagname\|clear>` | Directly set or clear a player's overhead tag. Requires `aimlock.tags.manage`. |
 | `/tagoff` | Hide your own overhead tag. |
 | `/tagon` | Show your overhead tag again. |
 | `/fixationmax` | Unlock and fully upgrade Fixation in Signature3, with a 999-stack cap for all online players. Requires `aimlock.fixation.max`. |
 
 ### Chat moderation
 
-| Command | Description |
-| --- | --- |
-| `/kick <player name> [reason]` | Kick an online player by exact name or unique name prefix. Requires `admin.moderation.kick`. |
-| `/mute <player name> <duration> <reason>` | Mute a player from text chat for a finite duration such as `10m`, `2h`, or `1d`. Requires `aimlock.chat.mute`; the player privately sees the reason and time remaining when they try to chat. |
-| `/unmute <player name\|SteamID64>` | Lift an active text chat mute. Requires `aimlock.chat.mute`. |
-| `/ban <player name> <duration> <reason>` | Ban an online player for a finite duration such as `10m`, `2h`, or `1d`. Requires `admin.moderation.ban`; the ban immediately kicks them. |
-| `/unban <player name\|SteamID64>` | Lift an active ban by saved player name or SteamID64. Requires `admin.moderation.ban`. |
+Kicks, bans, and mutes use the Deadworks Admin plugin: `/kick`, `/ban`, `/unban`, `/gag` and `/ungag` (text chat), `/mute` and `/unmute` (voice), `/who`. Durations are in minutes. A gagged player privately sees the reason and time remaining when they try to chat.
 
 ### Guilds
 
-Use `/guild help` for the short in-game reference. Guild tags are 1-5 characters and cannot use built-in player tags such as `YT`, `TTV`, `OWNER`, or `STAFF`; guild names are 2-15 characters, and new guilds are invite-only by default. Active overhead tags are shown alongside guild tags in match scoreboards and guild member listings.
+Use `/guild help` for the short in-game reference. Guild tags are 1-5 letters or numbers and cannot use built-in or staff tags such as `YT`, `TTV`, `OWNER`, or `STAFF`; guild names are 2-15 characters, and new guilds are invite-only by default. Active overhead tags are shown alongside guild tags in match scoreboards and guild member listings.
 
 | Command | Description |
 | --- | --- |

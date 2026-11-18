@@ -1025,13 +1025,10 @@ public class aimLOCK : DeadworksPluginBase
             caller.Reply("/scoreboard <on|off> - Show or hide the server info UI.");
             caller.Reply("/timezone [IANA ID] - View or set your local time zone.");
             caller.Reply("/tag <tagname|clear> - Equip or clear your tag; /tag list shows your available tags.");
-            caller.Reply("/tag give <playername> <tagname> - Grant tag access (aimlock.tags.manage).");
+            caller.Reply("/tag give|revoke <player|SteamID64> <tagname> - Grant or take away tag access (aimlock.tags.manage).");
             caller.Reply("/tagoff - Hide your own overhead tag.");
             caller.Reply("/tagon - Show your overhead tag again.");
-            caller.Reply("/kick <player name> [reason] - Kick an online player (permission required).");
-            caller.Reply("/ban <player> <duration> <reason> - Ban a player (permission required).");
-            caller.Reply("/unban <player|SteamID64> - Lift an active ban (permission required).");
-            caller.Reply("/mute <player> <duration> <reason> and /unmute <player|SteamID64> - Manage text chat mutes (permission required).");
+            caller.Reply("Moderation uses the Deadworks Admin plugin: /kick, /ban, /unban, /gag (text chat), /mute (voice), /who (permission required).");
             caller.Reply("/fixationmax - Fully upgrade Fixation with a 999-stack cap for all online players (permission required).");
             caller.Reply("/guild help - Create and manage guilds, invitations, rosters, and access settings.");
             caller.Reply("/leaderboardmove <x> <y> <z> - Move the leaderboard (permission required).");
@@ -2144,7 +2141,7 @@ public class aimLOCK : DeadworksPluginBase
 
     [Command(
         "tag",
-        Description = "Equip or clear an admin-granted overhead tag: tag <tagname|clear|list|give>.",
+        Description = "Equip or clear an admin-granted overhead tag or manage access: tag <tagname|clear|list|give|revoke>.",
         SuppressChat = true
     )]
     public void PlayerTagCommand(Caller caller, params string[] arguments)
@@ -2152,7 +2149,7 @@ public class aimLOCK : DeadworksPluginBase
         if (arguments.Length == 0)
         {
             caller.Reply(
-                "Use /tag <tagname|clear> or /tag list. Admins: /tag give <player name> <tagname>."
+                "Use /tag <tagname|clear> or /tag list. Admins: /tag give|revoke <player name|SteamID64> <tagname>."
             );
             return;
         }
@@ -2170,7 +2167,7 @@ public class aimLOCK : DeadworksPluginBase
                 string.IsNullOrWhiteSpace(string.Join(" ", arguments.Skip(1).Take(arguments.Length - 2)))
             )
             {
-                caller.Reply("Use /tag give <player name> <tagname>.");
+                caller.Reply("Use /tag give <player name|SteamID64> <tagname>.");
                 return;
             }
 
@@ -2186,16 +2183,21 @@ public class aimLOCK : DeadworksPluginBase
                 return;
             }
 
+            if (
+                !TryResolveTagTarget(
+                    targetName,
+                    out ulong targetSteamId,
+                    out string error
+                )
+            )
+            {
+                caller.Reply(error);
+                return;
+            }
+
             try
             {
-                if (!PlayerTagManager.GrantTag(targetName, grantedTag))
-                {
-                    caller.Reply(
-                        $"No online player or saved player record matches \"{targetName}\"."
-                    );
-                    return;
-                }
-
+                PlayerTagManager.GrantTag(targetSteamId, grantedTag);
                 caller.Reply(
                     $"Granted {PlayerTagManager.GetTagToken(grantedTag)} tag access to {targetName}. " +
                     $"They can equip it with /tag {PlayerTagManager.GetTagToken(grantedTag)}."
@@ -2210,6 +2212,75 @@ public class aimLOCK : DeadworksPluginBase
             {
                 Console.WriteLine($"Access denied granting a tag to {targetName}: {ex}");
                 caller.Reply("Could not save the tag grant.");
+            }
+
+            return;
+        }
+
+        if (string.Equals(arguments[0], "revoke", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!caller.HasPermission("aimlock.tags.manage"))
+            {
+                caller.Reply("Only admins can revoke overhead tag access.");
+                return;
+            }
+
+            if (
+                arguments.Length < 3 ||
+                string.IsNullOrWhiteSpace(string.Join(" ", arguments.Skip(1).Take(arguments.Length - 2)))
+            )
+            {
+                caller.Reply("Use /tag revoke <player name|SteamID64> <tagname>.");
+                return;
+            }
+
+            string targetName = string.Join(
+                " ",
+                arguments.Skip(1).Take(arguments.Length - 2)
+            ).Trim();
+            if (!PlayerTagManager.TryParseTag(arguments[^1], out PlayerTag revokedTag))
+            {
+                caller.Reply(
+                    "Choose a tag: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, or GUILDTAG."
+                );
+                return;
+            }
+
+            if (
+                !TryResolveTagTarget(
+                    targetName,
+                    out ulong targetSteamId,
+                    out string error
+                )
+            )
+            {
+                caller.Reply(error);
+                return;
+            }
+
+            try
+            {
+                if (!PlayerTagManager.RevokeTag(targetSteamId, revokedTag))
+                {
+                    caller.Reply(
+                        $"{targetName} does not have {PlayerTagManager.GetTagToken(revokedTag)} tag access."
+                    );
+                    return;
+                }
+
+                caller.Reply(
+                    $"Revoked {PlayerTagManager.GetTagToken(revokedTag)} tag access from {targetName}."
+                );
+            }
+            catch (IOException ex)
+            {
+                Console.WriteLine($"Failed to revoke a tag from {targetName}: {ex}");
+                caller.Reply("Could not save the tag change.");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Console.WriteLine($"Access denied revoking a tag from {targetName}: {ex}");
+                caller.Reply("Could not save the tag change.");
             }
 
             return;
@@ -2244,7 +2315,7 @@ public class aimLOCK : DeadworksPluginBase
             {
                 try
                 {
-                    PlayerTagManager.RemoveTag(player.PlayerName);
+                    PlayerTagManager.RemoveTag(player.PlayerSteamId);
                     caller.Reply("Your overhead tag was removed.");
                 }
                 catch (IOException ex)
@@ -2292,7 +2363,7 @@ public class aimLOCK : DeadworksPluginBase
 
             try
             {
-                PlayerTagManager.SetTag(player.PlayerName, ownTag);
+                PlayerTagManager.SetTag(player.PlayerSteamId, ownTag);
                 caller.Reply(
                     $"Your overhead tag is now {PlayerTagManager.GetTagToken(ownTag)}."
                 );
@@ -2334,11 +2405,23 @@ public class aimLOCK : DeadworksPluginBase
             return;
         }
 
+        if (
+            !TryResolveTagTarget(
+                normalizedName,
+                out ulong steamId,
+                out string resolveError
+            )
+        )
+        {
+            caller.Reply(resolveError);
+            return;
+        }
+
         if (string.Equals(tag, "clear", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
-                PlayerTagManager.RemoveTag(normalizedName);
+                PlayerTagManager.RemoveTag(steamId);
                 caller.Reply($"Removed the overhead tag for {normalizedName}.");
             }
             catch (IOException ex)
@@ -2365,7 +2448,7 @@ public class aimLOCK : DeadworksPluginBase
 
         try
         {
-            PlayerTagManager.SetTag(normalizedName, playerTag);
+            PlayerTagManager.SetTag(steamId, playerTag);
             string displayTag = playerTag == PlayerTag.Aimlock
                 ? "aimlock.xyz"
                 : playerTag == PlayerTag.Supporter
@@ -2387,495 +2470,54 @@ public class aimLOCK : DeadworksPluginBase
         }
     }
 
-    [Command(
-        "mute",
-        Description = "Mute a player from text chat: mute <player> <duration> <reason>.",
-        Permission = "aimlock.chat.mute",
-        SuppressChat = true
-    )]
-    public void MuteCommand(
-        Caller caller,
-        Target target,
-        string durationText,
-        params string[] reasonParts
-    )
-    {
-        CCitadelPlayerController targetPlayer = target.Single();
-        if (!caller.CanTarget(targetPlayer))
-        {
-            caller.Reply("You are not allowed to mute that player.");
-            return;
-        }
-
-        if (!TryParseMuteDuration(durationText, out TimeSpan duration))
-        {
-            caller.Reply(
-                "Use a positive duration such as 10m, 2h, or 1d; permanent mutes are not supported."
-            );
-            return;
-        }
-
-        string reason = string.Join(" ", reasonParts).Trim();
-        if (string.IsNullOrWhiteSpace(reason))
-        {
-            caller.Reply("A mute reason is required.");
-            return;
-        }
-
-        if (
-            Penalties.WouldShorten(
-                PenaltyType.Gag,
-                targetPlayer.PlayerSteamId,
-                duration
-            ) is { } longerMute
-        )
-        {
-            caller.Reply(
-                $"{targetPlayer.PlayerName} already has a longer mute: " +
-                $"{GetPenaltyTimeLeft(longerMute)} remaining."
-            );
-            return;
-        }
-
-        try
-        {
-            Penalties.Add(
-                PenaltyType.Gag,
-                targetPlayer.PlayerSteamId,
-                duration,
-                caller,
-                targetPlayer.PlayerName,
-                reason
-            );
-
-            Penalty? penalty = Penalties.GetActive(
-                PenaltyType.Gag,
-                targetPlayer.PlayerSteamId
-            );
-            if (penalty != null)
-                Chat.PrintToChat(targetPlayer, BuildMuteNotice(penalty));
-
-            caller.Reply(
-                $"Muted {targetPlayer.PlayerName} for " +
-                $"{GetDurationText(duration)}. Reason: {reason}"
-            );
-        }
-        catch (CommandException ex)
-        {
-            Console.WriteLine(
-                $"Failed to mute {targetPlayer.PlayerName}: {ex}"
-            );
-            caller.Reply("Could not apply the mute.");
-        }
-    }
-
-    [Command(
-        "kick",
-        Description = "Kick an online player by name: kick <player name> [reason].",
-        Permission = "admin.moderation.kick",
-        SuppressChat = true
-    )]
-    public void KickCommand(Caller caller, params string[] arguments)
-    {
-        if (
-            !TryResolveKickTarget(
-                arguments,
-                out CCitadelPlayerController? target,
-                out string reason,
-                out string error
-            )
-        )
-        {
-            caller.Reply(error);
-            return;
-        }
-
-        if (target is not { IsValid: true })
-        {
-            caller.Reply("That player is no longer connected.");
-            return;
-        }
-
-        if (!caller.CanTarget(target))
-        {
-            caller.Reply("You are not allowed to kick that player.");
-            return;
-        }
-
-        string kickReason = string.IsNullOrWhiteSpace(reason)
-            ? "No reason specified."
-            : reason;
-        AdminActivity.Show(
-            caller,
-            $"kicked {target.PlayerName}: {kickReason}",
-            $"SteamID64: {target.PlayerSteamId}"
-        );
-        target.Kick(
-            kickReason,
-            ENetworkDisconnectionReason.NetworkDisconnectKicked
-        );
-        caller.Reply($"Kicked {target.PlayerName}. Reason: {kickReason}");
-    }
-
-    private static bool TryResolveKickTarget(
-        string[] arguments,
-        out CCitadelPlayerController? target,
-        out string reason,
+    private bool TryResolveTagTarget(
+        string playerName,
+        out ulong steamId,
         out string error
     )
     {
-        target = null;
-        reason = "";
+        steamId = 0;
         error = "";
-        if (arguments.Length == 0)
-        {
-            error = "Use /kick <player name> [reason].";
-            return false;
-        }
 
-        CCitadelPlayerController[] onlinePlayers = Players.GetAll()
-            .Where(player => !player.IsBot && player.IsValid)
+        CCitadelPlayerController[] matches = Players.GetAll()
+            .Where(player =>
+                player.IsValid &&
+                !player.IsBot &&
+                string.Equals(
+                    player.PlayerName?.Trim(),
+                    playerName,
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
             .ToArray();
-
-        for (int nameWordCount = arguments.Length; nameWordCount > 0; nameWordCount--)
-        {
-            string name = string.Join(" ", arguments.Take(nameWordCount)).Trim();
-            CCitadelPlayerController[] exactMatches = onlinePlayers
-                .Where(player =>
-                    string.Equals(
-                        player.PlayerName,
-                        name,
-                        StringComparison.OrdinalIgnoreCase
-                    )
-                )
-                .ToArray();
-            if (exactMatches.Length > 0)
-            {
-                if (exactMatches.Length != 1)
-                {
-                    error = "More than one player matches that name; use a more specific name.";
-                    return false;
-                }
-
-                target = exactMatches[0];
-                reason = string.Join(" ", arguments.Skip(nameWordCount)).Trim();
-                return true;
-            }
-        }
-
-        for (int nameWordCount = arguments.Length; nameWordCount > 0; nameWordCount--)
-        {
-            string name = string.Join(" ", arguments.Take(nameWordCount)).Trim();
-            CCitadelPlayerController[] prefixMatches = onlinePlayers
-                .Where(player =>
-                    player.PlayerName.StartsWith(
-                        name,
-                        StringComparison.OrdinalIgnoreCase
-                    )
-                )
-                .ToArray();
-            if (prefixMatches.Length > 0)
-            {
-                if (prefixMatches.Length != 1)
-                {
-                    error = "More than one player matches that name; use a more specific name.";
-                    return false;
-                }
-
-                target = prefixMatches[0];
-                reason = string.Join(" ", arguments.Skip(nameWordCount)).Trim();
-                return true;
-            }
-        }
-
-        error = "No online player matches that name.";
-        return false;
-    }
-
-    [Command(
-        "ban",
-        Description = "Ban a player for a finite duration: ban <player> <duration> <reason>.",
-        Permission = "admin.moderation.ban",
-        SuppressChat = true
-    )]
-    public void BanCommand(
-        Caller caller,
-        Target target,
-        string durationText,
-        params string[] reasonParts
-    )
-    {
-        CCitadelPlayerController targetPlayer = target.Single();
-        if (!caller.CanTarget(targetPlayer))
-        {
-            caller.Reply("You are not allowed to ban that player.");
-            return;
-        }
-
-        if (!TryParseMuteDuration(durationText, out TimeSpan duration))
-        {
-            caller.Reply("Use a positive finite duration such as 10m, 2h, or 1d.");
-            return;
-        }
-
-        string reason = string.Join(" ", reasonParts).Trim();
-        if (string.IsNullOrWhiteSpace(reason))
-        {
-            caller.Reply("A ban reason is required.");
-            return;
-        }
-
-        if (
-            Penalties.WouldShorten(
-                PenaltyType.Ban,
-                targetPlayer.PlayerSteamId,
-                duration
-            ) is { } longerBan
-        )
-        {
-            caller.Reply(
-                $"{targetPlayer.PlayerName} already has a longer ban: " +
-                $"{GetPenaltyTimeLeft(longerBan)} remaining."
-            );
-            return;
-        }
-
-        try
-        {
-            Penalties.Add(
-                PenaltyType.Ban,
-                targetPlayer.PlayerSteamId,
-                duration,
-                caller,
-                targetPlayer.PlayerName,
-                reason
-            );
-            caller.Reply(
-                $"Banned {targetPlayer.PlayerName} for " +
-                $"{GetDurationText(duration)}. Reason: {reason}"
-            );
-        }
-        catch (CommandException ex)
-        {
-            Console.WriteLine($"Failed to ban {targetPlayer.PlayerName}: {ex}");
-            caller.Reply("Could not apply the ban.");
-        }
-    }
-
-    [Command(
-        "unban",
-        Description = "Lift an active ban by player name or SteamID64.",
-        Permission = "admin.moderation.ban",
-        SuppressChat = true
-    )]
-    public void UnbanCommand(Caller caller, string player)
-    {
-        RemovePenaltyCommand(caller, PenaltyType.Ban, player);
-    }
-
-    [Command(
-        "unmute",
-        Description = "Lift an active text chat mute by player name or SteamID64.",
-        Permission = "aimlock.chat.mute",
-        SuppressChat = true
-    )]
-    public void UnmuteCommand(Caller caller, string player)
-    {
-        RemovePenaltyCommand(caller, PenaltyType.Gag, player);
-    }
-
-    private static void RemovePenaltyCommand(
-        Caller caller,
-        PenaltyType type,
-        string player
-    )
-    {
-        Penalty? penalty;
-        try
-        {
-            if (
-                !TryResolveActivePenalty(
-                    player,
-                    type,
-                    out penalty,
-                    out string error
-                )
-            )
-            {
-                caller.Reply(error);
-                return;
-            }
-        }
-        catch (CommandException ex)
-        {
-            Console.WriteLine(
-                $"Failed to check active {GetPenaltyName(type)} for '{player}': {ex}"
-            );
-            caller.Reply($"Could not check for an active {GetPenaltyName(type)}.");
-            return;
-        }
-
-        if (penalty == null)
-            return;
-
-        if (!caller.CanTarget(penalty.SteamId64))
-        {
-            caller.Reply($"You are not allowed to remove that {GetPenaltyName(type)}.");
-            return;
-        }
-
-        try
-        {
-            if (
-                !Penalties.Remove(
-                    type,
-                    penalty.SteamId64,
-                    caller,
-                    $"Lifted by {caller.Name}."
-                )
-            )
-            {
-                caller.Reply($"That player no longer has an active {GetPenaltyName(type)}.");
-                return;
-            }
-
-            caller.Reply(
-                $"Removed the {GetPenaltyName(type)} from {penalty.PlayerName}."
-            );
-        }
-        catch (CommandException ex)
-        {
-            Console.WriteLine(
-                $"Failed to remove {GetPenaltyName(type)} from " +
-                $"{penalty.PlayerName} ({penalty.SteamId64}): {ex}"
-            );
-            caller.Reply($"Could not remove the {GetPenaltyName(type)}.");
-        }
-    }
-
-    private static bool TryResolveActivePenalty(
-        string player,
-        PenaltyType type,
-        out Penalty? penalty,
-        out string error
-    )
-    {
-        penalty = null;
-        error = "";
-        string lookup = player?.Trim() ?? "";
-        if (string.IsNullOrWhiteSpace(lookup))
-        {
-            error = "A player name or SteamID64 is required.";
-            return false;
-        }
-
-        Penalty[] activePenalties = Penalties.GetAllActive(type).ToArray();
-        Penalty[] matches;
-        if (
-            ulong.TryParse(
-                lookup,
-                NumberStyles.None,
-                CultureInfo.InvariantCulture,
-                out ulong steamId
-            )
-        )
-        {
-            matches = activePenalties
-                .Where(activePenalty => activePenalty.SteamId64 == steamId)
-                .ToArray();
-        }
-        else
-        {
-            matches = activePenalties
-                .Where(activePenalty =>
-                    string.Equals(
-                        activePenalty.PlayerName,
-                        lookup,
-                        StringComparison.OrdinalIgnoreCase
-                    )
-                )
-                .ToArray();
-
-            if (matches.Length == 0)
-            {
-                matches = activePenalties
-                    .Where(activePenalty =>
-                        !string.IsNullOrWhiteSpace(activePenalty.PlayerName) &&
-                        activePenalty.PlayerName.StartsWith(
-                            lookup,
-                            StringComparison.OrdinalIgnoreCase
-                        )
-                    )
-                    .ToArray();
-            }
-        }
-
         if (matches.Length == 1)
         {
-            penalty = matches[0];
+            steamId = matches[0].PlayerSteamId;
             return true;
         }
 
-        string penaltyName = GetPenaltyName(type);
-        error = matches.Length > 1
-            ? $"More than one active {penaltyName} matches '{lookup}'; use a more specific name or SteamID64."
-            : $"No active {penaltyName} found for '{lookup}'.";
-        return false;
-    }
+        if (matches.Length > 1)
+        {
+            error = $"More than one online player is named {playerName}; use their SteamID64.";
+            return false;
+        }
 
-    private static string GetPenaltyName(PenaltyType type) =>
-        type == PenaltyType.Ban
-            ? "ban"
-            : type == PenaltyType.Gag
-                ? "mute"
-                : "penalty";
-
-    private static bool TryParseMuteDuration(
-        string input,
-        out TimeSpan duration
-    )
-    {
-        duration = TimeSpan.Zero;
         if (
-            string.IsNullOrWhiteSpace(input) ||
-            input.Length < 2 ||
-            !int.TryParse(
-                input[..^1],
+            playerName.Length == 17 &&
+            ulong.TryParse(
+                playerName,
                 NumberStyles.None,
                 CultureInfo.InvariantCulture,
-                out int value
-            ) ||
-            value <= 0
+                out steamId
+            )
         )
         {
-            return false;
+            return true;
         }
 
-        try
-        {
-            duration = char.ToLowerInvariant(input[^1]) switch
-            {
-                's' => TimeSpan.FromSeconds(value),
-                'm' => TimeSpan.FromMinutes(value),
-                'h' => TimeSpan.FromHours(value),
-                'd' => TimeSpan.FromDays(value),
-                _ => TimeSpan.Zero
-            };
-        }
-        catch (OverflowException)
-        {
-            return false;
-        }
-
-        return duration > TimeSpan.Zero;
-    }
-
-    private static string GetDurationText(TimeSpan duration)
-    {
-        string text = Penalties.DescribeDuration(duration);
-        return text.StartsWith("for ", StringComparison.OrdinalIgnoreCase)
-            ? text[4..]
-            : text;
+        steamId = 0;
+        error = $"No online player is named {playerName}. Use their SteamID64 if they are offline.";
+        return false;
     }
 
     private static string GetPenaltyTimeLeft(Penalty penalty)
