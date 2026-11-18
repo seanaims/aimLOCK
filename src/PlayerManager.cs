@@ -5825,27 +5825,31 @@ public class PlayerManager
             return;
         }
 
-        var recordFound = server.PlayerRecords.Values.FirstOrDefault(record =>
-            string.Equals(
-                record.LastKnownName,
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ));
-
-        if (recordFound == null)
+        // Same lookup as the record admin commands: current names of online players,
+        // saved names, unique prefixes or a SteamID64, and never a guess between two
+        // players who share a name.
+        if (!server.TryResolvePlayerSteamId(
+            targetName,
+            out ulong targetSteamId,
+            out string resolvedName,
+            out string error
+        ))
         {
-            caller.Reply($"No stats found for '{targetName}'.");
+            caller.Reply(error);
             return;
         }
 
-        int totalGames = recordFound.Wins + recordFound.Losses;
+        server.PlayerRecords.TryGetValue(targetSteamId, out var recordFound);
+        int targetWins = recordFound?.Wins ?? 0;
+        int targetLosses = recordFound?.Losses ?? 0;
+        int totalGames = targetWins + targetLosses;
         float targetWinRate = totalGames > 0
-            ? (float)recordFound.Wins / totalGames * 100f
+            ? (float)targetWins / totalGames * 100f
             : 0f;
 
         caller.Reply(
-            $"[{recordFound.LastKnownName}] " +
-            $"Unranked | Record: {recordFound.Wins}-{recordFound.Losses} | " +
+            $"[{resolvedName}] " +
+            $"Unranked | Record: {targetWins}-{targetLosses} | " +
             $"WR: {targetWinRate:F1}%"
         );
     }

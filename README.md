@@ -74,8 +74,9 @@ to that queue:
 
 | Command | Description |
 | --- | --- |
-| `/stats [player name]` | View your unranked record, or another player's record. |
+| `/stats [player name\|SteamID64]` | View your unranked record, or another player's record. Accepts an exact name, a unique name prefix, or a SteamID64; it asks for a more specific name when more than one player matches. |
 | `/elo` | View your ranked Elo, ranked record, and ranked win rate. |
+| `/whois <player name>` | Show a player's SteamID64 and whether they are online. Accepts an exact name, a unique name prefix, or a SteamID64; works for offline players with a saved record. Requires `aimlock.whois`. |
 | `/ping` | View your latest server-reported ping. If no fresh unambiguous reading is available, the plugin refreshes the readings; try again shortly. |
 | `/leaderboardmove <x> <y> <z>` | Move the in-world leaderboard and save its position. Requires `aimlock.leaderboard.move`. |
 
@@ -89,7 +90,7 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 | `/timezone` | Show your saved time zone. |
 | `/timezone <IANA ID>` | Set your time zone, for example `/timezone America/New_York`. IDs are case-insensitive; daylight-saving changes follow the selected zone's rules. |
 | `/tag <tagname\|clear>` | Equip a granted overhead tag or clear your selected tag. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. |
-| `/tag list` | List the overhead tags you can use. |
+| `/tag list` | List the overhead tags you can use. Guild members can always use `GUILDTAG` for their own guild; it does not need to be granted. |
 | `/tag give <player name\|SteamID64> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. Names must match one online player exactly; use the SteamID64 for offline players. |
 | `/tag revoke <player name\|SteamID64> <tagname>` | Take away tag access, and remove the tag if they are wearing it. Requires `aimlock.tags.manage`. |
 | `/tag <player name\|SteamID64> <tagname\|clear>` | Directly set or clear a player's overhead tag. Requires `aimlock.tags.manage`. |
@@ -128,7 +129,7 @@ Guild membership and other player-management actions are checked by the guild sy
 
 ### Record administration
 
-The following commands require `aimlock.records.reset`. Player lookup accepts an exact name or a unique name prefix.
+The following commands require `aimlock.records.reset`. Player lookup accepts an exact name, a unique name prefix, or a SteamID64.
 
 | Command | Description |
 | --- | --- |
@@ -163,7 +164,7 @@ These commands require `aimlock.debug`.
 - Duel item stack: Swift Striker, Opening Rounds, Fleetfoot, Titanic Magazine, Enduring Speed and Burst Fire, all at their normal values (Swift Striker 20%), so players' games predict the same fire rate as the server. No Glass Cannon. Duel max health is the hero's own value (max boons plus these items), so the health bar is accurate.
 - Fixation stacks are cleared on every kill, at the start of every countdown and again at FIGHT, and every duel and round starts with health full. Burst Fire stays active: the server sets `citadel_ability_cooldown_max 0.001` (ability and item cooldowns capped at almost nothing), as other 1v1 servers do, and its buff is applied permanently in duels.
 - Everyone spawns as Haze with max boons. Fixation is the only ability: it is unlocked with every upgrade tier and a 999 stack cap; Sleep Dagger, Smoke Bomb and Bullet Dance are removed.
-- The map is kept empty: troopers, guardians, walkers, patrons, neutrals, the mid boss, breakables, the urn, powerups and healing pickups are disabled or removed as they spawn.
+- The map is kept empty: troopers, guardians, walkers, patrons, neutrals, the mid boss, breakables, the urn, powerups, healing pickups and the sandbox soul orb spawners are disabled or removed as they spawn.
 
 ## Build and deployment
 

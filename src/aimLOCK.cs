@@ -1004,6 +1004,7 @@ public class aimLOCK : DeadworksPluginBase
             caller.Reply("/stats [player] - View unranked wins, losses, and win rate.");
             caller.Reply("/elo - View ranked Elo, wins, losses, and win rate.");
             caller.Reply("/ping - View your server-reported ping.");
+            caller.Reply("/whois <player name> - Look up a player's SteamID64 (permission required).");
             caller.Reply("/resetelo <player name> - Reset Elo to 1000 and ranked wins/losses to 0-0 (permission required).");
             caller.Reply("/resetranked <player name> (alias: /resetrankedrecord) - Reset ranked wins/losses, keeping Elo (permission required).");
             caller.Reply("/resetunranked <player name> (alias: /resetunrankedrecord) - Reset unranked wins/losses (permission required).");
@@ -1764,7 +1765,7 @@ public class aimLOCK : DeadworksPluginBase
             percent <= 100f;
     }
 
-    [Command("spawn", Description = "Return to spawn after a 2-second countdown or forfeit an active duel.")]
+    [Command("spawn", Description = "Return to spawn after a 2-second countdown or forfeit an active duel (instant in bot matches).")]
     public void SpawnCommand(Caller caller)
     {
         var player = caller.Player;
@@ -1780,10 +1781,20 @@ public class aimLOCK : DeadworksPluginBase
                 PlayerManager.FindMatchParticipant(activeMatch.Player1)?.IsBot == true ||
                 PlayerManager.FindMatchParticipant(activeMatch.Player2)?.IsBot == true;
 
+            // Bot matches record nothing, so leaving one needs no countdown.
+            if (isBotMatch)
+            {
+                ForfeitToSpawn();
+                return;
+            }
+
             caller.Reply("Returning to spawn in 2...");
             ScheduleOnce(1.Seconds(), () =>
                 caller.Reply("Returning to spawn in 1..."));
-            ScheduleOnce(2.Seconds(), () =>
+            ScheduleOnce(2.Seconds(), ForfeitToSpawn);
+            return;
+
+            void ForfeitToSpawn()
             {
                 if (!player.IsValid)
                     return;
@@ -1804,8 +1815,7 @@ public class aimLOCK : DeadworksPluginBase
                 {
                     caller.Reply("The match is already ending; /spawn was not used.");
                 }
-            });
-            return;
+            }
         }
 
         var pawn = player.GetHeroPawn();
@@ -2005,6 +2015,33 @@ public class aimLOCK : DeadworksPluginBase
     }
 
     [Command(
+        "whois",
+        Description = "Look up a player's SteamID64 by exact name or unique name prefix.",
+        Permission = "aimlock.whois",
+        SuppressChat = true
+    )]
+    public void WhoIsCommand(Caller caller, string playerName)
+    {
+        if (!TryResolvePlayerSteamId(
+            playerName,
+            out ulong steamId,
+            out string targetName,
+            out string error
+        ))
+        {
+            caller.Reply(error);
+            return;
+        }
+
+        bool online = Players.GetAll()
+            .Any(player => !player.IsBot && player.PlayerSteamId == steamId);
+        caller.Reply(
+            $"{targetName}: {steamId.ToString(CultureInfo.InvariantCulture)} " +
+            $"({(online ? "online" : "offline")})"
+        );
+    }
+
+    [Command(
         "resetrankedrecord",
         "resetranked",
         Description = "Reset ranked wins/losses by exact name or unique name prefix.",
@@ -2091,7 +2128,7 @@ public class aimLOCK : DeadworksPluginBase
         }
     }
 
-    private bool TryResolvePlayerSteamId(
+    internal bool TryResolvePlayerSteamId(
         string playerName,
         out ulong steamId,
         out string targetName,
@@ -2110,6 +2147,32 @@ public class aimLOCK : DeadworksPluginBase
         var onlinePlayers = Players.GetAll()
             .Where(player => !player.IsBot)
             .ToArray();
+
+        // A SteamID64 names one player exactly, whatever they are called now.
+        if (lookupName.Length == 17 &&
+            ulong.TryParse(
+                lookupName,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out ulong directSteamId
+            ))
+        {
+            var onlinePlayer = onlinePlayers
+                .FirstOrDefault(player => player.PlayerSteamId == directSteamId);
+            if (onlinePlayer != null)
+            {
+                steamId = directSteamId;
+                targetName = onlinePlayer.PlayerName;
+                return true;
+            }
+
+            if (PlayerRecords.TryGetValue(directSteamId, out var recordById))
+            {
+                steamId = directSteamId;
+                targetName = recordById.LastKnownName;
+                return true;
+            }
+        }
 
         ulong[] matchingIds = FindMatchingIds(exactMatch: true);
         bool usedPrefixMatch = false;
