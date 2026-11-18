@@ -261,7 +261,8 @@ public sealed class RankedEloManager
         );
 
     private static Dictionary<string, StoredPlayer> ValidatePlayers(
-        Dictionary<string, StoredPlayer> storedPlayers)
+        Dictionary<string, StoredPlayer> storedPlayers
+    )
     {
         var loadedPlayers = new Dictionary<string, StoredPlayer>(
             StringComparer.Ordinal
@@ -269,7 +270,7 @@ public sealed class RankedEloManager
 
         foreach (var entry in storedPlayers)
         {
-            string playerId = ValidateSteamId(entry.Key, "ranked-elo.json");
+            string playerId = ValidateSteamId(entry.Key, nameof(dataFilePath));
             StoredPlayer player = entry.Value;
 
             if (

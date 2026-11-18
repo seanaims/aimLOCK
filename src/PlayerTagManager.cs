@@ -71,7 +71,6 @@ public sealed class PlayerTagManager
     public const string GrantedTagsFileName = "player-tag-grants.json";
     public const string VisibilityFileName = "player-tag-visibility.json";
     public const string StableVisibilityFileName = "player-tag-visibility-by-id.json";
-
     private readonly string tagsFilePath = JsonStore.PathFor(TagsFileName);
     private readonly string stableTagsFilePath = JsonStore.PathFor(StableTagsFileName);
     private readonly string grantedTagsFilePath = JsonStore.PathFor(GrantedTagsFileName);
@@ -89,6 +88,10 @@ public sealed class PlayerTagManager
     private readonly Dictionary<ulong, (Vector3 Position, Vector3 Angles)>
         lastTagTransforms = new();
     private readonly Dictionary<ulong, int> refreshVersions = new();
+    // Camera yaw each tag was last oriented to. Tags are parented to the pawn, so they
+    // follow it automatically; they only need re-orienting when the view turns.
+    private readonly Dictionary<ulong, float> lastTagYaw = new();
+    private const float TagReorientThresholdDegrees = 1.5f;
     private readonly HashSet<string> hiddenTags =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<ulong> hiddenSteamIds = new();
@@ -189,6 +192,32 @@ public sealed class PlayerTagManager
     public bool CanUseTag(ulong steamId, PlayerTag tag) =>
         grantedTags.TryGetValue(steamId, out var playerTags) &&
         playerTags.Contains(tag);
+
+    public string FormatPlayerNameWithSelectedTag(
+        ulong steamId,
+        string playerName,
+        string? guildTag
+    )
+    {
+        if (!stableTags.TryGetValue(steamId, out PlayerTag tag))
+            return playerName;
+        if (tag == PlayerTag.GuildTag)
+            return string.IsNullOrWhiteSpace(guildTag)
+                ? playerName
+                : $"[{guildTag}] {playerName}";
+
+        string overheadTag = tag switch
+        {
+            PlayerTag.YouTube => "[YT]",
+            PlayerTag.Twitch => "[TTV]",
+            PlayerTag.Owner => "[OWNER]",
+            PlayerTag.Staff => "[STAFF]",
+            PlayerTag.Aimlock => "[aimlock.xyz]",
+            PlayerTag.Supporter => "[♥]",
+            _ => throw new ArgumentOutOfRangeException(nameof(tag))
+        };
+        return $"{overheadTag} {playerName}";
+    }
 
     public string GetGrantedTagList(ulong steamId)
     {
@@ -307,7 +336,7 @@ public sealed class PlayerTagManager
             ) &&
             activeBackground.IsValid &&
             activeTags.TryGetValue(steamId, out var existingTags) &&
-            existingTags.All(tagEntity => tagEntity.IsValid)
+            AreTagEntitiesValid(existingTags)
         )
         {
             UpdateTagTransforms(
@@ -468,16 +497,21 @@ public sealed class PlayerTagManager
         Vector3 headPosition =
             pawn.Position + new Vector3(0f, 0f, TagHeight);
         Vector3 tagAngles = GetTagAngles(pawn.CameraAngles);
+        // The tag entities are parented to the pawn, so they follow it on their own.
+        // They only need re-orienting when the view turns: comparing the exact position
+        // re-teleported every tag entity 10 times a second whenever its player moved.
+        float yaw = pawn.CameraAngles.Y;
         if (
-            lastTagTransforms.TryGetValue(steamId, out var previous) &&
-            previous.Position == headPosition &&
-            previous.Angles == tagAngles
+            lastTagTransforms.ContainsKey(steamId) &&
+            lastTagYaw.TryGetValue(steamId, out float previousYaw) &&
+            MathF.Abs(DeltaYaw(yaw, previousYaw)) < TagReorientThresholdDegrees
         )
         {
             return;
         }
 
         lastTagTransforms[steamId] = (headPosition, tagAngles);
+        lastTagYaw[steamId] = yaw;
 
         backgroundText.Teleport(
             position: headPosition,
@@ -653,6 +687,16 @@ public sealed class PlayerTagManager
             TextAngles.Z
         );
 
+    private static float DeltaYaw(float a, float b)
+    {
+        float delta = (a - b) % 360f;
+        if (delta > 180f)
+            delta -= 360f;
+        else if (delta < -180f)
+            delta += 360f;
+        return delta;
+    }
+
     private static float NormalizeYaw(float yaw)
     {
         yaw %= 360f;
@@ -799,6 +843,7 @@ public sealed class PlayerTagManager
         activeTagValues.Remove(steamId);
         activeTagPawnHandles.Remove(steamId);
         lastTagTransforms.Remove(steamId);
+        lastTagYaw.Remove(steamId);
     }
 
     private void EnsureStaleTagEntitiesRemoved()
@@ -812,6 +857,7 @@ public sealed class PlayerTagManager
         activeTagValues.Clear();
         activeTagPawnHandles.Clear();
         lastTagTransforms.Clear();
+        lastTagYaw.Clear();
         staleTagEntitiesRemoved = true;
     }
 
@@ -865,7 +911,6 @@ public sealed class PlayerTagManager
 
         return playerName.Trim();
     }
-
 
     private void LoadTags()
     {
@@ -942,19 +987,44 @@ public sealed class PlayerTagManager
     }
 
     private void SaveHiddenTags(HashSet<string> hiddenTagsToSave) =>
-        JsonStore.Save(visibilityFilePath, hiddenTagsToSave, JsonOptions);
+        JsonStore.Save(
+            visibilityFilePath,
+            hiddenTagsToSave,
+            JsonOptions,
+            durable: false
+        );
 
     private void SaveHiddenSteamIds(HashSet<ulong> hiddenSteamIdsToSave) =>
-        JsonStore.Save(stableVisibilityFilePath, hiddenSteamIdsToSave, JsonOptions);
+        JsonStore.Save(
+            stableVisibilityFilePath,
+            hiddenSteamIdsToSave,
+            JsonOptions,
+            durable: false
+        );
 
     private void SaveTags(Dictionary<string, PlayerTag> tagsToSave) =>
-        JsonStore.Save(tagsFilePath, tagsToSave, JsonOptions);
+        JsonStore.Save(
+            tagsFilePath,
+            tagsToSave,
+            JsonOptions,
+            durable: false
+        );
 
     private void SaveStableTags(Dictionary<ulong, PlayerTag> tagsToSave) =>
-        JsonStore.Save(stableTagsFilePath, tagsToSave, JsonOptions);
+        JsonStore.Save(
+            stableTagsFilePath,
+            tagsToSave,
+            JsonOptions,
+            durable: false
+        );
 
     private void SaveGrantedTags(
         Dictionary<ulong, HashSet<PlayerTag>> grantsToSave
     ) =>
-        JsonStore.Save(grantedTagsFilePath, grantsToSave, JsonOptions);
+        JsonStore.Save(
+            grantedTagsFilePath,
+            grantsToSave,
+            JsonOptions,
+            durable: false
+        );
 }
