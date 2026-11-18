@@ -60,11 +60,18 @@ public class QueueManager
             return;
         }
 
+        if (
+            server.PlayerManager.TryGetActiveMatch(controller, out var activeMatch) &&
+            !server.PlayerManager.IsBotMatch(activeMatch)
+        )
+        {
+            caller.Reply("You are already in a match.");
+            return;
+        }
+
         bool alreadyQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
-            .Any(x => StringComparer.OrdinalIgnoreCase.Equals(
-                x.PlayerName,
-                controller.PlayerName));
+            .Any(x => x.SteamId == controller.PlayerSteamId);
 
         if (alreadyQueued)
         {
@@ -73,7 +80,7 @@ public class QueueManager
         }
 
         var queue = GetQueue(queueType);
-        queue.Add(new QueueEntry(controller.PlayerName));
+        queue.Add(new QueueEntry(controller.PlayerSteamId));
 
         server.UIManager.RefreshHud();
 
@@ -105,35 +112,20 @@ public class QueueManager
             return;
         }
 
-        string playerName = controller.PlayerName;
+        ulong steamId = controller.PlayerSteamId;
         bool alreadyInTargetQueue = GetQueue(queueType).Any(entry =>
-            StringComparer.OrdinalIgnoreCase.Equals(entry.PlayerName, playerName)
+            entry.SteamId == steamId
         );
         if (alreadyInTargetQueue)
             return;
 
         bool wasQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
-            .Any(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    playerName
-                )
-            );
+            .Any(entry => entry.SteamId == steamId);
         if (wasQueued)
         {
-            server.RankedQueue.RemoveAll(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    playerName
-                )
-            );
-            server.UnrankedQueue.RemoveAll(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    playerName
-                )
-            );
+            server.RankedQueue.RemoveAll(entry => entry.SteamId == steamId);
+            server.UnrankedQueue.RemoveAll(entry => entry.SteamId == steamId);
             server.UIManager.RefreshHud();
         }
 
@@ -148,8 +140,7 @@ public class QueueManager
             return;
 
         var player = server.RankedQueue.FirstOrDefault(x =>
-            StringComparer.OrdinalIgnoreCase.Equals(
-                x.PlayerName, controller.PlayerName));
+            x.SteamId == controller.PlayerSteamId);
 
         if (player != null)
         {
@@ -158,8 +149,7 @@ public class QueueManager
         else
         {
             player = server.UnrankedQueue.FirstOrDefault(x =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    x.PlayerName, controller.PlayerName));
+                x.SteamId == controller.PlayerSteamId);
             if (player == null)
             {
                 caller.Reply("You are not currently in a queue.");
@@ -207,7 +197,7 @@ public class QueueManager
         bool alreadyInArena = false
     )
     {
-        if (server.ActiveMatches.ContainsKey(player.PlayerName))
+        if (server.PlayerManager.TryGetActiveMatch(player, out _))
         {
             reply("You are already in a match.");
             return false;
@@ -223,16 +213,6 @@ public class QueueManager
             return false;
         }
 
-        bool alreadyQueued = server.RankedQueue
-            .Concat(server.UnrankedQueue)
-            .Any(entry => StringComparer.OrdinalIgnoreCase.Equals(
-                entry.PlayerName,
-                player.PlayerName));
-        if (alreadyQueued)
-        {
-            reply("Leave your current queue with /leave before starting a bot match.");
-            return false;
-        }
 
         int arenaIndex = Array.IndexOf(server.DuelLocations, arena);
         if (!IsArenaAvailable(arenaIndex))
@@ -486,7 +466,11 @@ public class QueueManager
         }
 
         var opponent = server.PlayerManager.FindMatchParticipant(
-            string.Equals(match.Player1, proposer.PlayerName, StringComparison.OrdinalIgnoreCase)
+            string.Equals(
+                match.Player1,
+                server.PlayerManager.GetMatchParticipantName(proposer),
+                StringComparison.Ordinal
+            )
                 ? match.Player2
                 : match.Player1
         );
@@ -570,14 +554,8 @@ public class QueueManager
         bool eitherQueued = server.RankedQueue
             .Concat(server.UnrankedQueue)
             .Any(entry =>
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    initiator.PlayerName
-                ) ||
-                StringComparer.OrdinalIgnoreCase.Equals(
-                    entry.PlayerName,
-                    target.PlayerName
-                )
+                entry.SteamId == initiator.PlayerSteamId ||
+                entry.SteamId == target.PlayerSteamId
             );
         if (eitherQueued)
         {
@@ -622,27 +600,33 @@ public class QueueManager
     {
         var queue = GetQueue(queueType);
 
-        if (queue.Count < 2 || !TryGetAvailableArena(out int arenaIndex))
+        if (queue.Count < 2)
             return;
 
-        var playersByName = Players.GetAll()
+        bool hasArena = TryGetAvailableArena(out int arenaIndex);
+
+        var playersBySteamId = Players.GetAll()
             .Where(player => !player.IsBot)
-            .GroupBy(player => player.PlayerName, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() == 1)
+            .GroupBy(player => player.PlayerSteamId)
             .ToDictionary(
                 group => group.Key,
-                group => group.Single(),
-                StringComparer.OrdinalIgnoreCase
+                group => group.First()
             );
         var queuedPlayers = queue
             .Select((entry, index) => new QueuedPlayer(
                 entry,
                 index,
-                playersByName.TryGetValue(entry.PlayerName, out var player)
+                playersBySteamId.TryGetValue(entry.SteamId, out var player)
                     ? player
                     : null
             ))
-            .Where(item => item.Player != null)
+            .Where(item =>
+                item.Player != null &&
+                (
+                    !server.PlayerManager.TryGetActiveMatch(item.Player, out var match) ||
+                    server.PlayerManager.IsBotMatch(match)
+                )
+            )
             .ToArray();
 
         int selectedFirstIndex = -1;
@@ -673,13 +657,6 @@ public class QueueManager
                     usePingMatching
                 )
                 {
-                    if (!server.PingManager.TryGetPing(firstPlayer, out int firstPing)
-                        || !server.PingManager.TryGetPing(secondPlayer, out int secondPing))
-                    {
-                        continue;
-                    }
-
-                    pingDifference = Math.Abs((long)firstPing - secondPing);
                     DateTimeOffset oldestEntry = firstQueued.Entry.EnqueuedAt
                         <= secondQueued.Entry.EnqueuedAt
                             ? firstQueued.Entry.EnqueuedAt
@@ -687,8 +664,22 @@ public class QueueManager
                     int allowedDifference = GetAllowedPingDifference(
                         Math.Max(0d, (now - oldestEntry).TotalSeconds)
                     );
-                    if (pingDifference > allowedDifference)
+
+                    int firstPing = 0;
+                    int secondPing = 0;
+                    bool hasPings =
+                        server.PingManager.TryGetPing(firstPlayer, out firstPing) &&
+                        server.PingManager.TryGetPing(secondPlayer, out secondPing);
+                    if (hasPings)
+                    {
+                        pingDifference = Math.Abs((long)firstPing - secondPing);
+                        if (pingDifference > allowedDifference)
+                            continue;
+                    }
+                    else if (allowedDifference != int.MaxValue)
+                    {
                         continue;
+                    }
                 }
 
                 DateTimeOffset pairOldestEntry = firstQueued.Entry.EnqueuedAt
@@ -718,6 +709,22 @@ public class QueueManager
         if (selectedFirstIndex < 0 || player1 == null || player2 == null)
             return;
 
+        /* End practice bot matches; finishing a match runs the queue again */
+        foreach (var player in new[] { player1, player2 })
+        {
+            if (!server.PlayerManager.TryGetActiveMatch(player, out _))
+                continue;
+
+            Chat.PrintToChat(player, "Match found! Ending your bot match.");
+            server.PlayerManager.ForfeitMatch(
+                server.PlayerManager.GetMatchParticipantName(player)
+            );
+            return;
+        }
+
+        if (!hasArena)
+            return;
+
         if (!StartMatch(player1, player2, queueType, arenaIndex))
             return;
 
@@ -725,6 +732,7 @@ public class QueueManager
         queue.RemoveAt(selectedFirstIndex);
 
         server.UIManager.RefreshHud();
+        TryStartMatch(queueType);
     }
 
     public bool TryGetAvailableArena(out int arenaIndex)
@@ -898,11 +906,14 @@ public class QueueManager
 
         void InitializeMatchInArena()
         {
+            if (match.Finished)
+                return;
+
             PlayerManager.EnsureTeam(player1, 2);
             PlayerManager.EnsureTeam(player2, 3);
 
-            var pawn1 = player1.GetHeroPawn();
-            var pawn2 = player2.GetHeroPawn();
+            var pawn1 = player1.IsValid ? player1.GetHeroPawn() : null;
+            var pawn2 = player2.IsValid ? player2.GetHeroPawn() : null;
 
             if (pawn1 == null || pawn2 == null)
             {
@@ -1013,7 +1024,7 @@ public class QueueManager
         CCitadelPlayerController player,
         MatchQueueType queueType)
     {
-        string displayName = server.GuildManager.FormatPlayerName(player);
+        string displayName = server.GuildManager.FormatPlayerNameWithSelectedTag(player);
         if (player.IsBot)
             return displayName;
 

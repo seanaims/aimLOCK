@@ -8,11 +8,11 @@ On connection, each player privately receives a short welcome message introducin
 
 Join a ranked 1v1 queue with `/join ranked` (ranked matches track Elo) or a casual 1v1 queue with `/join unranked`; the alias `/queue` also works. Use `/leave` to leave before a match is found. Players matched together receive the match-found notice and 3-2-1/FIGHT countdown; other players on the server do not.
 
-Matchmaking can use server-reported ping readings from the server-console `status` command. It uses the median of up to three recent readings and requires an unambiguous player-name match. The initial maximum ping difference is 6 ms; the window widens by 3 ms every 5 seconds to 60 ms, and after two minutes any ping difference is allowed to avoid leaving players queued indefinitely. Use `/pbmm off` to opt out of ping filtering for your matches, or `/pbmm on` to enable it again. The setting is saved per player. Practice-bot matches are not ping-filtered.
+Matchmaking can use server-reported ping readings from the server-console `status` command. It uses the median of up to three recent readings and requires an unambiguous player-name match. The initial maximum ping difference is 6 ms; the window widens by 3 ms every 15 seconds (up to 27 ms), and after two minutes any ping difference is allowed, even when a ping reading is missing, to avoid leaving players queued indefinitely. Use `/pbmm off` to opt out of ping filtering for your matches, or `/pbmm on` to enable it again. The setting is saved per player. Practice-bot matches are not ping-filtered.
 
 When a match ends, only that duel's participants and its registered spectators are returned to Midtown spawn. A player who disconnects is removed with their hero and controlled pawns; leaving a duel records a forfeit. Server-info UI is restored after matches, and the duel countdown is private to the participants.
 
-Each active arena displays its current duel score above the arena. The Midtown `ACTIVE MATCHES` wall lists each live match's arena, queue type, players, and score. Scoreboards show only a player's selected overhead tag; they do not add a guild tag by default, and show no tag when the player has cleared theirs. Guild member listings show the selected overhead tag without repeating the guild tag. The final score remains visible until both participants have left, then the scoreboard is removed. New matches use only free arenas; queued matches wait for an arena, and practice-bot matches cannot start while all arenas are occupied.
+Each active arena displays its current duel score above the arena. The Midtown `ACTIVE MATCHES` wall lists each live match's arena, queue type, players, and score. Scoreboards show only a player's selected overhead tag; they do not add a guild tag by default, and show no tag when the player has cleared theirs. Guild member listings show the selected overhead tag without repeating the guild tag. The final score remains visible until both participants have left, then the scoreboard is removed. New matches use only free arenas; queued matches wait for an arena, and practice-bot matches cannot start while all arenas are occupied. You can play a practice-bot match while queued; when the queue finds an opponent, the bot match ends and the real match starts.
 
 Server pausing is disabled at startup.
 
@@ -74,8 +74,9 @@ to that queue:
 
 | Command | Description |
 | --- | --- |
-| `/stats [player name]` | View your unranked record, or another player's record. |
+| `/stats [player name\|SteamID64]` | View your unranked record, or another player's record. Accepts an exact name, a unique name prefix, or a SteamID64; it asks for a more specific name when more than one player matches. |
 | `/elo` | View your ranked Elo, ranked record, and ranked win rate. |
+| `/whois <player name>` | Show a player's SteamID64 and whether they are online. Accepts an exact name, a unique name prefix, or a SteamID64; works for offline players with a saved record. Requires `aimlock.whois`. |
 | `/ping` | View your latest server-reported ping. If no fresh unambiguous reading is available, the plugin refreshes the readings; try again shortly. |
 | `/leaderboardmove <x> <y> <z>` | Move the in-world leaderboard and save its position. Requires `aimlock.leaderboard.move`. |
 
@@ -89,7 +90,7 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 | `/timezone` | Show your saved time zone. |
 | `/timezone <IANA ID>` | Set your time zone, for example `/timezone America/New_York`. IDs are case-insensitive; daylight-saving changes follow the selected zone's rules. |
 | `/tag <tagname\|clear>` | Equip a granted overhead tag or clear your selected tag. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. |
-| `/tag list` | List the overhead tags you can use. |
+| `/tag list` | List the overhead tags you can use. Guild members can always use `GUILDTAG` for their own guild; it does not need to be granted. |
 | `/tag give <player name\|SteamID64> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. Names must match one online player exactly; use the SteamID64 for offline players. |
 | `/tag revoke <player name\|SteamID64> <tagname>` | Take away tag access, and remove the tag if they are wearing it. Requires `aimlock.tags.manage`. |
 | `/tag <player name\|SteamID64> <tagname\|clear>` | Directly set or clear a player's overhead tag. Requires `aimlock.tags.manage`. |
@@ -128,7 +129,7 @@ Guild membership and other player-management actions are checked by the guild sy
 
 ### Record administration
 
-The following commands require `aimlock.records.reset`. Player lookup accepts an exact name or a unique name prefix.
+The following commands require `aimlock.records.reset`. Player lookup accepts an exact name, a unique name prefix, or a SteamID64.
 
 | Command | Description |
 | --- | --- |
@@ -163,7 +164,7 @@ These commands require `aimlock.debug`.
 - Duel item stack: Swift Striker, Opening Rounds, Fleetfoot, Titanic Magazine, Enduring Speed and Burst Fire, all at their normal values (Swift Striker 20%), so players' games predict the same fire rate as the server. No Glass Cannon. Duel max health is the hero's own value (max boons plus these items), so the health bar is accurate.
 - Fixation stacks are cleared on every kill, at the start of every countdown and again at FIGHT, and every duel and round starts with health full. Burst Fire stays active: the server sets `citadel_ability_cooldown_max 0.001` (ability and item cooldowns capped at almost nothing), as other 1v1 servers do, and its buff is applied permanently in duels.
 - Everyone spawns as Haze with max boons. Fixation is the only ability: it is unlocked with every upgrade tier and a 999 stack cap; Sleep Dagger, Smoke Bomb and Bullet Dance are removed.
-- The map is kept empty: troopers, guardians, walkers, patrons, neutrals, the mid boss, breakables, the urn, powerups and healing pickups are disabled or removed as they spawn.
+- The map is kept empty: troopers, guardians, walkers, patrons, neutrals, the mid boss, breakables, the urn, powerups, healing pickups and the sandbox soul orb spawners are disabled or removed as they spawn.
 
 ## Build and deployment
 
