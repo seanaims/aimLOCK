@@ -2100,7 +2100,7 @@ public class aimLOCK : DeadworksPluginBase
         }
     }
 
-    private bool TryResolvePlayerSteamId(
+    internal bool TryResolvePlayerSteamId(
         string playerName,
         out ulong steamId,
         out string targetName,
@@ -2119,6 +2119,32 @@ public class aimLOCK : DeadworksPluginBase
         var onlinePlayers = Players.GetAll()
             .Where(player => !player.IsBot)
             .ToArray();
+
+        // A SteamID64 names one player exactly, whatever they are called now.
+        if (lookupName.Length == 17 &&
+            ulong.TryParse(
+                lookupName,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out ulong directSteamId
+            ))
+        {
+            var onlinePlayer = onlinePlayers
+                .FirstOrDefault(player => player.PlayerSteamId == directSteamId);
+            if (onlinePlayer != null)
+            {
+                steamId = directSteamId;
+                targetName = onlinePlayer.PlayerName;
+                return true;
+            }
+
+            if (PlayerRecords.TryGetValue(directSteamId, out var recordById))
+            {
+                steamId = directSteamId;
+                targetName = recordById.LastKnownName;
+                return true;
+            }
+        }
 
         ulong[] matchingIds = FindMatchingIds(exactMatch: true);
         bool usedPrefixMatch = false;

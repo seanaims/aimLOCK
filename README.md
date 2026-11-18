@@ -74,7 +74,7 @@ to that queue:
 
 | Command | Description |
 | --- | --- |
-| `/stats [player name]` | View your unranked record, or another player's record. |
+| `/stats [player name\|SteamID64]` | View your unranked record, or another player's record. Accepts an exact name, a unique name prefix, or a SteamID64; it asks for a more specific name when more than one player matches. |
 | `/elo` | View your ranked Elo, ranked record, and ranked win rate. |
 | `/ping` | View your latest server-reported ping. If no fresh unambiguous reading is available, the plugin refreshes the readings; try again shortly. |
 | `/leaderboardmove <x> <y> <z>` | Move the in-world leaderboard and save its position. Requires `aimlock.leaderboard.move`. |
@@ -128,7 +128,7 @@ Guild membership and other player-management actions are checked by the guild sy
 
 ### Record administration
 
-The following commands require `aimlock.records.reset`. Player lookup accepts an exact name or a unique name prefix.
+The following commands require `aimlock.records.reset`. Player lookup accepts an exact name, a unique name prefix, or a SteamID64.
 
 | Command | Description |
 | --- | --- |
@@ -163,7 +163,7 @@ These commands require `aimlock.debug`.
 - Duel item stack: Swift Striker, Opening Rounds, Fleetfoot, Titanic Magazine, Enduring Speed and Burst Fire, all at their normal values (Swift Striker 20%), so players' games predict the same fire rate as the server. No Glass Cannon. Duel max health is the hero's own value (max boons plus these items), so the health bar is accurate.
 - Fixation stacks are cleared on every kill, at the start of every countdown and again at FIGHT, and every duel and round starts with health full. Burst Fire stays active: the server sets `citadel_ability_cooldown_max 0.001` (ability and item cooldowns capped at almost nothing), as other 1v1 servers do, and its buff is applied permanently in duels.
 - Everyone spawns as Haze with max boons. Fixation is the only ability: it is unlocked with every upgrade tier and a 999 stack cap; Sleep Dagger, Smoke Bomb and Bullet Dance are removed.
-- The map is kept empty: troopers, guardians, walkers, patrons, neutrals, the mid boss, breakables, the urn, powerups and healing pickups are disabled or removed as they spawn.
+- The map is kept empty: troopers, guardians, walkers, patrons, neutrals, the mid boss, breakables, the urn, powerups, healing pickups and the sandbox soul orb spawners are disabled or removed as they spawn.
 
 ## Build and deployment
 
