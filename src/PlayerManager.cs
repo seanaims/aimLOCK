@@ -23,6 +23,8 @@ public class PlayerManager
     {
         WriteIndented = true
     };
+    public const string RecordsFileName = "records.json";
+    private static readonly string RecordsFilePath = JsonStore.PathFor(RecordsFileName);
     private static readonly Vector3 ArenaScoreboardAngles =
         new(180f, 90f, 270f);
 
@@ -31,6 +33,23 @@ public class PlayerManager
         "ability_stacking_damage/modifier_passive_haze_stacking_damage";
     private const short FixationMaxStacks = 999;
     private const int FullyUpgradedAbilityBits = 0xF;
+    // Max boons. The boon cap is 35; the level that grants it is 36 (the value the
+    // Deadworks deathmatch example writes for a fully levelled hero).
+    private const int MaxBoonLevel = 36;
+    private const string BurstFireItemName = "upgrade_burst_fire";
+    private const string BurstFireBuffName = "upgrade_burst_fire/modifier_burst_fire_buff";
+    // Long enough to outlast any match; it is removed when the match ends.
+    private const float PermanentModifierDuration = 36000f;
+    // Haze abilities that are disabled: Sleep Dagger, Smoke Bomb (invisibility) and
+    // Bullet Dance (ultimate). Fixation is the only ability left.
+    private static readonly string[] DisabledHazeAbilities =
+    {
+        "ability_sleep_dagger",
+        "ability_smoke_bomb",
+        "ability_bullet_flurry",
+    };
+    private const long LoadoutReapplyWindowMs = 1000;
+    private readonly Dictionary<uint, long> loadoutAppliedAt = new();
     private const int InitialAbilityCurrencyGrant = 30;
 
     // Keep the test bot's Elo entry separate from real Steam accounts.
@@ -45,6 +64,13 @@ public class PlayerManager
     private const float PracticeBotDoorwayLabelFontSize = 68f;
     private const float PracticeBotDoorwayLabelWorldUnitsPerPx = 0.3f;
     private const float PracticeBotDoorwayLabelHorizontalPadding = 80f;
+    private const float QueueEntryLabelHorizontalPadding = 180f;
+    private static readonly Vector3[] RemovedBotsLabelPositions =
+    {
+        new(-745f, -9525f, 1265f),
+        new(-821f, -9628f, 1244f),
+        new(-788f, -9568f, 1248f)
+    };
     private const byte PracticeBotDoorwayLabelBackgroundAlpha = 160;
     private const char PracticeBotDoorwayLabelBackgroundGlyph = '\u2588';
     private const float PracticeBotDoorwayLabelBackgroundDepthOffset = -1f;
@@ -78,12 +104,41 @@ public class PlayerManager
             new Vector3(45f, -8931f, 1433f)
         )
     };
+    private static readonly QueueEntryZone[] QueueEntryZones =
+    {
+        new(
+            new Vector3(-2079f, -9270f, 1211f),
+            100f,
+            MatchQueueType.Unranked,
+            "UNRANKED QUEUE",
+            0xFF00FF00,
+            new Vector3(-2079f, -9270f, 1411f)
+        ),
+        new(
+            new Vector3(-2298f, -9224f, 1211f),
+            100f,
+            MatchQueueType.Ranked,
+            "RANKED QUEUE",
+            0xFFFF0000,
+            new Vector3(-2353f, -9224f, 1411f)
+        ),
+        new(
+            new Vector3(-2546f, -8967f, 1214f),
+            100f,
+            null,
+            "LEAVE QUEUE",
+            0xFF0000FF,
+            new Vector3(-2571f, -8942f, 1414f)
+        )
+    };
     private const float DuelArenaCourtHalfSize = 250f;
     private const float DuelArenaCourtHeight = 200f;
     private const float DuelArenaPlayerMargin = 48f;
     private const float DuelArenaBarrierExpansion = 200f;
     private const float DuelArenaRadiusMarkerWidth = 2f;
-    private const int DuelArenaCircleSegments = 48;
+    // 32 segments per circle (was 48): 416 beam entities for 13 arenas instead of 624,
+    // which the server has to check for every player every tick. Still reads as round.
+    private const int DuelArenaCircleSegments = 32;
     private static readonly float DuelArenaSphereRadius = MathF.Sqrt(
         2f * DuelArenaCourtHalfSize * DuelArenaCourtHalfSize +
         DuelArenaCourtHeight * DuelArenaCourtHeight / 4f
@@ -115,10 +170,36 @@ public class PlayerManager
         DuelArenaSphereRadius + DuelArenaPlayerMargin;
     private static readonly float DuelArenaOuterRadiusSquared =
         DuelArenaOuterRadius * DuelArenaOuterRadius;
+    // Beyond this distance from every arena nobody can reach a wall within
+    // FarArenaCheckIntervalMs, so the arena search pauses for that long.
+    private static readonly float FarArenaRadius =
+        DuelArenaOuterRadius + FarArenaSafetyDistance;
+    private static readonly float FarArenaRadiusSquared =
+        FarArenaRadius * FarArenaRadius;
     private static readonly Color DuelArenaCircleColor =
         Color.FromArgb(128, 255, 255, 255);
-    private const float DuelBulletLifestealPercent = 50f;
-    private const float DuelHandicapLifestealReduction = 10f;
+    // Server lifesteal: 100% of bullet damage dealt everywhere, except duels and bot
+    // matches, which use DuelLifestealPercent (85% unless changed with /lifesteal).
+    private const float DefaultServerLifestealPercent = 100f;
+    private const float DefaultDuelLifestealPercent = 85f;
+    private const float LegacyHandicapLifestealReduction = 10f;
+    private const float HardBotLifestealPercent = 40f;
+    public float DuelLifestealPercent { get; private set; } = DefaultDuelLifestealPercent;
+
+    public void SetDuelLifestealPercent(float percent) =>
+        DuelLifestealPercent = Math.Clamp(percent, 0f, 100f);
+    private const int MaxPlayerSlots = 64;
+    private const long PracticeBotZoneCheckIntervalMs = 100;
+    private const long FarArenaCheckIntervalMs = 100;
+    // Larger than anyone can travel in FarArenaCheckIntervalMs (dashes included).
+    private const float FarArenaSafetyDistance = 600f;
+    private const long PlayerNameCacheLifetimeMs = 1000;
+    // Arena boundary: players slightly outside are pushed back by velocity only (no
+    // teleport, so lag compensation and interpolation are not broken). Only a player
+    // this far outside (dash, knockback, teleport) is hard-teleported back in.
+    private const float BoundaryHardCorrectionDistance = 96f;
+    private const float BoundaryMinPushBackSpeed = 60f;
+    private const float BoundaryMaxPushBackSpeed = 350f;
     private const float DefaultBulletLifestealPercent = 28f;
     private const float DefaultBlitzBulletsFireRatePercent = 22f;
     private const float ArenaScoreboardFontSize = 150f;
@@ -131,18 +212,28 @@ public class PlayerManager
     private const float DuelBlitzBulletsFireRatePercent =
         DefaultBlitzBulletsFireRatePercent / 2f;
     private const int DuelMaxHealth = 2800;
+    // true: duels use the hero's own max health (max boons plus the duel items), with
+    // no server-only bonus, so the health bar on players' screens matches the real
+    // health. The 2800 bonus was a server-only value the game never sent to players,
+    // so their bar stayed full until health dropped below the vanilla max.
+    private const bool VanillaDuelMaxHealth = true;
+
+    private static bool HasDuelMaxHealth(CCitadelPlayerPawn pawn) =>
+        VanillaDuelMaxHealth || pawn.GetMaxHealth() == DuelMaxHealth;
+
+    private static int lastLoggedDuelMaxHealth;
     private const double DuelHealthCapCheckIntervalSeconds = 0.05;
     private static readonly string[] DuelItemStack =
     {
         "upgrade_blitz_bullets",
+        "upgrade_high_velocity_mag",
         "upgrade_pristine_emblem",
         "upgrade_fleetfoot_boots",
         "upgrade_titan_round",
         "upgrade_cardio_calibrator",
         "upgrade_burst_fire",
-        "upgrade_chonky",
-        "upgrade_health",
     };
+    private const float DuelHighVelocityRoundsBulletSpeedPercent = 100f;
     private static readonly string[] DuelHealthRegenerationProperties =
     {
         "BonusHealthRegen",
@@ -153,8 +244,30 @@ public class PlayerManager
         "TotalHealthRegen",
         "HealLifePercentOutOfCombat",
     };
+    // Built once instead of with LINQ for every item on every respawn. AddModifier only
+    // reads it.
+    private static readonly Dictionary<string, float> ZeroHealthRegenValues =
+        DuelHealthRegenerationProperties.ToDictionary(name => name, _ => 0f);
     private const string MatchTeleportEffect =
         "particles/items/gold_received_coins_player.vpcf";
+    // Only used by the /bottest fx debug option.
+    private const string RespawnTeleportEffect =
+        "particles/generic/player_respawn_deploy.vpcf";
+    // The Haze model players use. Practice bots were spawning with an old model path
+    // (models/heroes_wip/haze/haze.vmdl) that no longer exists in the game; clients
+    // logged it as missing and then crashed in client.dll while updating the bot.
+    public const string HazeModel = "models/heroes_staging/haze/haze.vmdl";
+    // Hero briefly selected on connect before swapping to Haze.
+    public const string TemporaryConnectHeroName = "hero_inferno";
+    // Precached at map load (see aimLOCK.OnPrecacheResources).
+    public static readonly string[] PrecachedParticles =
+    {
+        MatchTeleportEffect
+    };
+    public static readonly string[] PrecachedModels =
+    {
+        HazeModel
+    };
     public const float DefaultPracticeBotStrafeSpeed = 2500f;
     private static readonly PracticeBotDifficultyProfile EasyBotProfile = new(
         1200f, 50f, 0.45d, 0.45d, 0.85d, 0.4d, 0.7d, 90f, 300f,
@@ -193,15 +306,31 @@ public class PlayerManager
     {
         public float RadiusSquared { get; } = Radius * Radius;
     }
+    private readonly record struct QueueEntryZone(
+        Vector3 Center,
+        float Radius,
+        MatchQueueType? QueueType,
+        string Label,
+        uint LabelColorABGR,
+        Vector3 LabelPosition
+    )
+    {
+        public float RadiusSquared { get; } = Radius * Radius;
+    }
     private sealed class PracticeBotState
     {
         public uint ControllerHandle { get; init; }
         public string MatchKey { get; init; } = "";
         public string DisplayName { get; set; } = "";
         public uint OwnerControllerHandle { get; init; }
+        public int OwnerSlot { get; init; } = -1;
+        // Player slots (one bit each) that are sent this bot: its opponent and anyone
+        // spectating its match. Rebuilt when botViewerMasksDirty is set.
+        public ulong ViewerMask;
         public string OwnerName { get; init; } = "";
         public CCitadelPlayerController? TargetController { get; set; }
         public string DifficultyName { get; set; } = "Hard";
+        public bool IsHard { get; set; } = true;
         public PracticeBotDifficultyProfile Difficulty { get; set; } =
             HardBotProfile;
         public Vector3 LookAt;
@@ -231,10 +360,21 @@ public class PlayerManager
         (DuelMatch Match, CPointWorldText Background, CPointWorldText Text)
     > arenaScoreboards = new();
     private bool practiceBotsPreviousAiEnabled;
-    private readonly HashSet<(uint PlayerHandle, int ZoneIndex)>
-        playersInsidePracticeBotZones = new();
-    private readonly List<CPointWorldText> practiceBotZoneLabelEntities = new();
-    private readonly List<CBeam> practiceBotZoneBoundaryBeams = new();
+    // Indexed by player slot * zone count + zone index. Avoids building a string key
+    // for every zone on every usercmd batch.
+    private readonly bool[] playersInsidePracticeBotZones =
+        new bool[MaxPlayerSlots * PracticeBotZones.Length];
+    private readonly bool[] playersInsideQueueEntryZones =
+        new bool[MaxPlayerSlots * QueueEntryZones.Length];
+    private readonly long[] nextPracticeBotZoneCheck = new long[MaxPlayerSlots];
+    // Players nowhere near an arena only need the arena-entry check ~10 times a second.
+    private readonly long[] nextFarArenaCheck = new long[MaxPlayerSlots];
+    // PlayerName is read from native memory and allocates a new string on every read.
+    // Hot paths (usercmds, damage, HUD clock) use this per-slot cache instead.
+    private readonly string?[] cachedPlayerNames = new string?[MaxPlayerSlots];
+    private readonly uint[] cachedPlayerNameHandles = new uint[MaxPlayerSlots];
+    private readonly long[] cachedPlayerNameExpiry = new long[MaxPlayerSlots];
+    private readonly List<CPointWorldText> entryZoneLabelEntities = new();
     private readonly List<CBeam> duelArenaRadiusBeams = new();
     private readonly Vector3[] duelArenaSphereCenters;
     private readonly Dictionary<string, (int ArenaIndex, bool IsInside)>
@@ -249,6 +389,221 @@ public class PlayerManager
         for (int i = 0; i < duelArenaSphereCenters.Length; i++)
             duelArenaSphereCenters[i] =
                 GetDuelArenaSphereCenter(server.DuelLocations[i]);
+    }
+
+    private bool duelLoopStarted;
+
+    /// <summary>
+    /// The one repeating duel loop (20 times a second, one pass over the players, and
+    /// nothing at all while no duel is running). Per duelist it caps health at max
+    /// health (every pass) and raises the Fixation stack limit (every 10th pass).
+    /// Burst Fire is not polled here: see citadel_ability_cooldown_max.
+    /// </summary>
+    public void StartDuelLoop()
+    {
+        if (duelLoopStarted)
+            return;
+
+        duelLoopStarted = true;
+        server.ScheduleOnce(DuelHealthCapCheckIntervalSeconds.Seconds(), DuelLoopTick);
+    }
+
+    private void DuelLoopTick()
+    {
+        server.ScheduleOnce(DuelHealthCapCheckIntervalSeconds.Seconds(), DuelLoopTick);
+        ++duelLoopTick;
+
+        // Souls: once a second, put every player back at the max in case the game
+        // changed them in a way the currency hook didn't catch (hero setup, respawn).
+        if (duelLoopTick % 20 == 0)
+        {
+            foreach (var player in Players.GetAll())
+            {
+                if (player.IsBot)
+                    continue;
+                var soulsPawn = player.GetHeroPawn();
+                if (soulsPawn is { IsValid: true })
+                    TopUpSouls(soulsPawn);
+            }
+        }
+
+        if (server.ActiveMatches.Count == 0)
+            return;
+
+        bool checkStackCaps = duelLoopTick % 10 == 0;
+
+        foreach (var player in Players.GetAll())
+        {
+            if (
+                !TryGetActiveMatch(player, out var match) ||
+                match.Finished ||
+                !match.ArenaInitialized
+            )
+                continue;
+
+            var pawn = player.GetHeroPawn();
+            if (pawn is not { IsValid: true, IsAlive: true })
+                continue;
+
+            int maxHealth = pawn.GetMaxHealth();
+            if (pawn.Health > maxHealth)
+                pawn.Health = maxHealth;
+
+            CheckDuelHealthLedger(pawn, match);
+
+            if (checkStackCaps)
+                RaiseFixationStackCap(pawn);
+        }
+    }
+
+    /* Burst Fire always on */
+
+    // Burst Fire never goes on cooldown because the server sets
+    // citadel_ability_cooldown_max (see aimLOCK.ApplyServerConVars), the same way other
+    // 1v1 servers do it; its buff is also applied permanently in duels
+    // (ApplyPermanentBurstFire). Both use the game's own values, so players' games
+    // predict the same fire rate as the server. Nothing runs per hit or on a timer.
+
+    private int duelLoopTick;
+
+    /* Duel health ledger */
+
+    // In a live round a duelist's health may only change through damage the server
+    // reports (DamageTaken) and the plugin's own lifesteal. The ledger is the health
+    // those two add up to; any health above it came from somewhere else and is taken
+    // back on the next loop tick (20 times a second). Health below it (damage with no
+    // event) is accepted and the ledger follows it down. Point-blank tests showed one
+    // player losing ~2,000 more health than the other with the same damage and the
+    // same lifesteal on both sides.
+    private readonly Dictionary<uint, int> duelHealthLedger = new();
+
+    private void CheckDuelHealthLedger(CCitadelPlayerPawn pawn, DuelMatch match)
+    {
+        uint handle = pawn.EntityHandle;
+        if (!match.CombatActive)
+        {
+            duelHealthLedger.Remove(handle);
+            return;
+        }
+
+        int health = pawn.Health;
+        if (!duelHealthLedger.TryGetValue(handle, out int ledger))
+        {
+            duelHealthLedger[handle] = health;
+            return;
+        }
+
+        if (health > ledger)
+        {
+            int target = Math.Max(1, ledger);
+            pawn.Health = target;
+            if (lifestealDebugSlots.Count != 0 && GetLifestealDebugStats(pawn) is { } stats)
+                stats.UnexplainedGain += health - target;
+            duelHealthLedger[handle] = target;
+            return;
+        }
+
+        if (health < ledger && lifestealDebugSlots.Count != 0 && GetLifestealDebugStats(pawn) is { } lossStats)
+            lossStats.UnreportedLoss += ledger - health;
+        duelHealthLedger[handle] = health;
+    }
+
+    private void LedgerAdd(CBaseEntity? pawnEntity, int amount)
+    {
+        if (
+            amount != 0 &&
+            pawnEntity != null &&
+            duelHealthLedger.Count != 0 &&
+            duelHealthLedger.TryGetValue(pawnEntity.EntityHandle, out int ledger)
+        )
+            duelHealthLedger[pawnEntity.EntityHandle] = ledger + amount;
+    }
+
+    /* Fixation stack cap */
+
+    // The Fixation stacks on the person being shot are their own modifier with their
+    // own stack limit (80 with Fixation fully upgraded), separate from the passive whose
+    // MaxStacks is set to 999. Raise that limit on the stack modifier itself.
+    private const short FixationTargetMaxStacks = 999;
+    private static readonly SchemaAccessor<short> ModifierMaxStackCount =
+        new("CBaseModifier"u8, "m_iMaxStackCount"u8);
+    private static readonly SchemaAccessor<short> ModifierStackCount =
+        new("CBaseModifier"u8, "m_iStackCount"u8);
+
+    private void RaiseFixationStackCap(CCitadelPlayerPawn pawn)
+    {
+        var modifiers = pawn.ModifierProp?.Modifiers;
+        if (modifiers == null)
+            return;
+
+        foreach (var modifier in modifiers)
+        {
+            if (!IsFixationModifier(modifier))
+                continue;
+
+            short max = ModifierMaxStackCount.Get(modifier.Handle);
+            if (max <= 0 || max >= FixationTargetMaxStacks)
+                continue;
+
+            // Plain write, no network notify: modifiers are not entities, and only
+            // the server's stack logic needs the new limit.
+            nint address = ModifierMaxStackCount.GetAddress(modifier.Handle);
+            if (address - modifier.Handle <= 0x10 || address - modifier.Handle > 0x1000)
+                return;
+
+            System.Runtime.InteropServices.Marshal.WriteInt16(address, FixationTargetMaxStacks);
+        }
+    }
+
+    /// <summary>
+    /// /fixdebug: lists every modifier on you and your duel opponent that came from a
+    /// Fixation ability, with its stack count and limit, to the chat and server log.
+    /// </summary>
+    public void FixationDebugCommand(Caller caller)
+    {
+        var player = caller.Player;
+        if (player == null)
+            return;
+
+        var targets = new List<CCitadelPlayerController> { player };
+        if (TryGetActiveMatch(player, out var match))
+        {
+            foreach (var participant in GetMatchParticipants(match))
+            {
+                if (participant.EntityHandle != player.EntityHandle)
+                    targets.Add(participant);
+            }
+        }
+
+        foreach (var target in targets)
+        {
+            var pawn = target.GetHeroPawn();
+            var modifiers = pawn?.ModifierProp?.Modifiers;
+            if (pawn == null || modifiers == null)
+                continue;
+
+            string who = GetCachedPlayerName(target);
+            int found = 0;
+            foreach (var modifier in modifiers)
+            {
+                uint abilityHandle = ModifierAbilityHandle.Get(modifier.Handle);
+                string name = modifier.SubclassVData?.Name ?? "?";
+                bool fromFixation = abilityHandle != 0 && abilityHandle != 0xFFFFFFFF &&
+                    server.IsFixationAbility(abilityHandle);
+                if (!fromFixation && !name.Contains("stacking", StringComparison.Ordinal))
+                    continue;
+
+                found++;
+                string line =
+                    $"[fixdebug] {who}: {name} stacks={ModifierStackCount.Get(modifier.Handle)} " +
+                    $"max={ModifierMaxStackCount.Get(modifier.Handle)} fromFixation={fromFixation}";
+                caller.Reply(line);
+                Console.WriteLine($"[aimLOCK] {line}");
+            }
+
+            if (found == 0)
+                caller.Reply($"[fixdebug] {who}: no Fixation modifiers.");
+        }
     }
 
     public void PlayMatchTeleportEffect(CCitadelPlayerPawn pawn)
@@ -266,6 +621,12 @@ public class PlayerManager
             );
         }
 
+        practiceBots.Clear();
+        pendingBotMatchStarts.Clear();
+        pendingBotReservations.Clear();
+        pendingBotMatchPlayers.Clear();
+        reservedBotArenas.Clear();
+        RestorePracticeBotAiIfIdle();
     }
 
     public void StartPracticeBotMatch(
@@ -289,6 +650,8 @@ public class PlayerManager
 
     public void ProcessUsercmds(ProcessUsercmdsEvent args)
     {
+        // Runs for every player's usercmd batch (roughly every tick per player): one
+        // controller/pawn lookup shared by every handler.
         if (
             args.Paused ||
             args.Controller is not { IsValid: true } controller
@@ -305,7 +668,7 @@ public class PlayerManager
 
         if (player.IsBot)
             ProcessPracticeBotUsercmds(args, controller, pawn, activeMatch);
-        else
+        else if (activeMatch == null)
             ProcessPracticeBotDoorwayZone(player, pawn);
     }
 
@@ -314,29 +677,84 @@ public class PlayerManager
         CCitadelPlayerPawn pawn
     )
     {
+        int slot = player.Slot;
+        if ((uint)slot >= MaxPlayerSlots)
+            return;
+
+        // Zone entry doesn't need tick precision; check ~10 times a second. Indexed by
+        // slot instead of a tuple set lookup per zone per usercmd.
+        long now = Environment.TickCount64;
+        if (now < nextPracticeBotZoneCheck[slot])
+            return;
+        nextPracticeBotZoneCheck[slot] = now + PracticeBotZoneCheckIntervalMs;
+
+        Vector3 position = pawn.Position;
         for (int zoneIndex = 0; zoneIndex < PracticeBotZones.Length; zoneIndex++)
         {
             PracticeBotZone zone = PracticeBotZones[zoneIndex];
-            var entryKey = (player.EntityHandle, zoneIndex);
+            int entryIndex = slot * PracticeBotZones.Length + zoneIndex;
             bool isInsideZone =
-                Vector3.DistanceSquared(pawn.Position, zone.Center) <=
+                Vector3.DistanceSquared(position, zone.Center) <=
                 zone.RadiusSquared;
 
             if (!isInsideZone)
             {
-                playersInsidePracticeBotZones.Remove(entryKey);
+                playersInsidePracticeBotZones[entryIndex] = false;
                 continue;
             }
 
-            if (!playersInsidePracticeBotZones.Add(entryKey))
+            if (playersInsidePracticeBotZones[entryIndex])
                 continue;
 
+            playersInsidePracticeBotZones[entryIndex] = true;
             TryStartPracticeBotMatch(
                 player,
                 zone.Difficulty,
                 message => Chat.PrintToChat(player, message)
             );
         }
+
+        for (int zoneIndex = 0; zoneIndex < QueueEntryZones.Length; zoneIndex++)
+        {
+            QueueEntryZone zone = QueueEntryZones[zoneIndex];
+            int entryIndex = slot * QueueEntryZones.Length + zoneIndex;
+            bool isInsideZone =
+                Vector3.DistanceSquared(position, zone.Center) <=
+                zone.RadiusSquared;
+
+            if (!isInsideZone)
+            {
+                playersInsideQueueEntryZones[entryIndex] = false;
+                continue;
+            }
+
+            if (playersInsideQueueEntryZones[entryIndex])
+                continue;
+
+            playersInsideQueueEntryZones[entryIndex] = true;
+            if (zone.QueueType is MatchQueueType queueType)
+                server.Queue.JoinQueueFromZone(player, queueType);
+            else
+                server.Queue.LeaveQueue(Caller.Of(player));
+        }
+    }
+
+    private void ClearPracticeBotZoneState(int slot)
+    {
+        if ((uint)slot >= MaxPlayerSlots)
+            return;
+
+        Array.Clear(
+            playersInsidePracticeBotZones,
+            slot * PracticeBotZones.Length,
+            PracticeBotZones.Length
+        );
+        Array.Clear(
+            playersInsideQueueEntryZones,
+            slot * QueueEntryZones.Length,
+            QueueEntryZones.Length
+        );
+        nextPracticeBotZoneCheck[slot] = 0;
     }
 
     private void TryStartPracticeBotMatch(
@@ -387,6 +805,12 @@ public class PlayerManager
             return;
         }
 
+        if (pendingBotMatchPlayers.Contains(player.EntityHandle))
+        {
+            reply("Your bot match is already starting.");
+            return;
+        }
+
         if (!server.Queue.TryGetAvailableArena(out int arenaIndex))
         {
             reply("All duel arenas are currently in use.");
@@ -395,21 +819,226 @@ public class PlayerManager
 
         Vector3 arena = server.DuelLocations[arenaIndex];
 
-        var botController = CreatePracticeBot(
-            player,
-            playerPawn,
-            arena,
-            selectedProfile,
-            reply
-        );
-        if (botController == null)
+        // A bot must be created close to the player: one created far away crashes the
+        // player's game when it first receives it (and the game of anyone who joins
+        // while it exists). So the player goes into the arena first, and the bot is
+        // created at its own arena spot a moment later, once the player's game has them
+        // there. The arena is reserved in the meantime.
+        Vector3 playerSpot = GetDuelArenaSphereCenter(arena) +
+            new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f);
+        PlayMatchTeleportEffect(playerPawn);
+        playerPawn.Teleport(playerSpot, null, Vector3.Zero);
+        RegisterArenaBoundaryPosition(player, playerSpot);
+        reservedBotArenas.Add(arenaIndex);
+        pendingBotMatchPlayers.Add(player.EntityHandle);
+        uint playerHandle = player.EntityHandle;
+
+        server.ScheduleOnce(PracticeBotSpawnDelaySeconds.Seconds(), () =>
+        {
+            var currentPawn = player.IsValid ? player.GetHeroPawn() : null;
+            if (
+                currentPawn is not { IsValid: true, IsAlive: true } ||
+                server.ActiveMatches.ContainsKey(player.PlayerName) ||
+                IsSpectating(player)
+            )
+            {
+                ReleasePendingBotMatch(playerHandle, arenaIndex);
+                return;
+            }
+
+            var botController = CreatePracticeBot(
+                player,
+                currentPawn,
+                arena,
+                selectedProfile,
+                reply
+            );
+            if (botController == null)
+            {
+                ReleasePendingBotMatch(playerHandle, arenaIndex);
+                return;
+            }
+
+            // Creating the bot is the heaviest frame of a bot match: the game builds the
+            // bot, then loads its hero again a few frames later. The match setup (items,
+            // health, Fixation for both players) waits until that hero load is done, so
+            // the work lands on separate frames and is done once instead of twice.
+            uint botHandle = botController.EntityHandle;
+            pendingBotReservations[botHandle] = (playerHandle, arenaIndex);
+            pendingBotMatchStarts[botHandle] = () =>
+            {
+                ReleasePendingBotMatch(playerHandle, arenaIndex);
+                if (
+                    !player.IsValid ||
+                    !botController.IsValid ||
+                    server.ActiveMatches.ContainsKey(player.PlayerName) ||
+                    IsSpectating(player)
+                )
+                {
+                    RemovePracticeBot(botHandle);
+                    return;
+                }
+
+                // Named only now: the bot's hero reload resets its name.
+                SetPracticeBotDifficultyName(botController, difficulty);
+                if (!server.Queue.StartBotMatch(
+                    player,
+                    botController,
+                    arena,
+                    reply,
+                    alreadyInArena: true
+                ))
+                {
+                    RemovePracticeBot(botHandle);
+                    return;
+                }
+
+                // The bot's Fixation, once the match setup is in.
+                server.ScheduleOnce(0.25.Seconds(), () =>
+                {
+                    var botPawn = botController.IsValid ? botController.GetHeroPawn() : null;
+                    if (botPawn is { IsValid: true } && botPawn.HeroID == Heroes.Haze)
+                        ApplyHazeLoadout(botPawn, force: true);
+                });
+            };
+
+            // Fallback in case the hero-loaded hook never fires for the bot.
+            server.ScheduleOnce(
+                PendingBotMatchTimeoutSeconds.Seconds(),
+                () => RunPendingBotMatchStart(botHandle)
+            );
+        });
+    }
+
+    private const double PracticeBotSpawnDelaySeconds = 0.5;
+    private const double PendingBotMatchTimeoutSeconds = 1.5;
+    private const double BotMatchStartAfterHeroLoadSeconds = 0.2;
+    private readonly Dictionary<uint, Action> pendingBotMatchStarts = new();
+    // Bot -> (player, arena) held for its match while it is still being set up.
+    private readonly Dictionary<uint, (uint PlayerHandle, int ArenaIndex)>
+        pendingBotReservations = new();
+    private readonly HashSet<uint> pendingBotMatchPlayers = new();
+    private readonly HashSet<int> reservedBotArenas = new();
+
+    /// <summary>Arenas held for a bot match that is still being set up.</summary>
+    public bool IsArenaReserved(int arenaIndex) => reservedBotArenas.Contains(arenaIndex);
+
+    private void ReleasePendingBotMatch(uint playerHandle, int arenaIndex)
+    {
+        pendingBotMatchPlayers.Remove(playerHandle);
+        reservedBotArenas.Remove(arenaIndex);
+    }
+
+    /// <summary>
+    /// Called from the hero-initialized hook. When it is a practice bot whose match is
+    /// waiting, the match starts a moment later (on a quiet frame).
+    /// </summary>
+    public void OnPracticeBotHeroInitialized(CCitadelPlayerPawn pawn)
+    {
+        if (
+            pendingBotMatchStarts.Count == 0 ||
+            pawn.Controller is not { } controller ||
+            !pendingBotMatchStarts.ContainsKey(controller.EntityHandle)
+        )
             return;
 
-        SetPracticeBotDifficultyName(botController, difficulty);
-
-        if (!server.Queue.StartBotMatch(player, botController, arena, reply))
-            RemovePracticeBot(botController.EntityHandle);
+        uint botHandle = controller.EntityHandle;
+        server.ScheduleOnce(
+            BotMatchStartAfterHeroLoadSeconds.Seconds(),
+            () => RunPendingBotMatchStart(botHandle)
+        );
     }
+
+    private void RunPendingBotMatchStart(uint botHandle)
+    {
+        pendingBotReservations.Remove(botHandle);
+        if (pendingBotMatchStarts.Remove(botHandle, out var start))
+            start();
+    }
+
+    /// <summary>
+    /// Drops a bot's pending match start (bot removed or gone before its match began)
+    /// and frees the player and arena it was holding.
+    /// </summary>
+    private void CancelPendingBotMatch(uint botHandle)
+    {
+        pendingBotMatchStarts.Remove(botHandle);
+        if (pendingBotReservations.Remove(botHandle, out var reservation))
+            ReleasePendingBotMatch(reservation.PlayerHandle, reservation.ArenaIndex);
+    }
+
+    /* Fixation reset on kill */
+
+    private static readonly SchemaAccessor<uint> ModifierAbilityHandle =
+        new("CBaseModifier"u8, "m_hAbility"u8);
+
+    /// <summary>
+    /// Removes every modifier that came from a Fixation ability (the stacks on the
+    /// person who was shot, and anything they applied). Used on every kill so each round
+    /// starts from zero.
+    /// </summary>
+    private void RemoveFixationModifiers(CCitadelPlayerPawn pawn)
+    {
+        var modifiers = pawn.ModifierProp?.Modifiers;
+        if (modifiers == null || modifiers.Count == 0)
+            return;
+
+        // Collected first, then removed: removing while walking the list could skip
+        // the modifier that slides into the removed one's place.
+        fixationModifierScratch.Clear();
+        foreach (var modifier in modifiers)
+        {
+            if (IsFixationModifier(modifier))
+                fixationModifierScratch.Add(modifier);
+        }
+
+        foreach (var modifier in fixationModifierScratch)
+            pawn.RemoveModifier(modifier);
+
+        fixationModifierScratch.Clear();
+    }
+
+    private readonly List<CBaseModifier> fixationModifierScratch = new();
+
+    // Modifier type (VData pointer) -> is it one of Fixation's own modifiers
+    // ("ability_stacking_damage/..."). Cached so the name is read once per type.
+    private readonly Dictionary<nint, bool> fixationModifierTypes = new();
+    private const string FixationModifierNamePrefix = "ability_stacking_damage/";
+
+    /// <summary>
+    /// A modifier is Fixation's when it came from a Fixation ability, or when it is one
+    /// of Fixation's own modifier types. The second check catches stacks that have no
+    /// ability attached (those were left behind before).
+    /// </summary>
+    private bool IsFixationModifier(CBaseModifier modifier)
+    {
+        uint abilityHandle = ModifierAbilityHandle.Get(modifier.Handle);
+        if (
+            abilityHandle != 0 &&
+            abilityHandle != 0xFFFFFFFF &&
+            server.IsFixationAbility(abilityHandle)
+        )
+            return true;
+
+        var vdata = modifier.SubclassVData;
+        if (vdata == null)
+            return false;
+
+        nint type = vdata.Handle;
+        if (!fixationModifierTypes.TryGetValue(type, out bool isFixation))
+        {
+            if (fixationModifierTypes.Count > 2048)
+                fixationModifierTypes.Clear();
+
+            isFixation =
+                vdata.Name?.StartsWith(FixationModifierNamePrefix, StringComparison.Ordinal) == true;
+            fixationModifierTypes[type] = isFixation;
+        }
+
+        return isFixation;
+    }
+
+    public void ClearModifierTypeCache() => fixationModifierTypes.Clear();
 
     private static bool TryGetPracticeBotProfile(
         string? difficulty,
@@ -443,6 +1072,8 @@ public class PlayerManager
         Action<string> reply
     )
     {
+        // The player is already in the arena by now (see TryStartPracticeBotMatch),
+        // so the bot's own arena spot is close to them.
         var spawnPosition = GetDuelArenaSphereCenter(arena) +
             new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f);
         int botTeam = 3;
@@ -460,12 +1091,20 @@ public class PlayerManager
             return null;
         }
 
+        // assignLane: false. With the default (true) the game gives the bot a lane,
+        // and every lane objective on this map has been removed; the bot's lane state
+        // is networked to clients, which is a candidate for the client crash on spawn.
         var bot = Bots.Add(
             Heroes.Haze,
             botTeam,
             spawnPosition,
-            BotDifficulty.Medium
+            BotDifficulty.Medium,
+            assignLane: false
         );
+        // Same tick as the spawn, before the bot is ever sent to a client.
+        if (bot is { IsValid: true })
+            bot.SetModel(HazeModel);
+
         if (bot is not { IsValid: true })
         {
             RestorePracticeBotAiIfIdle();
@@ -494,15 +1133,17 @@ public class PlayerManager
         var state = new PracticeBotState
         {
             ControllerHandle = botController.EntityHandle,
-            MatchKey = $"__aimlock_bot_{botController.EntityHandle}",
+            MatchKey = $"{PracticeBotMatchKeyPrefix}{botController.EntityHandle}",
             DisplayName = botController.PlayerName,
             OwnerControllerHandle = owner.EntityHandle,
+            OwnerSlot = owner.Slot,
             OwnerName = owner.PlayerName,
             TargetController = owner,
             Difficulty = difficulty,
             LookAt = playerPawn.EyePosition,
         };
         practiceBots.Add(state.ControllerHandle, state);
+        botViewerMasksDirty = true;
         ResetPracticeBotMovement(
             state,
             spawnPosition,
@@ -528,8 +1169,10 @@ public class PlayerManager
             _ => "Hard"
         };
         state.DifficultyName = difficultyName;
+        state.IsHard = string.Equals(difficultyName, "Hard", StringComparison.OrdinalIgnoreCase);
         state.DisplayName = $"Bot ({difficultyName})";
         botController.PlayerName = state.DisplayName;
+        InvalidateCachedPlayerName(botController);
     }
 
     public void SetPracticeBotStrafeSpeed(Caller caller, float speed)
@@ -603,6 +1246,7 @@ public class PlayerManager
 
     public void OnDuelMatchFinished(DuelMatch match)
     {
+        server.Queue.OnMatchFinished(match);
         var bot = practiceBots.Values.FirstOrDefault(state =>
             string.Equals(
                 match.Player1,
@@ -771,7 +1415,7 @@ public class PlayerManager
             ? GetPracticeBotDisplayName(participant) ?? participant.PlayerName
             : participant == null
                 ? participantName
-                : server.GuildManager.FormatPlayerName(participant);
+                : server.GuildManager.FormatPlayerNameWithSelectedTag(participant);
     }
 
     private void ResetArenaScoreboardWhenParticipantsLeave(DuelMatch match)
@@ -832,29 +1476,95 @@ public class PlayerManager
             scoreboard.Background.Remove();
     }
 
+    public bool IsPracticeBotController(CBasePlayerController? controller) =>
+        controller != null &&
+        practiceBots.Count != 0 &&
+        practiceBots.ContainsKey(controller.EntityHandle);
+
     public bool IsPracticeBot(CBaseEntity entity) =>
         entity is CCitadelPlayerPawn pawn &&
         pawn.Controller is { } controller &&
         practiceBots.ContainsKey(controller.EntityHandle);
+
+    /// <summary>
+    /// The controller's player name, cached per slot for up to a second. Keyed by entity
+    /// handle too, so a new player taking over a slot never sees the previous name.
+    /// </summary>
+    public string GetCachedPlayerName(CBasePlayerController player)
+    {
+        int slot = player.Slot;
+        if ((uint)slot >= MaxPlayerSlots)
+            return player.PlayerName;
+
+        long now = Environment.TickCount64;
+        uint handle = player.EntityHandle;
+        if (
+            cachedPlayerNames[slot] is { } cachedName &&
+            cachedPlayerNameHandles[slot] == handle &&
+            now < cachedPlayerNameExpiry[slot]
+        )
+            return cachedName;
+
+        string name = player.PlayerName;
+        cachedPlayerNames[slot] = name;
+        cachedPlayerNameHandles[slot] = handle;
+        cachedPlayerNameExpiry[slot] = now + PlayerNameCacheLifetimeMs;
+        return name;
+    }
+
+    public void InvalidateCachedPlayerName(CBasePlayerController player)
+    {
+        int slot = player.Slot;
+        if ((uint)slot < MaxPlayerSlots)
+            cachedPlayerNames[slot] = null;
+    }
+
+    /// <summary>
+    /// ChangeTeam only when the team actually differs. A team change re-networks the
+    /// player and their hero; doing it when nothing changes (every /spawn, match end)
+    /// was pure overhead on each teleport.
+    /// </summary>
+    private const string DisarmedModifierName = "modifier_citadel_disarmed";
+
+    public static void RemoveAllDisarms(CCitadelPlayerPawn pawn)
+    {
+        for (int i = 0; i < 8 && pawn.RemoveModifier(DisarmedModifierName); i++)
+        {
+        }
+    }
+
+    public static void EnsureTeam(CCitadelPlayerController? controller, int team)
+    {
+        if (controller is { IsValid: true } && controller.TeamNum != team)
+            controller.ChangeTeam(team);
+    }
 
     public bool TryGetActiveMatch(
         CBasePlayerController player,
         out DuelMatch match
     )
     {
+        // Called from the usercmd, damage and HUD paths: no work when nothing is
+        // running, and the cached name instead of a fresh native string read.
+        if (server.ActiveMatches.Count == 0)
+        {
+            match = null!;
+            return false;
+        }
+
         if (
+            practiceBots.Count != 0 &&
             practiceBots.TryGetValue(player.EntityHandle, out var bot) &&
             server.ActiveMatches.TryGetValue(bot.MatchKey, out match!)
         )
             return true;
 
-        if (server.ActiveMatches.TryGetValue(player.PlayerName, out match!))
+        if (server.ActiveMatches.TryGetValue(GetCachedPlayerName(player), out match!))
             return true;
 
         match = null!;
         return false;
     }
-
     public bool IsSpectating(CCitadelPlayerController player) =>
         spectatingMatches.ContainsKey(player.PlayerSteamId);
 
@@ -1002,6 +1712,7 @@ public class PlayerManager
         var (position, angles) = GetMatchSpectatorView(matchToSpectate);
         pawn.Teleport(position, angles, null);
         spectatingMatches[player.PlayerSteamId] = matchToSpectate;
+        botViewerMasksDirty = true;
         pawn.AddModifier("modifier_citadel_disarmed");
         caller.Reply(
             $"Spectating {GetMatchParticipantDisplayName(matchToSpectate.Player1)} " +
@@ -1012,7 +1723,9 @@ public class PlayerManager
     public void StopSpectating(CCitadelPlayerController player)
     {
         spectatingMatches.Remove(player.PlayerSteamId);
-        player.GetHeroPawn()?.RemoveModifier("modifier_citadel_disarmed");
+        botViewerMasksDirty = true;
+        if (player.GetHeroPawn() is { } disarmedPawn)
+            RemoveAllDisarms(disarmedPawn);
     }
 
     private string GetMatchParticipantDisplayName(string participantName)
@@ -1022,7 +1735,7 @@ public class PlayerManager
             return participantName;
 
         return GetPracticeBotDisplayName(participant) ??
-            server.GuildManager.FormatPlayerName(participant);
+            server.GuildManager.FormatPlayerNameWithSelectedTag(participant);
     }
 
     private (Vector3 Position, Vector3 Angles) GetMatchSpectatorView(
@@ -1058,6 +1771,7 @@ public class PlayerManager
         foreach (ulong steamId in spectatorIds)
         {
             spectatingMatches.Remove(steamId);
+            botViewerMasksDirty = true;
             ReturnSpectatorToSpawn(steamId);
         }
     }
@@ -1077,8 +1791,9 @@ public class PlayerManager
         if (player is not { IsValid: true })
             return;
 
-        player.GetHeroPawn()?.RemoveModifier("modifier_citadel_disarmed");
-        player.ChangeTeam(2);
+        if (player.GetHeroPawn() is { } disarmedPawn)
+            RemoveAllDisarms(disarmedPawn);
+        EnsureTeam(player, 2);
         var pawn = player.GetHeroPawn();
         if (pawn is not { IsValid: true, IsAlive: true })
         {
@@ -1131,36 +1846,50 @@ public class PlayerManager
         return FindMatchParticipant(participantName, Players.GetAll());
     }
 
+    private const string PracticeBotMatchKeyPrefix = "__aimlock_bot_";
+
     private CCitadelPlayerController? FindMatchParticipant(
         string participantName,
         IEnumerable<CCitadelPlayerController> players
     )
     {
-        var bot = practiceBots.Values.FirstOrDefault(state =>
-            string.Equals(
-                participantName,
-                state.MatchKey,
-                StringComparison.OrdinalIgnoreCase
-            )
-        );
-        if (bot != null)
+        // Called many times per round (HUD, countdown, respawns, damage checks):
+        // one pass, no LINQ, cached names instead of a native string read per player.
+        uint botHandle = 0;
+        if (
+            practiceBots.Count != 0 &&
+            participantName.StartsWith(PracticeBotMatchKeyPrefix, StringComparison.Ordinal)
+        )
         {
-            var botController = players.FirstOrDefault(player =>
-                player.EntityHandle == bot.ControllerHandle
-            );
-            if (botController != null)
-                return botController;
+            foreach (var state in practiceBots.Values)
+            {
+                if (string.Equals(participantName, state.MatchKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    botHandle = state.ControllerHandle;
+                    break;
+                }
+            }
         }
 
-        return players.FirstOrDefault(player =>
-            string.Equals(
-                player.PlayerName,
+        foreach (var player in players)
+        {
+            if (botHandle != 0)
+            {
+                if (player.EntityHandle == botHandle)
+                    return player;
+                continue;
+            }
+
+            if (string.Equals(
+                GetCachedPlayerName(player),
                 participantName,
                 StringComparison.OrdinalIgnoreCase
-            )
-        );
-    }
+            ))
+                return player;
+        }
 
+        return null;
+    }
     private IEnumerable<CCitadelPlayerController> GetMatchParticipants(
         DuelMatch match
     )
@@ -1188,59 +1917,485 @@ public class PlayerManager
             IsSpectating(attacker);
     }
 
-    public HookResult ApplyDuelBulletDamage(TakeDamageEvent args)
-    {
-        if (
-            args.Entity is CCitadelPlayerPawn victimPawn &&
-            victimPawn.Controller is { } victim &&
-            TryGetActiveMatch(victim, out var match) &&
-            !match.Finished &&
-            match.CombatActive
-        )
-        {
-            if (args.Info.CitadelDamageType == ECitadelDamageType.Bullet)
-            {
-                args.Info.Damage *=
-                    aimLOCK.DUEL_BULLET_DAMAGE / aimLOCK.BASE_DUEL_BULLET_DAMAGE;
-            }
-        }
 
-        return HookResult.Continue;
+    /// <summary>
+    /// Duel bullets deal DUEL_BULLET_DAMAGE / BASE_DUEL_BULLET_DAMAGE times their normal
+    /// damage (25 -> 40) while a duel's combat is live. Runs for every damage instance
+    /// on the server, so it bails out as early and cheaply as possible.
+    /// </summary>
+    public void ApplyDuelBulletDamage(TakeDamageEvent args)
+    {
+        if (DuelBulletDamageMultiplier == 1f || server.ActiveMatches.Count == 0)
+            return;
+
+        var info = args.Info;
+        if (info.CitadelDamageType != ECitadelDamageType.Bullet)
+            return;
+
+        // As<> instead of an `is` cast: event entities come in as the base wrapper type.
+        var victimPawn = args.Entity.As<CCitadelPlayerPawn>();
+        if (
+            victimPawn?.Controller is not { } victim ||
+            !TryGetActiveMatch(victim, out var match) ||
+            match.Finished ||
+            !match.CombatActive
+        )
+            return;
+
+        info.Damage *= DuelBulletDamageMultiplier;
     }
+
+    private const float DuelBulletDamageMultiplier =
+        aimLOCK.DUEL_BULLET_DAMAGE / aimLOCK.BASE_DUEL_BULLET_DAMAGE;
 
     public void ApplyDuelBulletLifesteal(
         CCitadelPlayerPawn pawn
     )
     {
-        if (pawn.IsBot)
+        // Duel lifesteal is applied server-side by ApplyServerLifesteal. Strip the item's
+        // bullet lifesteal for the duel so the two don't stack; RestoreDuelBulletLifesteal
+        // gives it back after the match if the player owned the item.
+        pawn.RemoveModifier("upgrade_vampire/modifier_intrinsic_base");
+    }
+
+    /// <summary>
+    /// Server-side lifesteal: when a player loses health to another player's bullets, the
+    /// attacker is healed for a share of the health actually removed (after resists,
+    /// capped at the victim's remaining health): 100% by default, DuelLifestealPercent
+    /// (or the attacker's /handicap value) in duels and bot matches. Bullets only unless
+    /// DUEL_LIFESTEAL_BULLETS_ONLY is false; Fixation's damage never heals. Doesn't depend
+    /// on any item being owned.
+    /// </summary>
+    public void ApplyServerLifesteal(ModifierEvent args)
+    {
+        if (args.Damage is not { } damage)
+            return;
+
+        int healthLost = damage.HealthLost;
+        if (healthLost <= 0)
+            return;
+
+        LedgerAdd(damage.Victim, -healthLost);
+
+        var info = damage.Info;
+        if (info == null)
+            return;
+
+        var attackerEntity = damage.Attacker;
+        var victimEntity = damage.Victim;
+        bool debugging = lifestealDebugSlots.Count != 0;
+
+        // Fixation's stack damage arrives as its own bullet-type hit in the same server
+        // tick as the bullet itself, not tagged with the ability (Haze fires one bullet
+        // per shot, and shots are several ticks apart). It heals like the bullet when
+        // FixationLifesteal is on; either way it isn't counted as an accuracy hit.
+        bool fixationHit =
+            server.IsFixationAbility(DamageAbilityHandle.Get(info.Handle)) ||
+            (
+                info.CitadelDamageType == ECitadelDamageType.Bullet &&
+                IsSameTickFollowUpHit(attackerEntity, victimEntity)
+            );
+        if (fixationHit && !FixationLifesteal)
         {
+            if (debugging)
+                LifestealDebugSkip(attackerEntity, victimEntity, healthLost, "Fixation damage");
             return;
         }
 
-        pawn.RemoveModifier("upgrade_vampire/modifier_intrinsic_base");
-        float lifestealPercent = DuelBulletLifestealPercent;
+        if (info.CitadelDamageType != ECitadelDamageType.Bullet && aimLOCK.DUEL_LIFESTEAL_BULLETS_ONLY)
+        {
+            if (debugging)
+                LifestealDebugSkip(attackerEntity, victimEntity, healthLost,
+                    $"not a bullet ({info.CitadelDamageType}, {GetDamageAbilityName(info)})");
+            return;
+        }
+
         if (
-            pawn.Controller is CCitadelPlayerController player &&
-            server.PlayerRecords.TryGetValue(
-                player.PlayerSteamId,
-                out var record
-            ) &&
-            record.HandicapEnabled
+            attackerEntity == null ||
+            victimEntity == null ||
+            attackerEntity.EntityHandle == victimEntity.EntityHandle
+        )
+            return;
+
+        var attacker = attackerEntity.As<CCitadelPlayerPawn>();
+        var victim = victimEntity.As<CCitadelPlayerPawn>();
+        if (
+            attacker is not { IsValid: true } ||
+            victim is not { IsValid: true } ||
+            attacker.Controller is not { } attackerController ||
+            victim.Controller is not { } victimController
         )
         {
-            lifestealPercent = Math.Max(
-                0f,
-                lifestealPercent - DuelHandicapLifestealReduction
+            if (debugging)
+                LifestealDebugSkip(attackerEntity, victimEntity, healthLost,
+                    "attacker is not a player's hero");
+            return;
+        }
+
+        if (info.CitadelDamageType == ECitadelDamageType.Bullet && !fixationHit)
+            CountAccuracyHit(attacker, victim, info);
+
+        if (!attacker.IsAlive)
+        {
+            if (debugging)
+                LifestealDebugSkip(attackerEntity, victimEntity, healthLost, "attacker is dead");
+            return;
+        }
+
+        float percent;
+        if (server.ActiveMatches.Count != 0 && TryGetActiveMatch(attackerController, out var match))
+        {
+            string? reason =
+                match.Finished ? "match finished" :
+                !match.CombatActive ? "round not live (countdown or between rounds)" :
+                !TryGetActiveMatch(victimController, out var victimMatch) ||
+                    !ReferenceEquals(match, victimMatch) ? "target is not your opponent" :
+                null;
+            if (reason != null)
+            {
+                if (debugging)
+                    LifestealDebugSkip(attackerEntity, victimEntity, healthLost, reason);
+                return;
+            }
+
+            percent = GetDuelLifestealPercent(attackerController, match);
+        }
+        else
+        {
+            // Outside a duel: never heal off someone who is in one.
+            if (server.ActiveMatches.Count != 0 && TryGetActiveMatch(victimController, out _))
+            {
+                if (debugging)
+                    LifestealDebugSkip(attackerEntity, victimEntity, healthLost,
+                        "target is in a duel and you are not");
+                return;
+            }
+
+            percent = DefaultServerLifestealPercent;
+        }
+
+        // Fractions of a point carry over to the next hit instead of being dropped
+        // (the game's heal only takes whole points).
+        uint attackerHandle = attacker.EntityHandle;
+        lifestealRemainders.TryGetValue(attackerHandle, out float carried);
+        float heal = healthLost * percent / 100f + carried;
+        int wholeHeal = (int)heal;
+        if (lifestealRemainders.Count > 256)
+            lifestealRemainders.Clear();
+        lifestealRemainders[attackerHandle] = heal - wholeHeal;
+        if (wholeHeal <= 0)
+            return;
+
+        int maxHealth = attacker.GetMaxHealth();
+        int before = attacker.Health;
+        int expected = Math.Max(0, Math.Min(wholeHeal, maxHealth - before));
+
+        // The game's own heal first: it updates the health bar through the normal heal
+        // path. If something in the game cut it short, the missing part is written
+        // directly, so the heal is always the full amount.
+        applyingLifesteal = true;
+        int healed;
+        try
+        {
+            healed = expected > 0 ? attacker.Heal(wholeHeal) : 0;
+        }
+        finally
+        {
+            applyingLifesteal = false;
+        }
+        bool topped = false;
+        if (healed < expected)
+        {
+            int target = Math.Min(maxHealth, before + expected);
+            if (attacker.Health < target)
+            {
+                attacker.Health = target;
+                topped = true;
+            }
+        }
+        LedgerAdd(attacker, topped ? expected : healed);
+
+        if (debugging)
+            LifestealDebugHit(attacker, victim, healthLost, percent, expected, healed, topped,
+                before, maxHealth, GetDamageAbilityName(info));
+    }
+
+    // Fixation's stack damage heals at the same lifesteal percent as the bullet.
+    private const bool FixationLifesteal = true;
+
+    // (attacker handle, victim handle) -> server tick of the last bullet hit.
+    private readonly Dictionary<ulong, int> lastBulletHitTick = new();
+
+    private bool IsSameTickFollowUpHit(CBaseEntity? attacker, CBaseEntity? victim)
+    {
+        if (attacker == null || victim == null)
+            return false;
+
+        ulong key = ((ulong)attacker.EntityHandle << 32) | victim.EntityHandle;
+        int tick = GlobalVars.TickCount;
+        if (lastBulletHitTick.TryGetValue(key, out int lastTick) && lastTick == tick)
+            return true;
+
+        if (lastBulletHitTick.Count > 256)
+            lastBulletHitTick.Clear();
+        lastBulletHitTick[key] = tick;
+        return false;
+    }
+
+    private static string GetDamageAbilityName(CTakeDamageInfo info) =>
+        CBaseEntity.FromHandle(DamageAbilityHandle.Get(info.Handle))?.As<CCitadelBaseAbility>()?.AbilityName
+        ?? "no ability";
+
+    // Set while the plugin's own lifesteal heal runs, so its heal event isn't undone.
+    private bool applyingLifesteal;
+
+    /// <summary>
+    /// In a live duel the plugin's lifesteal is the only healing: any other heal (health
+    /// regen, healing from items a player bought, anything else) is undone as it lands.
+    /// A point-blank test showed one player outlasting the other by ~1,950 health that
+    /// didn't come from lifesteal.
+    /// </summary>
+    public void BlockOtherDuelHealing(ModifierEvent args)
+    {
+        if (applyingLifesteal || args.Damage is not { } heal)
+            return;
+
+        int applied = heal.HealthApplied;
+        if (applied <= 0)
+            return;
+
+        var pawn = heal.Victim?.As<CCitadelPlayerPawn>();
+        if (
+            pawn is not { IsValid: true, IsAlive: true } ||
+            pawn.Controller is not { } controller ||
+            !TryGetActiveMatch(controller, out var match) ||
+            match.Finished ||
+            !match.CombatActive
+        )
+            return;
+
+        pawn.Health = Math.Max(1, pawn.Health - applied);
+
+        if (
+            lifestealDebugSlots.Count != 0 &&
+            GetLifestealDebugStats(pawn) is { } stats
+        )
+        {
+            stats.OtherHealingBlocked += applied;
+            Console.WriteLine($"[aimLOCK] [lsdebug] blocked {applied} healing that wasn't lifesteal");
+        }
+    }
+
+    // Attacker pawn -> the fraction of a heal point carried over from the last hit.
+    private readonly Dictionary<uint, float> lifestealRemainders = new();
+
+    /* /lsdebug */
+
+    // Slots of players watching lifesteal. Empty = the debug code costs one Count check.
+    private readonly HashSet<int> lifestealDebugSlots = new();
+    private readonly Dictionary<int, LifestealDebugStats> lifestealDebugStats = new();
+    private bool lifestealDebugTimerRunning;
+
+    private sealed class LifestealDebugStats
+    {
+        public int Hits;
+        public int DamageDealt;
+        public int Expected;
+        public int Healed;
+        public int Topped;
+        public int AtFullHealth;
+        public int Skipped;
+        public int DamageTaken;
+        public int OpponentHealed;
+        public int OtherHealingBlocked;
+        public int UnexplainedGain;
+        public int UnreportedLoss;
+        public string? LastSkipReason;
+    }
+
+    public bool ToggleLifestealDebug(CCitadelPlayerController player)
+    {
+        int slot = player.Slot;
+        if (lifestealDebugSlots.Remove(slot))
+        {
+            lifestealDebugStats.Remove(slot);
+            return false;
+        }
+
+        lifestealDebugSlots.Add(slot);
+        lifestealDebugStats[slot] = new LifestealDebugStats();
+        if (!lifestealDebugTimerRunning)
+        {
+            lifestealDebugTimerRunning = true;
+            server.ScheduleOnce(1.Seconds(), LifestealDebugReport);
+        }
+
+        return true;
+    }
+
+    public void RemoveLifestealDebug(CCitadelPlayerController player)
+    {
+        lifestealDebugSlots.Remove(player.Slot);
+        lifestealDebugStats.Remove(player.Slot);
+    }
+
+    private LifestealDebugStats? GetLifestealDebugStats(CBaseEntity? pawnEntity)
+    {
+        var controller = pawnEntity?.As<CCitadelPlayerPawn>()?.Controller;
+        if (controller == null || !lifestealDebugSlots.Contains(controller.Slot))
+            return null;
+
+        return lifestealDebugStats.TryGetValue(controller.Slot, out var stats) ? stats : null;
+    }
+
+    private void LifestealDebugSkip(
+        CBaseEntity? attacker,
+        CBaseEntity? victim,
+        int healthLost,
+        string reason
+    )
+    {
+        if (GetLifestealDebugStats(attacker) is { } attackerStats)
+        {
+            attackerStats.Skipped++;
+            attackerStats.DamageDealt += healthLost;
+            attackerStats.LastSkipReason = reason;
+            Console.WriteLine($"[aimLOCK] [lsdebug] no heal for {healthLost} damage dealt: {reason}");
+        }
+
+        if (GetLifestealDebugStats(victim) is { } victimStats)
+            victimStats.DamageTaken += healthLost;
+    }
+
+    private void LifestealDebugHit(
+        CCitadelPlayerPawn attacker,
+        CCitadelPlayerPawn victim,
+        int healthLost,
+        float percent,
+        int expected,
+        int healed,
+        bool topped,
+        int before,
+        int maxHealth,
+        string source
+    )
+    {
+        if (GetLifestealDebugStats(attacker) is { } stats)
+        {
+            stats.Hits++;
+            stats.DamageDealt += healthLost;
+            stats.Expected += expected;
+            stats.Healed += topped ? expected : healed;
+            if (topped)
+                stats.Topped++;
+            if (before >= maxHealth)
+                stats.AtFullHealth++;
+            Console.WriteLine(
+                $"[aimLOCK] [lsdebug] hit {healthLost} ({source}) at {percent:0.#}%: health {before}/{maxHealth}, " +
+                $"heal {expected}, game healed {healed}{(topped ? ", rest written directly" : "")}"
             );
         }
 
-        pawn.AddModifier(
-            "upgrade_vampire/modifier_intrinsic_base",
-            abilityValues: new()
-            {
-                ["BulletLifestealPercent"] = lifestealPercent,
-            }
+        if (GetLifestealDebugStats(victim) is { } victimStats)
+        {
+            victimStats.DamageTaken += healthLost;
+            victimStats.OpponentHealed += topped ? expected : healed;
+        }
+    }
+
+    private void LifestealDebugReport()
+    {
+        if (lifestealDebugSlots.Count == 0)
+        {
+            lifestealDebugTimerRunning = false;
+            return;
+        }
+
+        server.ScheduleOnce(1.Seconds(), LifestealDebugReport);
+        foreach (var player in Players.GetAll())
+        {
+            if (
+                player.IsBot ||
+                !lifestealDebugSlots.Contains(player.Slot) ||
+                !lifestealDebugStats.TryGetValue(player.Slot, out var stats) ||
+                stats.Hits + stats.Skipped + stats.DamageTaken + stats.OtherHealingBlocked +
+                    stats.UnexplainedGain + stats.UnreportedLoss == 0
+            )
+                continue;
+
+            int net = stats.Healed - stats.DamageTaken;
+            string line =
+                $"[lsdebug] 1s: dealt {stats.DamageDealt} in {stats.Hits + stats.Skipped} hits, " +
+                $"healed {stats.Healed}/{stats.Expected}" +
+                (stats.AtFullHealth > 0 ? $" ({stats.AtFullHealth} hits at full HP)" : "") +
+                (stats.Topped > 0 ? $", game heal short {stats.Topped}x" : "") +
+                (stats.Skipped > 0 ? $", {stats.Skipped} hits no heal: {stats.LastSkipReason}" : "") +
+                $" | took {stats.DamageTaken}, they healed {stats.OpponentHealed} | your net {(net >= 0 ? "+" : "")}{net}" +
+                (stats.OtherHealingBlocked > 0 ? $" | blocked {stats.OtherHealingBlocked} other healing" : "") +
+                (stats.UnexplainedGain > 0 ? $" | took back {stats.UnexplainedGain} health from nowhere" : "") +
+                (stats.UnreportedLoss > 0 ? $" | lost {stats.UnreportedLoss} with no damage event" : "") +
+                DescribeDuelHealth(player);
+            Chat.PrintToChat(player, line);
+            Console.WriteLine($"[aimLOCK] {line} ({GetCachedPlayerName(player)})");
+            lifestealDebugStats[player.Slot] = new LifestealDebugStats();
+        }
+    }
+
+    private string DescribeDuelHealth(CCitadelPlayerController player)
+    {
+        if (
+            server.ActiveMatches.Count == 0 ||
+            !TryGetActiveMatch(player, out var match) ||
+            match.Finished
+        )
+            return "";
+
+        var opponent = FindMatchParticipant(
+            string.Equals(match.Player1, GetMatchParticipantName(player), StringComparison.OrdinalIgnoreCase)
+                ? match.Player2
+                : match.Player1
         );
+        int mine = player.GetHeroPawn()?.Health ?? 0;
+        int theirs = opponent?.GetHeroPawn()?.Health ?? 0;
+        return $" | HP now: you {mine}, them {theirs}";
+    }
+
+    private static readonly SchemaAccessor<uint> DamageAbilityHandle =
+        new("CTakeDamageInfo"u8, "m_hAbility"u8);
+
+    /// <summary>
+    /// Duel lifesteal percent for an attacker: the duel's agreed value (or
+    /// DuelLifestealPercent), or the player's own /handicap value when they set one
+    /// (never above the duel's value). Easy and
+    /// medium bots use DuelLifestealPercent; the hard bot uses HardBotLifestealPercent.
+    /// </summary>
+    private float GetDuelLifestealPercent(CBasePlayerController attacker, DuelMatch match)
+    {
+        // The hard bot heals for less than everyone else.
+        if (
+            practiceBots.Count != 0 &&
+            practiceBots.TryGetValue(attacker.EntityHandle, out var bot) &&
+            bot.IsHard
+        )
+            return HardBotLifestealPercent;
+
+        // The duel's own lifesteal when both players agreed on one (/duel ... ls N),
+        // otherwise the server's duel lifesteal.
+        float duelPercent = match.LifestealPercent ?? DuelLifestealPercent;
+        if (
+            attacker is CCitadelPlayerController player &&
+            !player.IsBot &&
+            server.PlayerRecords.TryGetValue(player.PlayerSteamId, out var record) &&
+            record.HandicapEnabled
+        )
+        {
+            float handicap =
+                record.HandicapLifestealPercent
+                ?? duelPercent - LegacyHandicapLifestealReduction;
+            return Math.Clamp(handicap, 0f, duelPercent);
+        }
+
+        return duelPercent;
     }
 
     public void RestoreDuelBulletLifesteal(
@@ -1261,6 +2416,9 @@ public class PlayerManager
         );
     }
 
+    // Swift Striker at its normal value (20% fire rate) in duels: a changed value only
+    // exists on the server, so players' games predicted shots at a different fire
+    // rate than the server fired them.
     public void ApplyDuelBlitzBullets(CCitadelPlayerPawn pawn)
     {
         if (
@@ -1270,17 +2428,6 @@ public class PlayerManager
         {
             pawn.AddItem("upgrade_blitz_bullets");
         }
-
-        pawn.RemoveModifier(
-            "upgrade_blitz_bullets/modifier_intrinsic_base"
-        );
-        pawn.AddModifier(
-            "upgrade_blitz_bullets/modifier_intrinsic_base",
-            abilityValues: new()
-            {
-                ["BonusFireRate"] = DuelBlitzBulletsFireRatePercent,
-            }
-        );
     }
 
     public void RestoreDuelBlitzBullets(
@@ -1288,22 +2435,8 @@ public class PlayerManager
         bool hadItemBeforeMatch
     )
     {
-        pawn.RemoveModifier(
-            "upgrade_blitz_bullets/modifier_intrinsic_base"
-        );
-        if (hadItemBeforeMatch)
-        {
-            pawn.AddModifier(
-                "upgrade_blitz_bullets/modifier_intrinsic_base",
-                abilityValues: new()
-                {
-                    ["BonusFireRate"] = DefaultBlitzBulletsFireRatePercent,
-                }
-            );
-            return;
-        }
-
-        pawn.RemoveItem("upgrade_blitz_bullets");
+        if (!hadItemBeforeMatch)
+            pawn.RemoveItem("upgrade_blitz_bullets");
     }
 
     public void RemoveDuelItemIfGranted(
@@ -1326,29 +2459,71 @@ public class PlayerManager
                 pawn.AddItem(itemName);
         }
 
+        ApplyDuelHighVelocityRounds(pawn);
         ApplyDuelBlitzBullets(pawn);
-        foreach (string itemName in DuelItemStack)
-            OverrideDuelItemHealthRegen(pawn, itemName);
+        ApplyPermanentBurstFire(pawn);
     }
 
-    private static void OverrideDuelItemHealthRegen(
-        CCitadelPlayerPawn pawn,
-        string itemName
-    )
+    private static void ApplyDuelHighVelocityRounds(CCitadelPlayerPawn pawn)
     {
+        const string itemName = "upgrade_high_velocity_mag";
+        const string modifierName = $"{itemName}/modifier_intrinsic_base";
         if (pawn.AbilityComponent?.FindAbilityByName(itemName) == null)
+        {
+            Console.WriteLine(
+                "[aimLOCK] Cannot set duel bullet speed; High-Velocity Mag is missing."
+            );
             return;
+        }
 
-        string modifierName = $"{itemName}/modifier_intrinsic_base";
         pawn.RemoveModifier(modifierName);
-        var abilityValues = DuelHealthRegenerationProperties.ToDictionary(
-            propertyName => propertyName,
-            _ => 0f
-        );
         pawn.AddModifier(
             modifierName,
-            abilityValues: abilityValues
+            abilityValues: new()
+            {
+                ["BonusBulletSpeedPercent"] = DuelHighVelocityRoundsBulletSpeedPercent,
+            }
         );
+    }
+
+    public void RestoreDuelHighVelocityRounds(
+        CCitadelPlayerPawn pawn,
+        bool hadItemBeforeMatch
+    )
+    {
+        const string itemName = "upgrade_high_velocity_mag";
+        pawn.RemoveModifier($"{itemName}/modifier_intrinsic_base");
+        if (hadItemBeforeMatch)
+            pawn.AddModifier($"{itemName}/modifier_intrinsic_base");
+        else
+            pawn.RemoveItem(itemName);
+    }
+
+    /// <summary>
+    /// Burst Fire's buff permanently on, instead of only after a hit with a cooldown
+    /// in between. Applied with the item as its source so the item's own values are
+    /// used, and re-applied on every respawn (ApplyDuelItemStack runs then).
+    /// </summary>
+    public void ApplyPermanentBurstFire(CCitadelPlayerPawn pawn)
+    {
+        var burstFire = pawn.AbilityComponent?.FindAbilityByName(BurstFireItemName);
+        if (burstFire == null)
+            return;
+
+        for (int i = 0; i < 4 && pawn.RemoveModifier(BurstFireBuffName); i++)
+        {
+        }
+
+        using var kv = new KeyValues3();
+        kv.SetFloat("duration", PermanentModifierDuration);
+        pawn.AddModifier(BurstFireBuffName, kv, pawn, burstFire);
+    }
+
+    public void RemovePermanentBurstFire(CCitadelPlayerPawn pawn)
+    {
+        for (int i = 0; i < 4 && pawn.RemoveModifier(BurstFireBuffName); i++)
+        {
+        }
     }
 
     private static void RestoreDuelItemHealthRegen(
@@ -1457,11 +2632,17 @@ public class PlayerManager
             return match;
         }
 
+        string playerName = GetCachedPlayerName(controller);
+        int slot = controller.Slot;
+        bool hasSlot = (uint)slot < MaxPlayerSlots;
+        bool hasBoundaryState =
+            duelArenaBoundaryStates.TryGetValue(playerName, out var boundaryState);
+        long now = Environment.TickCount64;
+        if (!hasBoundaryState && hasSlot && now < nextFarArenaCheck[slot])
+            return null;
+
         Vector3 position = pawn.Position;
-        if (!duelArenaBoundaryStates.TryGetValue(
-            controller.PlayerName,
-            out var boundaryState
-        ))
+        if (!hasBoundaryState)
         {
             int nearestArenaIndex = -1;
             float nearestDistanceSquared = float.MaxValue;
@@ -1469,9 +2650,9 @@ public class PlayerManager
             {
                 Vector3 offset = position - duelArenaSphereCenters[i];
                 if (
-                    MathF.Abs(offset.X) > DuelArenaOuterRadius ||
-                    MathF.Abs(offset.Y) > DuelArenaOuterRadius ||
-                    MathF.Abs(offset.Z) > DuelArenaOuterRadius
+                    MathF.Abs(offset.X) > FarArenaRadius ||
+                    MathF.Abs(offset.Y) > FarArenaRadius ||
+                    MathF.Abs(offset.Z) > FarArenaRadius
                 )
                     continue;
 
@@ -1487,7 +2668,16 @@ public class PlayerManager
                 nearestArenaIndex < 0 ||
                 nearestDistanceSquared > DuelArenaOuterRadiusSquared
             )
+            {
+                // Well clear of every arena: nobody can reach a wall within the next
+                // interval, so skip the arena search until then.
+                if (
+                    hasSlot &&
+                    (nearestArenaIndex < 0 || nearestDistanceSquared > FarArenaRadiusSquared)
+                )
+                    nextFarArenaCheck[slot] = now + FarArenaCheckIntervalMs;
                 return null;
+            }
 
             float interiorRadius =
                 DuelArenaSphereRadius - DuelArenaPlayerMargin;
@@ -1495,7 +2685,7 @@ public class PlayerManager
                 nearestArenaIndex,
                 nearestDistanceSquared <= interiorRadius * interiorRadius
             );
-            duelArenaBoundaryStates[controller.PlayerName] = boundaryState;
+            duelArenaBoundaryStates[playerName] = boundaryState;
         }
         else if (
             Vector3.DistanceSquared(
@@ -1504,7 +2694,7 @@ public class PlayerManager
             ) > DuelArenaOuterRadiusSquared
         )
         {
-            duelArenaBoundaryStates.Remove(controller.PlayerName);
+            duelArenaBoundaryStates.Remove(playerName);
             return null;
         }
 
@@ -1575,17 +2765,46 @@ public class PlayerManager
         )
             return;
 
-        Vector3 outward = distanceSquared > 0f
-            ? Vector3.Normalize(offset)
-            : Vector3.UnitX;
-        Vector3 clampedPosition = sphereCenter + outward * boundaryRadius;
+        float distance = MathF.Sqrt(distanceSquared);
+        Vector3 outward = distance > 0f ? offset / distance : Vector3.UnitX;
+        // Direction that leads back into the allowed area.
+        Vector3 allowedDirection = isInside ? -outward : outward;
+        float penetration = isInside
+            ? distance - boundaryRadius
+            : boundaryRadius - distance;
 
         Vector3 velocity = pawn.AbsVelocity;
-        float outwardSpeed = Vector3.Dot(velocity, outward);
-        if ((isInside && outwardSpeed > 0f) || (!isInside && outwardSpeed < 0f))
-            velocity -= outward * outwardSpeed;
+        float speedTowardAllowed = Vector3.Dot(velocity, allowedDirection);
 
-        pawn.Teleport(clampedPosition, null, velocity);
+        if (penetration > BoundaryHardCorrectionDistance)
+        {
+            // Escaped far past the wall (dash, knockback, teleport): snap back once.
+            if (speedTowardAllowed < 0f)
+                velocity -= allowedDirection * speedTowardAllowed;
+
+            pawn.Teleport(
+                sphereCenter + outward * boundaryRadius,
+                null,
+                velocity
+            );
+            return;
+        }
+
+        // Soft wall: cancel movement through the boundary and push back in, changing
+        // velocity only. Teleporting the position here (the old behaviour) ran on every
+        // usercmd batch while a player strafed against the wall, which broke
+        // interpolation and lag-compensation history for that player and caused
+        // rubber-banding and missed shots.
+        float pushBackSpeed = Math.Clamp(
+            penetration * 8f,
+            BoundaryMinPushBackSpeed,
+            BoundaryMaxPushBackSpeed
+        );
+        if (speedTowardAllowed >= pushBackSpeed)
+            return;
+
+        velocity += allowedDirection * (pushBackSpeed - speedTowardAllowed);
+        pawn.Teleport(null, null, velocity);
     }
 
     public void CreateDuelArenaRadiusMarkers()
@@ -1637,32 +2856,115 @@ public class PlayerManager
     public void RemoveDuelArenaRadiusMarkers() =>
         CBeam.RemoveAll(duelArenaRadiusBeams);
 
-    public void RemovePracticeBotZoneBoundaries() =>
-        CBeam.RemoveAll(practiceBotZoneBoundaryBeams);
-
-    public void CreatePracticeBotDoorwayLabel()
+    public void CreateEntryZoneLabels()
     {
-        foreach (var zone in PracticeBotZones)
+        // One pass over the map for all zones instead of one full scan per zone.
+        foreach (var entity in Entities.All)
         {
-            Vector3 labelPosition = zone.LabelPosition;
+            if (!entity.Is<CPointWorldText>())
+                continue;
 
-            foreach (var entity in Entities.All)
+            Vector3 entityPosition = entity.Position;
+            bool isExistingZoneLabel = false;
+            foreach (Vector3 removedLabelPosition in RemovedBotsLabelPositions)
             {
                 if (
-                    entity.Is<CPointWorldText>() &&
-                    Vector3.DistanceSquared(entity.Position, labelPosition) <=
-                        PracticeBotDoorwayLabelNearbyDistanceSquared
+                    Vector3.DistanceSquared(entityPosition, removedLabelPosition) <=
+                    PracticeBotDoorwayLabelNearbyDistanceSquared
                 )
-                    entity.Remove();
+                {
+                    isExistingZoneLabel = true;
+                    break;
+                }
             }
 
-            CreatePracticeBotZoneLabel(zone, labelPosition);
+            foreach (var zone in PracticeBotZones)
+            {
+                if (isExistingZoneLabel)
+                    break;
+
+                if (
+                    Vector3.DistanceSquared(entityPosition, zone.LabelPosition) <=
+                        PracticeBotDoorwayLabelNearbyDistanceSquared
+                )
+                {
+                    isExistingZoneLabel = true;
+                    break;
+                }
+            }
+
+            if (!isExistingZoneLabel)
+            {
+                foreach (var zone in QueueEntryZones)
+                {
+                    if (
+                        Vector3.DistanceSquared(entityPosition, zone.LabelPosition) <=
+                            PracticeBotDoorwayLabelNearbyDistanceSquared
+                        || (
+                            zone.QueueType == MatchQueueType.Ranked &&
+                            Vector3.DistanceSquared(
+                                entityPosition,
+                                zone.LabelPosition + new Vector3(30f, 0f, 0f)
+                            ) <= PracticeBotDoorwayLabelNearbyDistanceSquared
+                        )
+                        || (
+                            zone.QueueType == MatchQueueType.Ranked &&
+                            Vector3.DistanceSquared(
+                                entityPosition,
+                                zone.LabelPosition + new Vector3(55f, 0f, 0f)
+                            ) <= PracticeBotDoorwayLabelNearbyDistanceSquared
+                        )
+                        || (
+                            zone.QueueType == null &&
+                            Vector3.DistanceSquared(
+                                entityPosition,
+                                zone.LabelPosition + new Vector3(-100f, 0f, 0f)
+                            ) <= PracticeBotDoorwayLabelNearbyDistanceSquared
+                        )
+                        || (
+                            zone.QueueType == null &&
+                            Vector3.DistanceSquared(
+                                entityPosition,
+                                zone.LabelPosition + new Vector3(0f, -25f, 0f)
+                            ) <= PracticeBotDoorwayLabelNearbyDistanceSquared
+                        )
+                        || (
+                            zone.QueueType == null &&
+                            Vector3.DistanceSquared(
+                                entityPosition,
+                                zone.LabelPosition + new Vector3(25f, 0f, 0f)
+                            ) <= PracticeBotDoorwayLabelNearbyDistanceSquared
+                        )
+                    )
+                    {
+                        isExistingZoneLabel = true;
+                        break;
+                    }
+                }
+            }
+
+            if (isExistingZoneLabel)
+                entity.Remove();
+        }
+
+        foreach (var zone in PracticeBotZones)
+            CreateZoneLabel(zone.Label, zone.LabelColorABGR, zone.LabelPosition);
+        foreach (var zone in QueueEntryZones)
+        {
+            CreateZoneLabel(
+                zone.Label,
+                zone.LabelColorABGR,
+                zone.LabelPosition,
+                QueueEntryLabelHorizontalPadding
+            );
         }
     }
 
-    private void CreatePracticeBotZoneLabel(
-        PracticeBotZone zone,
-        Vector3 labelPosition
+    private void CreateZoneLabel(
+        string label,
+        uint labelColorABGR,
+        Vector3 labelPosition,
+        float horizontalPadding = PracticeBotDoorwayLabelHorizontalPadding
     )
     {
         float characterWidth =
@@ -1676,8 +2978,8 @@ public class PlayerManager
             1,
             (int)Math.Ceiling(
                 (
-                    zone.Label.Length * characterWidth +
-                    PracticeBotDoorwayLabelHorizontalPadding
+                    label.Length * characterWidth +
+                    horizontalPadding
                 ) / glyphWidth
             )
         );
@@ -1697,7 +2999,7 @@ public class PlayerManager
         if (backgroundText == null)
         {
             Console.WriteLine(
-                $"[aimLOCK] Failed to create the {zone.Label} doorway label background."
+                $"[aimLOCK] Failed to create the {label} zone label background."
             );
             return;
         }
@@ -1709,10 +3011,10 @@ public class PlayerManager
             PracticeBotDoorwayLabelBackgroundDepthOffset;
         backgroundText.JustifyHorizontal = HorizontalJustify.Center;
         backgroundText.Teleport(angles: PracticeBotDoorwayLabelAngles);
-        practiceBotZoneLabelEntities.Add(backgroundText);
+        entryZoneLabelEntities.Add(backgroundText);
 
         var labelText = CPointWorldText.Create(
-            zone.Label,
+            label,
             labelPosition,
             fontSize: PracticeBotDoorwayLabelFontSize,
             worldUnitsPerPx: PracticeBotDoorwayLabelWorldUnitsPerPx,
@@ -1722,29 +3024,29 @@ public class PlayerManager
         if (labelText == null)
         {
             backgroundText.Remove();
-            practiceBotZoneLabelEntities.Remove(backgroundText);
+            entryZoneLabelEntities.Remove(backgroundText);
             Console.WriteLine(
-                $"[aimLOCK] Failed to create the {zone.Label} doorway label."
+                $"[aimLOCK] Failed to create the {label} zone label."
             );
             return;
         }
 
-        labelText.ColorABGR = zone.LabelColorABGR;
+        labelText.ColorABGR = labelColorABGR;
         labelText.Fullbright = true;
         labelText.JustifyHorizontal = HorizontalJustify.Center;
         labelText.Teleport(angles: PracticeBotDoorwayLabelAngles);
-        practiceBotZoneLabelEntities.Add(labelText);
+        entryZoneLabelEntities.Add(labelText);
     }
 
-    public void RemovePracticeBotDoorwayLabel()
+    public void RemoveEntryZoneLabels()
     {
-        foreach (var labelEntity in practiceBotZoneLabelEntities)
+        foreach (var labelEntity in entryZoneLabelEntities)
         {
             if (labelEntity is { IsValid: true })
                 labelEntity.Remove();
         }
 
-        practiceBotZoneLabelEntities.Clear();
+        entryZoneLabelEntities.Clear();
     }
 
     private static Vector3 GetDuelArenaSphereCenter(Vector3 arena) =>
@@ -1976,28 +3278,194 @@ public class PlayerManager
 
     private void RemovePracticeBot(uint controllerHandle)
     {
+        CancelPendingBotMatch(controllerHandle);
         if (!practiceBots.Remove(controllerHandle))
             return;
 
-        var bot = Players.GetAll().FirstOrDefault(player =>
-            player.IsBot &&
-            player.EntityHandle == controllerHandle
-        );
-        bot?.Kick(
-            "Practice bot removed.",
-            ENetworkDisconnectionReason.NetworkDisconnectKicked
-        );
-
+        KickBot(controllerHandle);
         RestorePracticeBotAiIfIdle();
     }
 
-    public void ApplyDuelMatchModifiers(
-        CCitadelPlayerPawn pawn,
-        bool hadGlassCannonItemBeforeMatch
-    )
+    /// <summary>
+    /// Kicks a bot by controller handle. Falls back to searching the player list, so a
+    /// bot can't be left standing in an arena because the handle lookup came back empty
+    /// (a leftover bot far from a player who joins crashes that player's game).
+    /// </summary>
+    private static void KickBot(uint controllerHandle)
     {
-        ApplyFixation(pawn);
-        ApplyDuelGlassCannon(pawn, hadGlassCannonItemBeforeMatch);
+        var bot = CBaseEntity.FromHandle(controllerHandle)?.As<CCitadelPlayerController>();
+        if (bot is not { IsValid: true })
+        {
+            bot = null;
+            foreach (var player in Players.GetAll())
+            {
+                if (player.EntityHandle == controllerHandle)
+                {
+                    bot = player;
+                    break;
+                }
+            }
+        }
+
+        if (bot is not { IsValid: true, IsBot: true })
+            return;
+
+        bot.Kick(
+            "Practice bot removed.",
+            ENetworkDisconnectionReason.NetworkDisconnectKicked
+        );
+    }
+
+    /// <summary>
+    /// Removes every practice bot whose player is gone or whose match no longer exists.
+    /// Run when a player leaves and again when one joins.
+    /// </summary>
+    public void RemoveOrphanPracticeBots(uint departingOwnerHandle = 0)
+    {
+        if (practiceBots.Count == 0)
+            return;
+
+        List<uint>? orphans = null;
+        foreach (var state in practiceBots.Values)
+        {
+            bool ownerGone =
+                state.OwnerControllerHandle == departingOwnerHandle ||
+                CBaseEntity.FromHandle(state.OwnerControllerHandle) is not { IsValid: true };
+            // A bot still waiting for its match to start has no match yet.
+            bool matchGone =
+                !pendingBotReservations.ContainsKey(state.ControllerHandle) &&
+                !pendingBotMatchStarts.ContainsKey(state.ControllerHandle) &&
+                !HasActiveMatchFor(state.MatchKey);
+            if (ownerGone || matchGone)
+                (orphans ??= new()).Add(state.ControllerHandle);
+        }
+
+        if (orphans == null)
+            return;
+
+        foreach (uint handle in orphans)
+            RemovePracticeBot(handle);
+    }
+
+    /// <summary>
+    /// Kicks every bot that is not a practice bot in a match (/bottest bots and any
+    /// other leftover). A player who joins while such a bot exists crashes, so they are
+    /// removed whenever a player leaves and before a joining player is sent anything.
+    /// </summary>
+    public void RemoveUntrackedBots()
+    {
+        List<CCitadelPlayerController>? leftovers = null;
+        foreach (var player in Players.GetAll())
+        {
+            if (player.IsValid && player.IsBot && !practiceBots.ContainsKey(player.EntityHandle))
+                (leftovers ??= new()).Add(player);
+        }
+
+        if (leftovers == null)
+            return;
+
+        foreach (var bot in leftovers)
+        {
+            Console.WriteLine($"[aimLOCK] Removing leftover bot {bot.PlayerName}.");
+            bot.Kick(
+                "Leftover bot removed.",
+                ENetworkDisconnectionReason.NetworkDisconnectKicked
+            );
+        }
+    }
+
+    private bool HasActiveMatchFor(string matchKey) =>
+        server.ActiveMatches.TryGetValue(matchKey, out var match) && !match.Finished;
+
+    /* Hiding bots from players outside their match (off by default) */
+
+    // Hiding a bot from everyone but its opponent was added when a joining player
+    // crashed while a bot existed; that crash turned out to be the server install.
+    // Hiding only the bot's hero (or the bot itself) still sends its abilities, items
+    // and weapon, which then point at a hero the other player's game never got: that
+    // crashes the player who is not in the bot match. So it is off; /hidebots turns
+    // it back on for testing.
+    public enum BotHideMode { Off, Hero, All }
+    public BotHideMode PracticeBotHideMode { get; private set; } = BotHideMode.Off;
+    private bool botViewerMasksDirty = true;
+
+    public void SetPracticeBotHideMode(BotHideMode mode)
+    {
+        PracticeBotHideMode = mode;
+        botViewerMasksDirty = true;
+    }
+
+    public void HideOtherPlayersBots(CheckTransmitEvent args)
+    {
+        if (PracticeBotHideMode == BotHideMode.Off || practiceBots.Count == 0)
+            return;
+
+        int slot = args.PlayerSlot;
+        if (slot < 0 || slot >= MaxPlayerSlots)
+            return;
+
+        if (botViewerMasksDirty)
+            RebuildBotViewerMasks();
+
+        ulong viewerBit = 1UL << slot;
+        foreach (var state in practiceBots.Values)
+        {
+            if ((state.ViewerMask & viewerBit) != 0)
+                continue;
+
+            var bot = CBaseEntity
+                .FromHandle(state.ControllerHandle)
+                ?.As<CCitadelPlayerController>();
+            if (bot is not { IsValid: true })
+                continue;
+
+            var pawn = bot.GetHeroPawn();
+            if (pawn is { IsValid: true })
+                args.Hide(pawn);
+            if (PracticeBotHideMode == BotHideMode.All)
+                args.Hide(bot);
+        }
+    }
+
+    private void RebuildBotViewerMasks()
+    {
+        botViewerMasksDirty = false;
+        foreach (var state in practiceBots.Values)
+        {
+            ulong mask = 0;
+            if (state.OwnerSlot >= 0 && state.OwnerSlot < MaxPlayerSlots)
+                mask |= 1UL << state.OwnerSlot;
+
+            if (spectatingMatches.Count != 0)
+            {
+                foreach (var player in Players.GetAll())
+                {
+                    int slot = player.Slot;
+                    if (
+                        player.IsBot ||
+                        slot < 0 ||
+                        slot >= MaxPlayerSlots ||
+                        !spectatingMatches.TryGetValue(player.PlayerSteamId, out var watched)
+                    )
+                        continue;
+
+                    if (
+                        string.Equals(watched.Player1, state.MatchKey, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(watched.Player2, state.MatchKey, StringComparison.OrdinalIgnoreCase)
+                    )
+                        mask |= 1UL << slot;
+                }
+            }
+
+            state.ViewerMask = mask;
+        }
+    }
+
+    public void ApplyDuelMatchModifiers(CCitadelPlayerPawn pawn)
+    {
+        ApplyHazeLoadout(pawn);
+        // Not skipped by the loadout's once-per-burst check; does nothing at max level.
+        ApplyMaxBoons(pawn);
     }
 
     public int MaxFixationForOnlinePlayers()
@@ -2014,6 +3482,73 @@ public class PlayerManager
         }
 
         return updatedPlayers;
+    }
+
+    /// <summary>
+    /// The spawn loadout: max boons, Sleep Dagger / Smoke Bomb / Bullet Dance removed,
+    /// Fixation unlocked with every upgrade and a 999 stack cap. Safe to call repeatedly.
+    /// </summary>
+    public void ApplyHazeLoadout(CCitadelPlayerPawn pawn, bool force = false)
+    {
+        if (!pawn.IsValid)
+            return;
+
+        // Several events ask for the loadout around the same moment (hero initialized,
+        // respawn, spawn completed, match start). Apply it once per pawn per burst; the
+        // hero-initialized hook passes force because abilities were just rebuilt.
+        uint pawnHandle = pawn.EntityHandle;
+        long now = Environment.TickCount64;
+        if (loadoutAppliedAt.Count > 256)
+            loadoutAppliedAt.Clear();
+        if (
+            !force &&
+            loadoutAppliedAt.TryGetValue(pawnHandle, out long appliedAt) &&
+            now - appliedAt < LoadoutReapplyWindowMs
+        )
+            return;
+
+        loadoutAppliedAt[pawnHandle] = now;
+
+        // The practice bot never casts abilities (its inputs are only movement and
+        // shooting), but it gets the same max boons as players so its health matches.
+        if (pawn.Controller is { IsBot: true })
+        {
+            ApplyMaxBoons(pawn);
+            ApplyFixation(pawn);
+            return;
+        }
+
+        ApplyMaxBoons(pawn);
+        RemoveDisabledAbilities(pawn);
+        ApplyFixation(pawn);
+    }
+
+    /// <summary>
+    /// Max boons: the level is written directly and a zero-amount currency change makes
+    /// the game recalculate the boon stats. This is how Deadworks' own Deathmatch example
+    /// does it. (Feeding souls instead only reached level 3.)
+    /// </summary>
+    private static void ApplyMaxBoons(CCitadelPlayerPawn pawn)
+    {
+        if (pawn.Level >= MaxBoonLevel)
+            return;
+
+        pawn.Level = MaxBoonLevel;
+        pawn.ModifyCurrency(
+            ECurrencyType.EGold,
+            0,
+            ECurrencySource.ECheats,
+            silent: true
+        );
+    }
+
+    private static void RemoveDisabledAbilities(CCitadelPlayerPawn pawn)
+    {
+        foreach (string abilityName in DisabledHazeAbilities)
+        {
+            if (pawn.AbilityComponent?.FindAbilityByName(abilityName) != null)
+                pawn.RemoveAbility(abilityName);
+        }
     }
 
     private bool ApplyFixation(CCitadelPlayerPawn pawn)
@@ -2058,7 +3593,9 @@ public class PlayerManager
             }
         }
 
-        fixation.UpgradeBits = FullyUpgradedAbilityBits;
+        // Networked field: only write it when it actually changes.
+        if (fixation.UpgradeBits != FullyUpgradedAbilityBits)
+            fixation.UpgradeBits = FullyUpgradedAbilityBits;
         if (fixation.UpgradeBits != FullyUpgradedAbilityBits)
         {
             Console.WriteLine(
@@ -2093,7 +3630,52 @@ public class PlayerManager
             return false;
         }
 
+        if (HideFixationPassive)
+            HideFromClients(fixationModifier);
         return true;
+    }
+
+    // The re-added passive has no link to the ability, so the game client showed it as
+    // a permanent status icon on the HUD. The passive only does work on the server (it
+    // puts the stacks on whoever gets shot; those still show on the target as normal),
+    // so it is no longer sent to clients at all.
+    private static readonly SchemaAccessor<bool> ModifierSuppressSend =
+        new("CBaseModifier"u8, "m_bSuppressSendModifier"u8);
+    private static bool loggedSuppressSendFailure;
+
+    // Crash test switch (/hidepassive): whether the Fixation passive is kept off the
+    // clients. Hiding it is one of the few things every Haze on the server (players and
+    // bots alike) has that the original plugin didn't, so it is a suspect for the crash
+    // when someone joins while another Haze is already on the server.
+    public bool HideFixationPassive { get; private set; } = true;
+
+    /// <summary>Turns hiding the Fixation passive on or off and redoes Fixation for everyone.</summary>
+    public int SetHideFixationPassive(bool hide)
+    {
+        HideFixationPassive = hide;
+        return MaxFixationForOnlinePlayers();
+    }
+
+    private static void HideFromClients(CBaseModifier modifier)
+    {
+        nint handle = modifier.Handle;
+        if (handle == 0)
+            return;
+
+        nint address = ModifierSuppressSend.GetAddress(handle);
+        // A real field sits past the VData pointer at 0x10; anything else means the
+        // field was not found, so don't write.
+        if (address - handle <= 0x10 || address - handle > 0x1000)
+        {
+            if (!loggedSuppressSendFailure)
+            {
+                loggedSuppressSendFailure = true;
+                Console.WriteLine("[aimLOCK] Could not find m_bSuppressSendModifier; Fixation HUD icon stays.");
+            }
+            return;
+        }
+
+        System.Runtime.InteropServices.Marshal.WriteByte(address, 1);
     }
 
     private void GrantInitialAbilityCurrencies(
@@ -2126,69 +3708,38 @@ public class PlayerManager
         initialAbilityCurrenciesGranted.Add(controllerHandle);
     }
 
-    public void ApplyDuelGlassCannon(
-        CCitadelPlayerPawn pawn,
-        bool hadGlassCannonItemBeforeMatch
-    )
-    {
-        pawn.RemoveModifier(
-            "upgrade_glass_cannon/modifier_glass_cannon_intrinstic"
-        );
-        AddDuelGlassCannonModifier(
-            pawn,
-            aimLOCK.DUEL_GLASS_CANNON_HEALTH_LOSS,
-            hadGlassCannonItemBeforeMatch
-        );
-    }
-
-    private static void AddDuelGlassCannonModifier(
-        CCitadelPlayerPawn pawn,
-        float maxHealthLossPercent,
-        bool hadGlassCannonItemBeforeMatch
-    )
-    {
-        var abilityValues = new System.Collections.Generic.Dictionary<
-            string,
-            float
-        >
-        {
-            ["MaxHealthLossPercent"] = maxHealthLossPercent,
-        };
-        if (!hadGlassCannonItemBeforeMatch)
-            abilityValues["BaseAttackDamagePercent"] =
-                aimLOCK.DUEL_GLASS_CANNON_DAMAGE;
-
-        pawn.AddModifier(
-            "upgrade_glass_cannon/modifier_glass_cannon_intrinstic",
-            abilityValues
-        );
-    }
-
-    private static void RemoveDuelGlassCannon(
-        CCitadelPlayerPawn pawn,
-        bool hadGlassCannonItemBeforeMatch
-    )
-    {
-        pawn.RemoveModifier(
-            "upgrade_glass_cannon/modifier_glass_cannon_intrinstic"
-        );
-        if (hadGlassCannonItemBeforeMatch)
-            pawn.AddModifier(
-                "upgrade_glass_cannon/modifier_glass_cannon_intrinstic"
-            );
-    }
-
     private static void ClampHealthToMax(CCitadelPlayerPawn? pawn)
     {
-        if (pawn is { IsValid: true, IsAlive: true })
-            pawn.Health = Math.Min(pawn.Health, pawn.GetMaxHealth());
+        if (pawn is not { IsValid: true, IsAlive: true })
+            return;
+
+        // Only write when over the cap: every Health write is networked, and the duel
+        // monitor calls this 20 times a second per duelist.
+        int maxHealth = pawn.GetMaxHealth();
+        if (pawn.Health > maxHealth)
+            pawn.Health = maxHealth;
     }
 
     private static void ApplyDuelMaxHealth(CCitadelPlayerPawn pawn)
     {
+        if (VanillaDuelMaxHealth)
+        {
+            int vanillaMax = pawn.GetMaxHealth();
+            if (vanillaMax != lastLoggedDuelMaxHealth)
+            {
+                lastLoggedDuelMaxHealth = vanillaMax;
+                Console.WriteLine($"[aimLOCK] Duel max health: {vanillaMax} (the hero's own value).");
+            }
+            return;
+        }
+
         const string modifierName =
             "upgrade_health/modifier_intrinsic_base";
 
+        // The duel max health is carried by upgrade_health's modifier (it is no longer
+        // in the item stack), so add the item here when the player doesn't own it.
+        if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
+            pawn.AddItem("upgrade_health");
         if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
         {
             Console.WriteLine(
@@ -2207,10 +3758,7 @@ public class PlayerManager
             return;
         }
 
-        var abilityValues = DuelHealthRegenerationProperties.ToDictionary(
-            propertyName => propertyName,
-            _ => 0f
-        );
+        var abilityValues = new Dictionary<string, float>(ZeroHealthRegenValues);
         abilityValues["BonusHealth"] =
             DuelMaxHealth - maxHealthWithoutHealthUpgrade;
         pawn.AddModifier(modifierName, abilityValues: abilityValues);
@@ -2227,33 +3775,14 @@ public class PlayerManager
 
     private static void SetDuelStartingHealth(CCitadelPlayerPawn pawn)
     {
-        pawn.Health = Math.Min(DuelMaxHealth, pawn.GetMaxHealth());
+        pawn.Health = VanillaDuelMaxHealth
+            ? pawn.GetMaxHealth()
+            : Math.Min(DuelMaxHealth, pawn.GetMaxHealth());
     }
 
-    public void StartDuelHealthCapMonitor(DuelMatch match)
-    {
-        void MonitorHealthCap()
-        {
-            if (match.Finished)
-                return;
-
-            foreach (var player in GetMatchParticipants(match))
-            {
-                var pawn = player.GetHeroPawn();
-                if (pawn is { IsValid: true, IsAlive: true })
-                {
-                    ClampHealthToMax(pawn);
-                }
-            }
-
-            server.ScheduleOnce(
-                DuelHealthCapCheckIntervalSeconds.Seconds(),
-                MonitorHealthCap
-            );
-        }
-
-        MonitorHealthCap();
-    }
+    // The health cap is checked by the shared duel loop (DuelLoopTick) for every
+    // duelist; no per-match timer.
+    public void StartDuelHealthCapMonitor(DuelMatch match) => StartDuelLoop();
 
     public void PrepareDuelMatchHealth(DuelMatch match)
     {
@@ -2290,11 +3819,26 @@ public class PlayerManager
         });
     }
 
+    /// <summary>Debug only: attaches the respawn effect to any pawn, bots included.</summary>
+    public static CParticleSystem? CreateDebugEffect(CCitadelPlayerPawn pawn) =>
+        CParticleSystem.Create(RespawnTeleportEffect)
+            .AtPosition(pawn.Position)
+            .WithControlPoint(0, pawn)
+            .AttachedTo(pawn)
+            .Spawn();
+
     private static CParticleSystem? CreateAttachedEffect(
         CCitadelPlayerPawn pawn,
         string effectName
     )
     {
+        // No attached effects on bots. Attaching a particle to a bot spawned a moment
+        // earlier (hero model not loaded yet on the client) is the likely cause of the
+        // client crash at the start of /bot matches: a bare bot never crashed, the bot
+        // match did. The effects are cosmetic; players still get theirs.
+        if (!pawn.IsValid || pawn.Controller is { IsBot: true })
+            return null;
+
         var effect = CParticleSystem.Create(effectName)
             .AtPosition(pawn.Position)
             .WithControlPoint(0, pawn)
@@ -2320,6 +3864,9 @@ public class PlayerManager
         Console.WriteLine(
             $"Forcing Haze for {controller.PlayerName}"
         );
+
+        RemoveOrphanPracticeBots();
+        botViewerMasksDirty = true;
 
         uint controllerHandle = controller.EntityHandle;
         if (!initialHeroSelectionCompleted.Contains(controllerHandle))
@@ -2393,9 +3940,8 @@ public class PlayerManager
         initialAbilityCurrenciesGranted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
         practiceBotStrafeSpeedOverrides.Remove(controllerHandle);
-        playersInsidePracticeBotZones.RemoveWhere(
-            entry => entry.PlayerHandle == controller.EntityHandle
-        );
+        ClearPracticeBotZoneState(controller.Slot);
+        InvalidateCachedPlayerName(controller);
         duelArenaBoundaryStates.Remove(controller.PlayerName);
 
         if (
@@ -2405,6 +3951,22 @@ public class PlayerManager
         {
             ForfeitMatch(playerName);
         }
+
+        // A practice bot that left on its own (or was kicked by /botclear) must not
+        // stay registered, or no new bot match could start.
+        if (practiceBots.Count != 0 && practiceBots.Remove(controllerHandle))
+        {
+            CancelPendingBotMatch(controllerHandle);
+            RestorePracticeBotAiIfIdle();
+        }
+
+        // The leaving player's own bots go with them, whether or not the forfeit above
+        // already removed them: a bot left behind crashed the player when they rejoined.
+        RemoveLifestealDebug(controller);
+        RemoveOrphanPracticeBots(controllerHandle);
+        if (!controller.IsBot)
+            RemoveUntrackedBots();
+        botViewerMasksDirty = true;
 
         if (queueChanged)
             server.UIManager.RefreshHud();
@@ -2430,7 +3992,7 @@ public class PlayerManager
             var pawn = controller.GetHeroPawn();
             if (initializeExistingPawns && pawn is { IsValid: true })
             {
-                ApplyFixation(pawn);
+                ApplyHazeLoadout(pawn);
                 GrantInitialAbilityCurrencies(controller, pawn);
             }
 
@@ -2486,7 +4048,7 @@ public class PlayerManager
 
     private void RequestInitialSwapHero(CCitadelPlayerController controller)
     {
-        if (!HeroTypeExtensions.TryParse("hero_inferno", out var temporaryHero))
+        if (!HeroTypeExtensions.TryParse(TemporaryConnectHeroName, out var temporaryHero))
         {
             Console.WriteLine(
                 "[aimLOCK] Could not resolve hero_inferno for the initial hero swap."
@@ -2697,7 +4259,7 @@ public class PlayerManager
         initialHeroHazeSelectionStarted.Remove(controllerHandle);
         initialHeroPawnInitializationHandles.Remove(controllerHandle);
         pawn.Teleport(aimLOCK.MidtownSpawnPosition, null, null);
-        ApplyFixation(pawn);
+        ApplyHazeLoadout(pawn);
         GrantInitialAbilityCurrencies(controller, pawn);
         ClearInjectedSouls(controller, SoulsCleanupRetries);
         server.PlayerTagManager.RefreshPlayerTag(controller);
@@ -2705,6 +4267,199 @@ public class PlayerManager
         Console.WriteLine(
             $"[aimLOCK] Spawned {controller.PlayerName} as Haze at Midtown."
         );
+    }
+
+    /* Souls and buying */
+
+    // Every player keeps this many souls to spend; topped up after each purchase.
+    public const int MaxSouls = 999_999;
+
+    /// <summary>
+    /// Souls changes from the game. The starting amount is replaced with the max right
+    /// away; anything else (dropped on death, hero swap, a sale) is topped back up on
+    /// the next tick. Purchases are handled by OnItemPurchase.
+    /// </summary>
+    public HookResult OnSoulsChanged(ModifyCurrencyEvent args)
+    {
+        var pawn = args.Pawn;
+        if (pawn is not { IsValid: true } || pawn.Controller is { IsBot: true })
+            return HookResult.Continue;
+
+        if (args.Source == ECurrencySource.EItemPurchase)
+        {
+            OnItemPurchase(pawn);
+            return HookResult.Continue;
+        }
+
+        if (args.Source == ECurrencySource.EStartingAmount)
+        {
+            pawn.SetCurrency(ECurrencyType.EGold, MaxSouls);
+            return HookResult.Stop;
+        }
+
+        uint pawnHandle = pawn.EntityHandle;
+        server.ScheduleNextTick(() =>
+        {
+            var current = CBaseEntity.FromHandle(pawnHandle)?.As<CCitadelPlayerPawn>();
+            if (current is { IsValid: true })
+                TopUpSouls(current);
+        });
+        return HookResult.Continue;
+    }
+
+    private static void TopUpSouls(CCitadelPlayerPawn pawn)
+    {
+        if (pawn.GetCurrency(ECurrencyType.EGold) != MaxSouls)
+            pawn.SetCurrency(ECurrencyType.EGold, MaxSouls);
+    }
+
+    // Players (Steam ID) who turned bot mirror off with /botmirror. On by default.
+    private readonly HashSet<ulong> botMirrorOff = new();
+    // Players (Steam ID) who allow buying in duels (/ab on). Off by default.
+    private readonly HashSet<ulong> duelBuyingAllowed = new();
+
+    public bool ToggleBotMirror(CCitadelPlayerController player)
+    {
+        if (botMirrorOff.Remove(player.PlayerSteamId))
+            return true;
+        botMirrorOff.Add(player.PlayerSteamId);
+        return false;
+    }
+
+    public bool AllowsDuelBuying(CCitadelPlayerController player) =>
+        duelBuyingAllowed.Contains(player.PlayerSteamId);
+
+    public void SetAllowDuelBuying(CCitadelPlayerController player, bool allow)
+    {
+        if (allow)
+            duelBuyingAllowed.Add(player.PlayerSteamId);
+        else
+            duelBuyingAllowed.Remove(player.PlayerSteamId);
+    }
+
+    // Pawn -> the items it had when a purchase started; checked on the next tick to
+    // find what was bought.
+    private readonly Dictionary<uint, HashSet<string>> pendingPurchases = new();
+
+    /// <summary>Called when a player spends souls on an item.</summary>
+    public void OnItemPurchase(CCitadelPlayerPawn pawn)
+    {
+        if (pawn is not { IsValid: true } || pawn.Controller is not { IsBot: false })
+            return;
+
+        uint pawnHandle = pawn.EntityHandle;
+        if (pendingPurchases.ContainsKey(pawnHandle))
+            return;
+
+        pendingPurchases[pawnHandle] = GetItemNames(pawn);
+        server.ScheduleNextTick(() => HandlePurchase(pawnHandle));
+    }
+
+    private static HashSet<string> GetItemNames(CCitadelPlayerPawn pawn)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var abilities = pawn.AbilityComponent?.Abilities;
+        if (abilities == null)
+            return names;
+
+        foreach (var ability in abilities)
+        {
+            if (ability is { IsValid: true, IsItem: true })
+                names.Add(ability.AbilityName);
+        }
+
+        return names;
+    }
+
+    private void HandlePurchase(uint pawnHandle)
+    {
+        if (!pendingPurchases.Remove(pawnHandle, out var before))
+            return;
+
+        var pawn = CBaseEntity.FromHandle(pawnHandle)?.As<CCitadelPlayerPawn>();
+        if (pawn is not { IsValid: true } || pawn.Controller is not { } buyer)
+            return;
+
+        if (
+            server.ActiveMatches.Count == 0 ||
+            !TryGetActiveMatch(buyer, out var match) ||
+            match.Finished
+        )
+        {
+            TopUpSouls(pawn);
+            return;
+        }
+
+        var opponent = FindMatchParticipant(
+            string.Equals(match.Player1, GetMatchParticipantName(buyer), StringComparison.OrdinalIgnoreCase)
+                ? match.Player2
+                : match.Player1
+        );
+
+        foreach (string item in GetItemNames(pawn))
+        {
+            if (before.Contains(item))
+                continue;
+
+            string itemName = GetItemDisplayName(item);
+            if (opponent is { IsBot: true })
+            {
+                if (botMirrorOff.Contains(buyer.PlayerSteamId))
+                    continue;
+
+                var botPawn = opponent.GetHeroPawn();
+                if (
+                    botPawn is { IsValid: true } &&
+                    botPawn.AbilityComponent?.FindAbilityByName(item) == null
+                )
+                {
+                    botPawn.AddItem(item);
+                    Chat.PrintToChat(buyer, $"The bot bought {itemName} too. (/botmirror to turn this off)");
+                }
+            }
+            else if (!match.BuyingAllowed)
+            {
+                pawn.SellItem(item, fullRefund: true);
+                Chat.PrintToChat(
+                    buyer,
+                    "Buying items is off in this duel. Both players need /ab on before the duel."
+                );
+            }
+            else if (opponent is { IsValid: true })
+            {
+                Chat.PrintToChat(opponent, $"{GetCachedPlayerName(buyer)} bought {itemName}.");
+            }
+        }
+
+        TopUpSouls(pawn);
+    }
+
+    private static readonly Dictionary<string, string> ItemDisplayNames = new(StringComparer.Ordinal)
+    {
+        ["upgrade_blitz_bullets"] = "Swift Striker",
+        ["upgrade_high_velocity_mag"] = "High-Velocity Mag",
+        ["upgrade_pristine_emblem"] = "Opening Rounds",
+        ["upgrade_fleetfoot_boots"] = "Fleetfoot",
+        ["upgrade_titan_round"] = "Titanic Magazine",
+        ["upgrade_cardio_calibrator"] = "Enduring Speed",
+        ["upgrade_burst_fire"] = "Burst Fire",
+        ["upgrade_chonky"] = "Fortitude",
+        ["upgrade_health"] = "Extra Health",
+        ["upgrade_vampire"] = "Bullet Lifesteal",
+    };
+
+    // In-game name where known, otherwise the internal name tidied up
+    // ("upgrade_close_range" -> "Close Range").
+    private static string GetItemDisplayName(string item)
+    {
+        if (ItemDisplayNames.TryGetValue(item, out string? name))
+            return name;
+
+        string trimmed = item.StartsWith("upgrade_", StringComparison.Ordinal) ? item[8..] : item;
+        var words = trimmed.Split('_', StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < words.Length; i++)
+            words[i] = char.ToUpperInvariant(words[i][0]) + words[i][1..];
+        return string.Join(' ', words);
     }
 
     public void ClearInjectedSoulsFromConnectedPlayers()
@@ -2733,13 +4488,7 @@ public class PlayerManager
                 if (initializedPawn is not { IsValid: true })
                     return;
 
-                if (
-                    initializedPawn.GetCurrency(ECurrencyType.EGold)
-                    == InjectedSoulsBalance
-                )
-                {
-                    initializedPawn.SetCurrency(ECurrencyType.EGold, 0);
-                }
+                TopUpSouls(initializedPawn);
             });
             return;
         }
@@ -2772,7 +4521,9 @@ public class PlayerManager
         if (match.Finished || !match.ArenaInitialized)
             return HookResult.Continue;
 
-        ResetMatchFixationStacks(match);
+        // Fixation resets every kill, in bot matches and player duels alike. Next tick,
+        // so it doesn't add to the death frame.
+        server.ScheduleNextTick(() => ResetMatchFixationStacks(match));
 
         bool scoreRound = match.CombatActive;
         if (match.CountdownActive)
@@ -2803,8 +4554,10 @@ public class PlayerManager
 
         if (scoreRound)
         {
+            server.LeaderboardManager.RefreshActiveMatches();
             server.UIManager.UpdateMatchHud(match);
             UpdateArenaScoreboard(match);
+            ReportRoundAccuracy(match);
         }
 
         if (
@@ -2846,17 +4599,27 @@ public class PlayerManager
             ResetFixationStacks(participant);
     }
 
-    private static void ResetFixationStacks(CCitadelPlayerController player)
+    private void ResetFixationStacks(CCitadelPlayerController player)
     {
         var pawn = player.GetHeroPawn();
         if (pawn is not { IsValid: true })
+            return;
+
+        // The stacks live on the person who was shot (a modifier from the shooter's
+        // Fixation), not on the shooter's passive: remove those too. The player who
+        // died gets a fresh passive with the respawn loadout.
+        RemoveFixationModifiers(pawn);
+        if (!pawn.IsAlive)
             return;
 
         var fixation = pawn.AbilityComponent?.FindAbilityByName(
             FixationAbilityName
         );
         if (fixation is not { IsValid: true })
+        {
+            ApplyFixation(pawn);
             return;
+        }
 
         pawn.RemoveModifier(FixationModifierName);
         var fixationModifier = pawn.AddModifier(
@@ -2874,6 +4637,8 @@ public class PlayerManager
             return;
         }
 
+        if (HideFixationPassive)
+            HideFromClients(fixationModifier);
         var modifierSchema = fixationModifier.AsSchema<Schema.CBaseModifier>();
         modifierSchema.m_iMaxStackCount = FixationMaxStacks;
         modifierSchema.m_iStackCount = 0;
@@ -2927,7 +4692,7 @@ public class PlayerManager
 
                 var pawn = fixationPlayer.GetHeroPawn();
                 if (pawn is { IsValid: true })
-                    ApplyFixation(pawn);
+                    ApplyHazeLoadout(pawn);
             });
         }
 
@@ -3017,19 +4782,6 @@ public class PlayerManager
         SetMatchDisarmed(match, true);
 
         Vector3 arenaCenter = GetDuelArenaSphereCenter(match.ArenaPosition);
-        bool hadGlassCannonItemBeforeMatch = string.Equals(
-            playerName,
-            match.Player1,
-            StringComparison.OrdinalIgnoreCase
-        )
-            ? match.Player1HadGlassCannonItem
-            : match.Player2HadGlassCannonItem;
-        ApplyDuelGlassCannon(pawn, hadGlassCannonItemBeforeMatch);
-        ApplyDuelBulletLifesteal(pawn);
-        ApplyDuelItemStack(pawn);
-        if (pawn.GetMaxHealth() != DuelMaxHealth)
-            ApplyDuelMaxHealth(pawn);
-        pawn.RemoveAbility("upgrade_infinite_rounds");
 
         if (string.Equals(
             playerName,
@@ -3058,9 +4810,38 @@ public class PlayerManager
             PlayMatchTeleportEffect(pawn);
         }
 
-        SetDuelStartingHealth(pawn);
         server.PendingRespawns.Remove(playerName);
         respawnRecoveryInProgress.Remove(playerName);
+
+        // The respawn frame only teleports and disarms. The modifier and item work
+        // (lifesteal, the item stack, max health) is spread over the next few ticks: the player is disarmed until the
+        // countdown anyway, and RestoreDuelRespawnHealth re-checks health afterwards.
+        CCitadelPlayerPawn respawnedPawn = pawn;
+        server.ScheduleNextTick(() =>
+        {
+            if (match.Finished || !respawnedPawn.IsValid)
+                return;
+
+            ApplyDuelBulletLifesteal(respawnedPawn);
+            server.ScheduleNextTick(() =>
+            {
+                if (match.Finished || !respawnedPawn.IsValid)
+                    return;
+
+                ApplyDuelItemStack(respawnedPawn);
+                respawnedPawn.RemoveAbility("upgrade_infinite_rounds");
+                server.ScheduleNextTick(() =>
+                {
+                    if (match.Finished || !respawnedPawn.IsValid)
+                        return;
+
+                    ApplyMaxBoons(respawnedPawn);
+                    if (!HasDuelMaxHealth(respawnedPawn))
+                        ApplyDuelMaxHealth(respawnedPawn);
+                    SetDuelStartingHealth(respawnedPawn);
+                });
+            });
+        });
 
         server.ScheduleOnce(0.5.Seconds(), () =>
         {
@@ -3098,11 +4879,14 @@ public class PlayerManager
             return;
         }
 
-        if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
+        if (
+            !VanillaDuelMaxHealth &&
+            pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null
+        )
             pawn.AddItem("upgrade_health");
-        if (pawn.GetMaxHealth() != DuelMaxHealth)
+        if (!HasDuelMaxHealth(pawn))
             ApplyDuelMaxHealth(pawn);
-        if (pawn.GetMaxHealth() == DuelMaxHealth)
+        if (HasDuelMaxHealth(pawn))
         {
             if (hasStableMaxHealth)
             {
@@ -3136,6 +4920,153 @@ public class PlayerManager
                 playerName,
                 attemptsRemaining - 1
             ));
+    }
+
+    /// <summary>
+    /// Start of every duel and every round (the countdown): both players' Fixation
+    /// stacks are cleared and both are set to full health.
+    /// </summary>
+    public void ResetRoundState(DuelMatch match)
+    {
+        ResetMatchFixationStacks(match);
+        FillMatchHealth(match);
+        ResetRoundAccuracy(match);
+    }
+
+    /* Round accuracy */
+
+    // Per player, for the current duel round only: shots fired and bullet hits on the
+    // opponent, split into headshots and body shots. Counted only while the round is
+    // live (after FIGHT, before the kill), read out to each player when a round is
+    // scored, and cleared at the start of every round.
+    private sealed class RoundAccuracy
+    {
+        public int Shots;
+        public int HeadHits;
+        public int BodyHits;
+    }
+
+    private readonly Dictionary<uint, RoundAccuracy> roundAccuracy = new();
+    private bool loggedGunFiredFields;
+
+    private static readonly SchemaAccessor<float> DamageCritDamage =
+        new("CTakeDamageInfo"u8, "m_flCritDamage"u8);
+    private static readonly SchemaAccessor<int> DamageHitGroup =
+        new("CTakeDamageInfo"u8, "m_iHitGroupId"u8);
+    private const int HeadHitGroup = 1;
+
+    private RoundAccuracy? GetLiveRoundAccuracy(CCitadelPlayerPawn? pawn)
+    {
+        if (
+            server.ActiveMatches.Count == 0 ||
+            pawn is not { IsValid: true } ||
+            pawn.Controller is not { } controller ||
+            !TryGetActiveMatch(controller, out var match) ||
+            match.Finished ||
+            !match.CombatActive
+        )
+            return null;
+
+        uint handle = controller.EntityHandle;
+        if (!roundAccuracy.TryGetValue(handle, out var stats))
+            roundAccuracy[handle] = stats = new RoundAccuracy();
+        return stats;
+    }
+
+    /// <summary>A shot fired (the GunFired modifier event).</summary>
+    public void OnGunFired(ModifierEvent args)
+    {
+        if (server.ActiveMatches.Count == 0)
+            return;
+
+        if (!loggedGunFiredFields)
+        {
+            loggedGunFiredFields = true;
+            Console.WriteLine(
+                "[aimLOCK] Accuracy: first shot seen. Caster: " +
+                (args.Caster?.DesignerName ?? "none") + ", target: " +
+                (args.Target?.DesignerName ?? "none") + "."
+            );
+        }
+
+        var shooter = args.Caster?.As<CCitadelPlayerPawn>();
+        if (shooter is not { IsValid: true, Controller: not null })
+            shooter = args.Target?.As<CCitadelPlayerPawn>();
+
+        var stats = GetLiveRoundAccuracy(shooter);
+        if (stats != null)
+            stats.Shots++;
+    }
+
+    /// <summary>A bullet hit (from DamageTaken), counted as a headshot or a body shot.</summary>
+    private void CountAccuracyHit(
+        CCitadelPlayerPawn attacker,
+        CCitadelPlayerPawn victim,
+        CTakeDamageInfo info
+    )
+    {
+        var stats = GetLiveRoundAccuracy(attacker);
+        if (stats == null)
+            return;
+
+        bool headshot =
+            DamageCritDamage.Get(info.Handle) > 0f ||
+            DamageHitGroup.Get(info.Handle) == HeadHitGroup;
+        if (headshot)
+            stats.HeadHits++;
+        else
+            stats.BodyHits++;
+    }
+
+    private void ResetRoundAccuracy(DuelMatch match)
+    {
+        foreach (var participant in GetMatchParticipants(match))
+            roundAccuracy.Remove(participant.EntityHandle);
+    }
+
+    private void ReportRoundAccuracy(DuelMatch match)
+    {
+        foreach (var participant in GetMatchParticipants(match))
+        {
+            if (!roundAccuracy.Remove(participant.EntityHandle, out var stats))
+                stats = new RoundAccuracy();
+            if (participant.IsBot)
+                continue;
+
+            int shots = Math.Max(stats.Shots, stats.HeadHits + stats.BodyHits);
+            if (shots == 0)
+            {
+                Chat.PrintToChat(participant, "Round accuracy: no shots fired.");
+                continue;
+            }
+
+            Chat.PrintToChat(
+                participant,
+                $"Headshot accuracy: {Percent(stats.HeadHits, shots)} | " +
+                $"Overall accuracy: {Percent(stats.HeadHits + stats.BodyHits, shots)} | " +
+                $"{shots} shots"
+            );
+        }
+    }
+
+    private static string Percent(int hits, int shots) =>
+        $"{Math.Round(hits * 100.0 / shots):0}% ({hits}/{shots})";
+
+    /// <summary>Sets both duelists to their max health (only writes when not full).</summary>
+    public void FillMatchHealth(DuelMatch match)
+    {
+        FillHealth(FindMatchParticipant(match.Player1)?.GetHeroPawn());
+        FillHealth(FindMatchParticipant(match.Player2)?.GetHeroPawn());
+    }
+
+    private static void FillHealth(CCitadelPlayerPawn? pawn)
+    {
+        if (pawn is not { IsValid: true, IsAlive: true })
+            return;
+
+        int maxHealth = pawn.GetMaxHealth();
+        if (maxHealth > 0 && pawn.Health != maxHealth)
+            pawn.Health = maxHealth;
     }
 
     private void ResetDuelCurrentHealth(DuelMatch match)
@@ -3218,7 +5149,7 @@ public class PlayerManager
                 );
             }
 
-            server.LeaderboardManager.Refresh();
+            server.LeaderboardManager.RequestRefresh();
         }
 
         Console.WriteLine(
@@ -3265,6 +5196,10 @@ public class PlayerManager
         }
         if (pawn1 != null)
         {
+            server.PlayerManager.RestoreDuelHighVelocityRounds(
+                pawn1,
+                match.Player1HadHighVelocityRoundsItem
+            );
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn1,
                 "upgrade_pristine_emblem",
@@ -3292,48 +5227,8 @@ public class PlayerManager
             );
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn1,
-                "upgrade_chonky",
-                match.Player1HadFortitudeItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn1,
                 "upgrade_health",
                 match.Player1HadHealthItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_blitz_bullets",
-                match.Player1HadBlitzBulletsItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_pristine_emblem",
-                match.Player1HadOpeningRoundsItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_fleetfoot_boots",
-                match.Player1HadFleetfootItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_titan_round",
-                match.Player1HadTitanicMagazineItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_cardio_calibrator",
-                match.Player1HadCardioCalibratorItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_burst_fire",
-                match.Player1HadBurstFireItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_chonky",
-                match.Player1HadFortitudeItem
             );
             RestoreDuelItemHealthRegen(
                 pawn1,
@@ -3343,6 +5238,10 @@ public class PlayerManager
         }
         if (pawn2 != null)
         {
+            server.PlayerManager.RestoreDuelHighVelocityRounds(
+                pawn2,
+                match.Player2HadHighVelocityRoundsItem
+            );
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn2,
                 "upgrade_pristine_emblem",
@@ -3370,48 +5269,8 @@ public class PlayerManager
             );
             server.PlayerManager.RemoveDuelItemIfGranted(
                 pawn2,
-                "upgrade_chonky",
-                match.Player2HadFortitudeItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn2,
                 "upgrade_health",
                 match.Player2HadHealthItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_blitz_bullets",
-                match.Player2HadBlitzBulletsItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_pristine_emblem",
-                match.Player2HadOpeningRoundsItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_fleetfoot_boots",
-                match.Player2HadFleetfootItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_titan_round",
-                match.Player2HadTitanicMagazineItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_cardio_calibrator",
-                match.Player2HadCardioCalibratorItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_burst_fire",
-                match.Player2HadBurstFireItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_chonky",
-                match.Player2HadFortitudeItem
             );
             RestoreDuelItemHealthRegen(
                 pawn2,
@@ -3419,16 +5278,8 @@ public class PlayerManager
                 match.Player2HadHealthItem
             );
         }
-        if (pawn1 != null)
-        {
-            RemoveDuelGlassCannon(pawn1, match.Player1HadGlassCannonItem);
-            ClampHealthToMax(pawn1);
-        }
-        if (pawn2 != null)
-        {
-            RemoveDuelGlassCannon(pawn2, match.Player2HadGlassCannonItem);
-            ClampHealthToMax(pawn2);
-        }
+        ClampHealthToMax(pawn1);
+        ClampHealthToMax(pawn2);
         server.ScheduleOnce(0.1.Seconds(), () =>
         {
             ClampHealthToMax(pawn1);
@@ -3436,6 +5287,19 @@ public class PlayerManager
         });
         pawn1?.RemoveModifier("modifier_speed_boost");
         pawn2?.RemoveModifier("modifier_speed_boost");
+        if (pawn1 != null)
+            RemovePermanentBurstFire(pawn1);
+        if (pawn2 != null)
+            RemovePermanentBurstFire(pawn2);
+        // The practice bot is parked or removed right after this, so it skips the trip
+        // to spawn, the teleport particles and the team change.
+        bool player1IsBot = IsPracticeBotController(player1);
+        bool player2IsBot = IsPracticeBotController(player2);
+        if (player1IsBot)
+            pawn1 = null;
+        if (player2IsBot)
+            pawn2 = null;
+
         pawn1?.Teleport(
             aimLOCK.MidtownSpawnPosition,
             null,
@@ -3451,8 +5315,10 @@ public class PlayerManager
         if (pawn2 != null)
             server.PlayerManager.PlayMatchTeleportEffect(pawn2);
 
-        player1?.ChangeTeam(2);
-        player2?.ChangeTeam(2);
+        if (!player1IsBot)
+            EnsureTeam(player1, 2);
+        if (!player2IsBot)
+            EnsureTeam(player2, 2);
 
         server.UIManager.HideMatchHud(player1, player2);
         server.PlayerManager.OnDuelMatchFinished(match);
@@ -3511,9 +5377,9 @@ public class PlayerManager
             if (pawn != null)
             {
                 if (disarmed)
-                    pawn.AddModifier("modifier_citadel_disarmed");
+                    pawn.AddModifier(DisarmedModifierName);
                 else
-                    pawn.RemoveModifier("modifier_citadel_disarmed");
+                    RemoveAllDisarms(pawn);
             }
         }
 
@@ -3525,10 +5391,12 @@ public class PlayerManager
             var pawn = player2.GetHeroPawn();
             if (pawn != null)
             {
+                // Re-arming removes every copy, so repeated disarms (death, respawn,
+                // countdown) can't pile up and leave someone disarmed.
                 if (disarmed)
-                    pawn.AddModifier("modifier_citadel_disarmed");
+                    pawn.AddModifier(DisarmedModifierName);
                 else
-                    pawn.RemoveModifier("modifier_citadel_disarmed");
+                    RemoveAllDisarms(pawn);
             }
         }
     }
@@ -3680,15 +5548,23 @@ public class PlayerManager
         );
     }
 
-    public bool IsHandicapEnabled(CCitadelPlayerController player) =>
-        server.PlayerRecords.TryGetValue(
-            player.PlayerSteamId,
-            out var record
-        ) && record.HandicapEnabled;
+    /// <summary>The player's saved /handicap lifesteal percent, or null when off.</summary>
+    public float? GetHandicapLifestealPercent(CCitadelPlayerController player)
+    {
+        if (
+            !server.PlayerRecords.TryGetValue(player.PlayerSteamId, out var record) ||
+            !record.HandicapEnabled
+        )
+            return null;
 
-    public void SetHandicapEnabled(
+        return record.HandicapLifestealPercent
+            ?? DuelLifestealPercent - LegacyHandicapLifestealReduction;
+    }
+
+    /// <summary>Saves the player's /handicap lifesteal percent; null turns it off.</summary>
+    public void SetHandicapLifestealPercent(
         CCitadelPlayerController player,
-        bool enabled
+        float? percent
     )
     {
         ulong steamId = player.PlayerSteamId;
@@ -3699,7 +5575,7 @@ public class PlayerManager
             steamId,
             out var record
         );
-        if (!hadRecord && !enabled)
+        if (!hadRecord && percent == null)
             return;
 
         record ??= new PlayerRecord
@@ -3707,35 +5583,27 @@ public class PlayerManager
             SteamId = steamId,
             LastKnownName = player.PlayerName
         };
-        bool previousValue = record.HandicapEnabled;
+        bool previousEnabled = record.HandicapEnabled;
+        float? previousPercent = record.HandicapLifestealPercent;
         string previousName = record.LastKnownName;
-        if (!hadRecord || previousValue != enabled)
-        {
-            record.LastKnownName = player.PlayerName;
-            record.HandicapEnabled = enabled;
-            server.PlayerRecords[steamId] = record;
 
-            if (!SaveRecords())
+        record.LastKnownName = player.PlayerName;
+        record.HandicapEnabled = percent != null;
+        record.HandicapLifestealPercent = percent;
+        server.PlayerRecords[steamId] = record;
+
+        if (!SaveRecords())
+        {
+            if (hadRecord)
             {
-                if (hadRecord)
-                {
-                    record.HandicapEnabled = previousValue;
-                    record.LastKnownName = previousName;
-                }
-                else
-                    server.PlayerRecords.Remove(steamId);
-
-                throw new IOException("Could not save your handicap setting.");
+                record.HandicapEnabled = previousEnabled;
+                record.HandicapLifestealPercent = previousPercent;
+                record.LastKnownName = previousName;
             }
-        }
+            else
+                server.PlayerRecords.Remove(steamId);
 
-        if (
-            TryGetActiveMatch(player, out var match) &&
-            !match.Finished &&
-            player.GetHeroPawn() is { IsValid: true } pawn
-        )
-        {
-            ApplyDuelBulletLifesteal(pawn);
+            throw new IOException("Could not save your handicap setting.");
         }
     }
 
@@ -3978,30 +5846,37 @@ public class PlayerManager
         );
     }
 
-    public const string RecordsFileName = "records.json";
-    private static readonly string RecordsFilePath = JsonStore.PathFor(RecordsFileName);
-
     public void LoadRecords()
     {
+        try
+        {
+            var loaded = JsonStore.Load(
+                RecordsFilePath,
+                () => new Dictionary<ulong, PlayerRecord>(),
+                PlayerRecordJsonOptions
+            );
 
-        var loaded = JsonStore.Load(
-            RecordsFilePath,
-            () => new Dictionary<ulong, PlayerRecord>(),
-            PlayerRecordJsonOptions
-        );
+            server.PlayerRecords.Clear();
+            foreach (var pair in loaded)
+                server.PlayerRecords[pair.Key] = pair.Value;
 
-        server.PlayerRecords.Clear();
-        foreach (var pair in loaded)
-            server.PlayerRecords[pair.Key] = pair.Value;
-
-        Console.WriteLine($"Loaded {server.PlayerRecords.Count} player records.");
+            Console.WriteLine($"Loaded {server.PlayerRecords.Count} player records.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to load records: {ex}");
+        }
     }
 
     private bool SaveRecords()
     {
         try
         {
-            JsonStore.Save(RecordsFilePath, server.PlayerRecords, PlayerRecordJsonOptions);
+            JsonStore.Save(
+                RecordsFilePath,
+                server.PlayerRecords,
+                PlayerRecordJsonOptions
+            );
             return true;
         }
         catch (Exception ex)
