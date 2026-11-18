@@ -84,7 +84,8 @@ public class UIManager
 
     private readonly record struct ServerInfoStats(
         string PlayerCountText,
-        string OverallInfoText
+        string RankedInfoText,
+        string UnrankedInfoText
     );
 
     private ServerInfoStats GetServerInfoStats()
@@ -103,11 +104,9 @@ public class UIManager
         }
 
         return new ServerInfoStats(
-            $"Players Online: {playerCount}",
-            $"\nRanked Queue: {server.RankedQueue.Count}" +
-            $"\nIn Match: {rankedMatches * 2}\n" +
-            $"\nUnranked Queue: {server.UnrankedQueue.Count}" +
-            $"\nIn Match: {unrankedMatches * 2}\n"
+            $"{playerCount} online",
+            $"Ranked   {server.RankedQueue.Count} queued · {rankedMatches * 2} in match",
+            $"Unranked   {server.UnrankedQueue.Count} queued · {unrankedMatches * 2} in match"
         );
     }
 
@@ -145,38 +144,73 @@ public class UIManager
                             .WithStyle("color", "#555555")
                     ),
 
-                UI.Label("separator", "─────────────────")
-                    .WithStyle("font-size", "16px")
-                    .WithStyle("color", "#fefafc")
-                    .WithStyle("horizontal-align", "center"),
-
                 UI.Label("playercount", stats.PlayerCountText)
-                    .WithStyle("font-size", "18px")
-                    .WithStyle("color", "#FFFFFFFF")
-                    .WithStyle("horizontal-align", "center")
-                    .WithStyle("text-align", "center"),
-
-                UI.Label("separator", "─────────────────")
                     .WithStyle("font-size", "16px")
-                    .WithStyle("color", "#fefafc")
-                    .WithStyle("horizontal-align", "center"),
-
-                UI.Label("overallinfo", stats.OverallInfoText)
+                    .WithStyle("color", "#AAAAAA")
                     .WithStyle("horizontal-align", "center")
-                    .WithStyle("text-align", "center")
-                    .WithStyle("font-size", "18px")
+                    .WithStyle("margin-bottom", "10px"),
+
+                UI.Label(
+                    "rankedinfo",
+                    stats.RankedInfoText
+                )
+                    .WithStyle("font-size", "17px")
                     .WithStyle("color", "#FFFFFFFF"),
 
-                UI.Label("date", currentDate)
-                    .WithStyle("font-size", "14px")
-                    .WithStyle("color", "#AAAAAA")
-                    .WithStyle("margin-top", "8px"),
+                UI.Label(
+                    "unrankedinfo",
+                    stats.UnrankedInfoText
+                )
+                    .WithStyle("font-size", "17px")
+                    .WithStyle("color", "#FFFFFFFF"),
 
-                UI.Label("time", currentTime)
-                    .WithStyle("font-size", "14px")
-                    .WithStyle("color", "#AAAAAA")
-                    .WithStyle("margin-top", "8px")
+                UI.Label("queuestatus", GetQueueStatus(steamId, DateTimeOffset.UtcNow))
+                    .WithStyle("font-size", "17px")
+                    .WithStyle("font-weight", "bold")
+                    .WithStyle("color", "#7FD4FF")
+                    .WithStyle("margin-top", "10px"),
+
+                UI.Horizontal()
+                    .WithStyle("horizontal-align", "center")
+                    .WithStyle("margin-top", "10px")
+                    .Add(
+                        UI.Label("date", currentDate)
+                            .WithStyle("font-size", "14px")
+                            .WithStyle("color", "#777777"),
+
+                        UI.Label("time", currentTime)
+                            .WithStyle("font-size", "14px")
+                            .WithStyle("color", "#777777")
+                            .WithStyle("margin-left", "8px")
+                    )
             );
+    }
+
+    private string GetQueueStatus(ulong steamId, DateTimeOffset now) =>
+        GetQueuePosition(steamId, now) ?? "/join ranked or /join unranked";
+
+    private string? GetQueuePosition(ulong steamId, DateTimeOffset now)
+    {
+        foreach (
+            (List<QueueEntry> queue, string queueName) in new[]
+            {
+                (server.RankedQueue, "Ranked"),
+                (server.UnrankedQueue, "Unranked")
+            }
+        )
+        {
+            int index = queue.FindIndex(entry => entry.SteamId == steamId);
+            if (index < 0)
+                continue;
+
+            TimeSpan waited = now - queue[index].EnqueuedAt;
+            if (waited < TimeSpan.Zero)
+                waited = TimeSpan.Zero;
+
+            return $"In {queueName} queue: #{index + 1} · {(int)waited.TotalMinutes}:{waited.Seconds:00}";
+        }
+
+        return null;
     }
 
     private void ScheduleClockRefresh()
@@ -202,13 +236,22 @@ public class UIManager
         DateTimeOffset utcNow = DateTimeOffset.UtcNow;
         foreach (var controller in Players.GetAll())
         {
-            if (
-                server.PlayerManager.TryGetActiveMatch(controller, out _) ||
-                hiddenServerInfo.Contains(controller.PlayerSteamId)
-            )
+            if (server.PlayerManager.TryGetActiveMatch(controller, out var activeMatch))
             {
+                if (!controller.IsBot && server.PlayerManager.IsBotMatch(activeMatch))
+                {
+                    UI.Panel("duelhud").Set(
+                        controller.Recipients,
+                        "duelqueue",
+                        GetQueuePosition(controller.PlayerSteamId, utcNow) ?? ""
+                    );
+                }
+
                 continue;
             }
+
+            if (hiddenServerInfo.Contains(controller.PlayerSteamId))
+                continue;
 
             ulong steamId = controller.PlayerSteamId;
             if (!serverInfoPanelState.TryGetValue(steamId, out bool built) || !built)
@@ -230,6 +273,11 @@ public class UIManager
                 "time",
                 localNow.ToString("hh:mm:ss tt", CultureInfo.InvariantCulture)
             );
+            UI.Panel("queuepanel").Set(
+                recipients,
+                "queuestatus",
+                GetQueueStatus(steamId, utcNow)
+            );
         }
     }
 
@@ -249,9 +297,15 @@ public class UIManager
             {
                 if (wantVisible && built)
                 {
-                    // Panel already on screen: update only the two changing labels.
+                    // Panel already on screen: update only the changing labels.
                     panel.Set(controller.Recipients, "playercount", stats.PlayerCountText);
-                    panel.Set(controller.Recipients, "overallinfo", stats.OverallInfoText);
+                    panel.Set(controller.Recipients, "rankedinfo", stats.RankedInfoText);
+                    panel.Set(controller.Recipients, "unrankedinfo", stats.UnrankedInfoText);
+                    panel.Set(
+                        controller.Recipients,
+                        "queuestatus",
+                        GetQueueStatus(steamId, DateTimeOffset.UtcNow)
+                    );
                     continue;
                 }
 
@@ -464,6 +518,24 @@ public class UIManager
                     .WithStyle("color", "#FF8A00")
                     .WithStyle("horizontal-align", "center")
             );
+
+        // Bot matches are the only ones a player can be queued during: show their
+        // queue position under the score (RefreshClock keeps it ticking).
+        if (p1.IsBot || p2.IsBot)
+        {
+            var human = p1.IsBot ? p2 : p1;
+            layout.Add(
+                UI.Label(
+                    "duelqueue",
+                    GetQueuePosition(human.PlayerSteamId, DateTimeOffset.UtcNow) ?? ""
+                )
+                    .WithStyle("font-size", "15px")
+                    .WithStyle("font-weight", "bold")
+                    .WithStyle("color", "#7FD4FF")
+                    .WithStyle("horizontal-align", "center")
+                    .WithStyle("margin-top", "4px")
+            );
+        }
 
         UI.Panel("duelhud").BuildLayout(p1.Recipients, layout);
         UI.Panel("duelhud").BuildLayout(p2.Recipients, layout);

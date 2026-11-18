@@ -775,14 +775,6 @@ public class PlayerManager
             return;
         }
 
-        bool alreadyQueued = server.RankedQueue
-            .Concat(server.UnrankedQueue)
-            .Any(entry => entry.SteamId == player.PlayerSteamId);
-        if (alreadyQueued)
-        {
-            reply("Leave your current queue with /leave before starting a bot match.");
-            return;
-        }
 
         var playerPawn = player.GetHeroPawn();
         if (playerPawn is not { IsValid: true })
@@ -1115,6 +1107,7 @@ public class PlayerManager
         if (botController == null)
         {
             RestorePracticeBotAiIfIdle();
+            server.ScheduleOnce(1.Seconds(), RemoveUntrackedBots);
 
             reply("The practice bot did not finish loading.");
             return null;
@@ -1563,6 +1556,11 @@ public class PlayerManager
         match = null!;
         return false;
     }
+
+    public bool IsBotMatch(DuelMatch match) =>
+        FindMatchParticipant(match.Player1)?.IsBot == true ||
+        FindMatchParticipant(match.Player2)?.IsBot == true;
+
     public bool IsSpectating(CCitadelPlayerController player) =>
         spectatingMatches.ContainsKey(player.PlayerSteamId);
 
@@ -4519,7 +4517,6 @@ public class PlayerManager
     public HookResult OnPlayerDeath(PlayerDeathEvent args)
     {
         var victim = args.UseridController;
-        var killer = args.AttackerController;
 
         if (victim == null)
             return HookResult.Continue;
@@ -4545,22 +4542,17 @@ public class PlayerManager
 
         SetMatchDisarmed(match, true);
 
-        if (scoreRound && killer != null)
+        if (scoreRound)
         {
-            string killerName = GetMatchParticipantName(killer);
+            string victimName = GetMatchParticipantName(victim);
             if (string.Equals(
-                killerName,
+                victimName,
                 match.Player1,
                 StringComparison.OrdinalIgnoreCase
             ))
-                match.Score1++;
-
-            if (string.Equals(
-                killerName,
-                match.Player2,
-                StringComparison.OrdinalIgnoreCase
-            ))
                 match.Score2++;
+            else
+                match.Score1++;
         }
 
         if (scoreRound)
@@ -4777,6 +4769,7 @@ public class PlayerManager
                 Console.WriteLine(
                     $"[aimLOCK] Could not restore {playerName} to the arena after respawn."
                 );
+                server.Queue.StartCountdown(match);
                 return;
             }
 
@@ -5832,27 +5825,31 @@ public class PlayerManager
             return;
         }
 
-        var recordFound = server.PlayerRecords.Values.FirstOrDefault(record =>
-            string.Equals(
-                record.LastKnownName,
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ));
-
-        if (recordFound == null)
+        // Same lookup as the record admin commands: current names of online players,
+        // saved names, unique prefixes or a SteamID64, and never a guess between two
+        // players who share a name.
+        if (!server.TryResolvePlayerSteamId(
+            targetName,
+            out ulong targetSteamId,
+            out string resolvedName,
+            out string error
+        ))
         {
-            caller.Reply($"No stats found for '{targetName}'.");
+            caller.Reply(error);
             return;
         }
 
-        int totalGames = recordFound.Wins + recordFound.Losses;
+        server.PlayerRecords.TryGetValue(targetSteamId, out var recordFound);
+        int targetWins = recordFound?.Wins ?? 0;
+        int targetLosses = recordFound?.Losses ?? 0;
+        int totalGames = targetWins + targetLosses;
         float targetWinRate = totalGames > 0
-            ? (float)recordFound.Wins / totalGames * 100f
+            ? (float)targetWins / totalGames * 100f
             : 0f;
 
         caller.Reply(
-            $"[{recordFound.LastKnownName}] " +
-            $"Unranked | Record: {recordFound.Wins}-{recordFound.Losses} | " +
+            $"[{resolvedName}] " +
+            $"Unranked | Record: {targetWins}-{targetLosses} | " +
             $"WR: {targetWinRate:F1}%"
         );
     }
