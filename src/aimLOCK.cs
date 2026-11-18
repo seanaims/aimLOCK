@@ -1764,7 +1764,7 @@ public class aimLOCK : DeadworksPluginBase
             percent <= 100f;
     }
 
-    [Command("spawn", Description = "Return to spawn after a 2-second countdown or forfeit an active duel.")]
+    [Command("spawn", Description = "Return to spawn after a 2-second countdown or forfeit an active duel (instant in bot matches).")]
     public void SpawnCommand(Caller caller)
     {
         var player = caller.Player;
@@ -1780,10 +1780,20 @@ public class aimLOCK : DeadworksPluginBase
                 PlayerManager.FindMatchParticipant(activeMatch.Player1)?.IsBot == true ||
                 PlayerManager.FindMatchParticipant(activeMatch.Player2)?.IsBot == true;
 
+            // Bot matches record nothing, so leaving one needs no countdown.
+            if (isBotMatch)
+            {
+                ForfeitToSpawn();
+                return;
+            }
+
             caller.Reply("Returning to spawn in 2...");
             ScheduleOnce(1.Seconds(), () =>
                 caller.Reply("Returning to spawn in 1..."));
-            ScheduleOnce(2.Seconds(), () =>
+            ScheduleOnce(2.Seconds(), ForfeitToSpawn);
+            return;
+
+            void ForfeitToSpawn()
             {
                 if (!player.IsValid)
                     return;
@@ -1804,8 +1814,7 @@ public class aimLOCK : DeadworksPluginBase
                 {
                     caller.Reply("The match is already ending; /spawn was not used.");
                 }
-            });
-            return;
+            }
         }
 
         var pawn = player.GetHeroPawn();
