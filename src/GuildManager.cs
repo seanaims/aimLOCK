@@ -111,7 +111,7 @@ public sealed class GuildManager
     )
     {
         if (arguments.Length == 0)
-            return GetHelp();
+            return GetShortHelp();
 
         string action = arguments[0].Trim().ToLowerInvariant();
         string target = string.Join(" ", arguments.Skip(1)).Trim();
@@ -135,7 +135,7 @@ public sealed class GuildManager
             "invites" => GetInvites(player),
             "list" => ListGuilds(),
             "help" => GetHelp(),
-            _ => GetHelp()
+            _ => GetShortHelp()
         };
     }
 
@@ -618,14 +618,22 @@ public sealed class GuildManager
         }
     }
 
+    // One chat message per line: a single long message is shrunk until it is unreadable.
+    private static string GetShortHelp() =>
+        string.Join(
+            "\n",
+            "/guild create <tag> | join <tag|name> | leave | members | list",
+            "All guild commands: /guild help"
+        );
+
     private static string GetHelp() =>
-        "Guild commands: /guild create <tag>, " +
-        "join <tag|name>, invite <player>, invites, accept [tag|name], " +
-        "decline [tag|name], leave, lookup [tag|name], members [tag|name], " +
-        "list, mode <open|invite>, newtag <tag>, rename <name>, " +
-        "kick <member>, transfer <member>, disband confirm. " +
-        $"Tags are 1-5 letters or numbers and cannot use built-in player tags; " +
-        $"names are 2-{MaxGuildNameCharacters} characters.";
+        string.Join(
+            "\n",
+            "/guild create <tag> | join <tag|name> | leave | disband confirm | list",
+            "invite <player> | invites | accept [tag|name] | decline [tag|name]",
+            "lookup [tag|name] | members [tag|name] | mode <open|invite>",
+            "newtag <tag> | rename <name> | kick <member> | transfer <member>"
+        );
 
     private static CCitadelPlayerController? FindOnlinePlayer(
         string query,
