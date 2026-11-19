@@ -24,6 +24,7 @@ public class UIManager
     private readonly Dictionary<ulong, bool> serverInfoPanelState = new();
     // Last date sent to each player; the date label is only re-sent when it changes.
     private readonly Dictionary<ulong, string> lastSentDate = new();
+    private readonly Dictionary<ulong, string> lastSentTime = new();
 
     public UIManager(aimLOCK server)
     {
@@ -43,6 +44,7 @@ public class UIManager
         // The client lost its panels; forget what we think it has.
         serverInfoPanelState.Remove(controller.PlayerSteamId);
         lastSentDate.Remove(controller.PlayerSteamId);
+        lastSentTime.Remove(controller.PlayerSteamId);
         ReconcileHud(controller);
         // Follow-up pass: only rebuilds if the first one did not leave the server-info
         // panel in a known state; otherwise a resync sent every panel twice.
@@ -84,9 +86,14 @@ public class UIManager
 
     private readonly record struct ServerInfoStats(
         string PlayerCountText,
-        string RankedInfoText,
-        string UnrankedInfoText
+        string RankedQueued,
+        string RankedPlaying,
+        string UnrankedQueued,
+        string UnrankedPlaying
     );
+
+    private const string DateFormat = "MM/dd/yyyy";
+    private const string TimeFormat = "hh:mm tt";
 
     private ServerInfoStats GetServerInfoStats()
         => GetServerInfoStats(Players.GetAll().Count());
@@ -105,22 +112,18 @@ public class UIManager
 
         return new ServerInfoStats(
             $"{playerCount} online",
-            $"Ranked   {server.RankedQueue.Count} queued · {rankedMatches * 2} in match",
-            $"Unranked   {server.UnrankedQueue.Count} queued · {unrankedMatches * 2} in match"
+            server.RankedQueue.Count.ToString(CultureInfo.InvariantCulture),
+            (rankedMatches * 2).ToString(CultureInfo.InvariantCulture),
+            server.UnrankedQueue.Count.ToString(CultureInfo.InvariantCulture),
+            (unrankedMatches * 2).ToString(CultureInfo.InvariantCulture)
         );
     }
 
     private UINode Layout(ulong steamId, ServerInfoStats stats)
     {
         DateTimeOffset localNow = GetLocalTime(steamId);
-        string currentDate = localNow.ToString(
-            "MM/dd/yyyy",
-            CultureInfo.InvariantCulture
-        );
-        string currentTime = localNow.ToString(
-            "hh:mm:ss tt",
-            CultureInfo.InvariantCulture
-        );
+        string currentDate = localNow.ToString(DateFormat, CultureInfo.InvariantCulture);
+        string currentTime = localNow.ToString(TimeFormat, CultureInfo.InvariantCulture);
 
         return UI.Vertical()
             .WithStyle("horizontal-align", "right")
@@ -150,19 +153,27 @@ public class UIManager
                     .WithStyle("horizontal-align", "center")
                     .WithStyle("margin-bottom", "10px"),
 
-                UI.Label(
-                    "rankedinfo",
-                    stats.RankedInfoText
-                )
-                    .WithStyle("font-size", "17px")
-                    .WithStyle("color", "#FFFFFFFF"),
+                UI.Horizontal()
+                    .WithStyle("horizontal-align", "center")
+                    .Add(
+                        QueueTableCell("queuehead", "", QueueNameColumnWidth, header: true),
+                        QueueTableCell("queuedhead", "QUEUED", QueueNumberColumnWidth, header: true),
+                        QueueTableCell("playinghead", "PLAYING", QueueNumberColumnWidth, header: true)
+                    ),
 
-                UI.Label(
-                    "unrankedinfo",
-                    stats.UnrankedInfoText
-                )
-                    .WithStyle("font-size", "17px")
-                    .WithStyle("color", "#FFFFFFFF"),
+                QueueTableRow(
+                    "ranked",
+                    "Ranked",
+                    stats.RankedQueued,
+                    stats.RankedPlaying
+                ),
+
+                QueueTableRow(
+                    "unranked",
+                    "Unranked",
+                    stats.UnrankedQueued,
+                    stats.UnrankedPlaying
+                ),
 
                 UI.Label("queuestatus", GetQueueStatus(steamId, DateTimeOffset.UtcNow))
                     .WithStyle("font-size", "17px")
@@ -186,6 +197,36 @@ public class UIManager
                     )
             );
     }
+
+    /* Queue table: fixed column widths keep the numbers lined up */
+    private const string QueueNameColumnWidth = "100px";
+    private const string QueueNumberColumnWidth = "80px";
+
+    private static UINode QueueTableRow(
+        string idPrefix,
+        string name,
+        string queued,
+        string playing
+    ) =>
+        UI.Horizontal()
+            .WithStyle("horizontal-align", "center")
+            .Add(
+                QueueTableCell(idPrefix + "name", name, QueueNameColumnWidth),
+                QueueTableCell(idPrefix + "queued", queued, QueueNumberColumnWidth),
+                QueueTableCell(idPrefix + "playing", playing, QueueNumberColumnWidth)
+            );
+
+    private static UINode QueueTableCell(
+        string id,
+        string text,
+        string width,
+        bool header = false
+    ) =>
+        UI.Label(id, text)
+            .WithStyle("width", width)
+            .WithStyle("font-size", header ? "12px" : "17px")
+            .WithStyle("color", header ? "#888888" : "#FFFFFFFF")
+            .WithStyle("text-align", width == QueueNameColumnWidth ? "left" : "center");
 
     private string GetQueueStatus(ulong steamId, DateTimeOffset now) =>
         GetQueuePosition(steamId, now) ?? "/join ranked or /join unranked";
@@ -260,20 +301,20 @@ public class UIManager
 
             DateTimeOffset localNow = GetLocalTime(steamId, utcNow);
             var recipients = controller.Recipients;
-            string date = localNow.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
+            string date = localNow.ToString(DateFormat, CultureInfo.InvariantCulture);
             if (!lastSentDate.TryGetValue(steamId, out string? sentDate) || sentDate != date)
             {
                 UI.Panel("queuepanel").Set(recipients, "date", date);
                 lastSentDate[steamId] = date;
             }
 
-            // The clock is cosmetic: send it unreliably so it never queues up behind
-            // (or delays) important UI traffic; the next second replaces it anyway.
-            UI.Panel("queuepanel").SetUnreliable(
-                recipients,
-                "time",
-                localNow.ToString("hh:mm:ss tt", CultureInfo.InvariantCulture)
-            );
+            // The clock shows minutes, so it is only sent when the minute changes.
+            string time = localNow.ToString(TimeFormat, CultureInfo.InvariantCulture);
+            if (!lastSentTime.TryGetValue(steamId, out string? sentTime) || sentTime != time)
+            {
+                UI.Panel("queuepanel").Set(recipients, "time", time);
+                lastSentTime[steamId] = time;
+            }
             UI.Panel("queuepanel").Set(
                 recipients,
                 "queuestatus",
@@ -300,8 +341,10 @@ public class UIManager
                 {
                     // Panel already on screen: update only the changing labels.
                     panel.Set(controller.Recipients, "playercount", stats.PlayerCountText);
-                    panel.Set(controller.Recipients, "rankedinfo", stats.RankedInfoText);
-                    panel.Set(controller.Recipients, "unrankedinfo", stats.UnrankedInfoText);
+                    panel.Set(controller.Recipients, "rankedqueued", stats.RankedQueued);
+                    panel.Set(controller.Recipients, "rankedplaying", stats.RankedPlaying);
+                    panel.Set(controller.Recipients, "unrankedqueued", stats.UnrankedQueued);
+                    panel.Set(controller.Recipients, "unrankedplaying", stats.UnrankedPlaying);
                     panel.Set(
                         controller.Recipients,
                         "queuestatus",
@@ -454,6 +497,7 @@ public class UIManager
         panel.BuildLayout(player.Recipients, Layout(steamId, GetServerInfoStats()));
         serverInfoPanelState[steamId] = true;
         lastSentDate.Remove(steamId);
+        lastSentTime.Remove(steamId);
     }
 
     private void ShowServerInfo(
@@ -475,6 +519,7 @@ public class UIManager
         panel.BuildLayout(player.Recipients, Layout(steamId, stats));
         serverInfoPanelState[steamId] = true;
         lastSentDate.Remove(steamId);
+        lastSentTime.Remove(steamId);
     }
 
     /* Duel Scoreboard */
