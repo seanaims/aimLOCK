@@ -142,15 +142,7 @@ public partial class aimLOCK
             return true;
         }
 
-        arenaIndex = Array.FindIndex(
-            DuelArenaNames,
-            name => string.Equals(
-                name,
-                selection.Trim(),
-                StringComparison.OrdinalIgnoreCase
-            )
-        );
-        return arenaIndex >= 0 && arenaIndex < DuelLocations.Length;
+        return TryParseDuelArenaName(selection, out arenaIndex);
     }
 
     private bool TryParseDuelArenaName(
@@ -217,6 +209,16 @@ public partial class aimLOCK
             return;
         }
 
+        TeleportToArena(caller, player, pawn, arenaIndex);
+    }
+
+    private void TeleportToArena(
+        Caller caller,
+        CCitadelPlayerController player,
+        CCitadelPlayerPawn pawn,
+        int arenaIndex
+    )
+    {
         Vector3 destination =
             PlayerManager.GetDuelArenaCenter(DuelLocations[arenaIndex]);
         pawn.Teleport(
@@ -293,46 +295,12 @@ public partial class aimLOCK
                 return;
             }
 
-            Vector3 destination =
-                PlayerManager.GetDuelArenaCenter(DuelLocations[arenaIndex]);
-            sourcePawn.Teleport(
-                destination,
-                null,
-                null
-            );
-            PlayerManager.RegisterArenaBoundaryPosition(player, destination);
-            caller.Reply(
-                $"Teleported to arena {arenaIndex + 1} ({DuelArenaNames[arenaIndex]})."
-            );
+            TeleportToArena(caller, player, sourcePawn, arenaIndex);
             return;
         }
 
         string targetName = string.Join(" ", arguments).Trim();
-        var onlinePlayers = Players.GetAll()
-            .Where(target =>
-                !target.IsBot &&
-                !string.Equals(
-                    target.PlayerName,
-                    player.PlayerName,
-                    StringComparison.OrdinalIgnoreCase
-                )
-            )
-            .ToArray();
-        var exactMatches = onlinePlayers
-            .Where(target => string.Equals(
-                target.PlayerName,
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ))
-            .ToArray();
-        var matches = exactMatches.Length > 0
-            ? exactMatches
-            : onlinePlayers
-                .Where(target => target.PlayerName.StartsWith(
-                    targetName,
-                    StringComparison.OrdinalIgnoreCase
-                ))
-                .ToArray();
+        var matches = FindTeleportTargets(player, targetName);
 
         if (matches.Length == 0)
         {
@@ -362,5 +330,39 @@ public partial class aimLOCK
         );
         PlayerManager.RegisterArenaBoundaryPosition(player, playerDestination);
         caller.Reply($"Teleported to {matches[0].PlayerName}.");
+    }
+
+    /* Other human players by name: exact matches win, otherwise names starting with the text */
+    private static CCitadelPlayerController[] FindTeleportTargets(
+        CCitadelPlayerController player,
+        string targetName
+    )
+    {
+        var onlinePlayers = Players.GetAll()
+            .Where(target =>
+                !target.IsBot &&
+                !string.Equals(
+                    target.PlayerName,
+                    player.PlayerName,
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            .ToArray();
+        var exactMatches = onlinePlayers
+            .Where(target => string.Equals(
+                target.PlayerName,
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            ))
+            .ToArray();
+        if (exactMatches.Length > 0)
+            return exactMatches;
+
+        return onlinePlayers
+            .Where(target => target.PlayerName.StartsWith(
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            ))
+            .ToArray();
     }
 }
