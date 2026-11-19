@@ -45,8 +45,12 @@ public partial class aimLOCK : DeadworksPluginBase
 
     public const int WIN_SCORE = 6;
     public const float DUEL_SPAWN_OFFSET = 65f;
-    private const string WelcomeMessage =
-        "[aimLOCK] Welcome! This server runs 1v1 duels. Join /join ranked to gain Elo or /join unranked for casual matches; use /leave to exit a queue. See /help 1 for queue commands.";
+    // Short lines: the game shrinks a long chat message until it is unreadable.
+    private static readonly string[] WelcomeMessages =
+    {
+        "[aimLOCK] Welcome! This server runs 1v1 duels.",
+        "/join ranked for Elo, /join unranked for casual. More: /help",
+    };
 
     public readonly Vector3[] DuelLocations =
     {

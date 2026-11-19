@@ -157,7 +157,8 @@ public partial class aimLOCK
                 if (!connectedPlayer.IsValid)
                     return;
 
-                Chat.PrintToChat(connectedPlayer, WelcomeMessage);
+                foreach (string message in WelcomeMessages)
+                    Chat.PrintToChat(connectedPlayer, message);
                 if (connectedPlayer.IsBot)
                     return;
 
