@@ -136,7 +136,6 @@ public partial class PlayerManager
             return;
         }
 
-
         var playerPawn = player.GetHeroPawn();
         if (playerPawn is not { IsValid: true })
         {
@@ -182,82 +181,116 @@ public partial class PlayerManager
         RegisterArenaBoundaryPosition(player, playerSpot);
         reservedBotArenas.Add(arenaIndex);
         pendingBotMatchPlayers.Add(player.EntityHandle);
-        uint playerHandle = player.EntityHandle;
 
-        server.ScheduleOnce(PracticeBotSpawnDelaySeconds.Seconds(), () =>
+        var request = new BotMatchRequest(
+            player,
+            player.EntityHandle,
+            arenaIndex,
+            difficulty,
+            selectedProfile,
+            reply
+        );
+        server.ScheduleOnce(
+            PracticeBotSpawnDelaySeconds.Seconds(),
+            () => SpawnBotForMatch(request)
+        );
+    }
+
+    private sealed record BotMatchRequest(
+        CCitadelPlayerController Player,
+        uint PlayerHandle,
+        int ArenaIndex,
+        string? Difficulty,
+        PracticeBotDifficultyProfile Profile,
+        Action<string> Reply
+    );
+
+    private bool IsInMatchOrSpectating(CCitadelPlayerController player) =>
+        server.ActiveMatches.ContainsKey(GetMatchParticipantName(player)) ||
+        IsSpectating(player);
+
+    /* Step 2: the player is in the arena, create the bot next to them */
+    private void SpawnBotForMatch(BotMatchRequest request)
+    {
+        var player = request.Player;
+        var currentPawn = player.IsValid ? player.GetHeroPawn() : null;
+        if (
+            currentPawn is not { IsValid: true, IsAlive: true } ||
+            IsInMatchOrSpectating(player)
+        )
         {
-            var currentPawn = player.IsValid ? player.GetHeroPawn() : null;
-            if (
-                currentPawn is not { IsValid: true, IsAlive: true } ||
-                server.ActiveMatches.ContainsKey(GetMatchParticipantName(player)) ||
-                IsSpectating(player)
-            )
-            {
-                ReleasePendingBotMatch(playerHandle, arenaIndex);
-                return;
-            }
+            ReleasePendingBotMatch(request.PlayerHandle, request.ArenaIndex);
+            return;
+        }
 
-            var botController = CreatePracticeBot(
-                player,
-                currentPawn,
-                arena,
-                selectedProfile,
-                reply
-            );
-            if (botController == null)
-            {
-                ReleasePendingBotMatch(playerHandle, arenaIndex);
-                return;
-            }
+        var botController = CreatePracticeBot(
+            player,
+            currentPawn,
+            server.DuelLocations[request.ArenaIndex],
+            request.Profile,
+            request.Reply
+        );
+        if (botController == null)
+        {
+            ReleasePendingBotMatch(request.PlayerHandle, request.ArenaIndex);
+            return;
+        }
 
-            // Creating the bot is the heaviest frame of a bot match: the game builds the
-            // bot, then loads its hero again a few frames later. The match setup (items,
-            // health, Fixation for both players) waits until that hero load is done, so
-            // the work lands on separate frames and is done once instead of twice.
-            uint botHandle = botController.EntityHandle;
-            pendingBotReservations[botHandle] = (playerHandle, arenaIndex);
-            pendingBotMatchStarts[botHandle] = () =>
-            {
-                ReleasePendingBotMatch(playerHandle, arenaIndex);
-                if (
-                    !player.IsValid ||
-                    !botController.IsValid ||
-                    server.ActiveMatches.ContainsKey(GetMatchParticipantName(player)) ||
-                    IsSpectating(player)
-                )
-                {
-                    RemovePracticeBot(botHandle);
-                    return;
-                }
+        // Creating the bot is the heaviest frame of a bot match: the game builds the
+        // bot, then loads its hero again a few frames later. The match setup (items,
+        // health, Fixation for both players) waits until that hero load is done, so
+        // the work lands on separate frames and is done once instead of twice.
+        uint botHandle = botController.EntityHandle;
+        pendingBotReservations[botHandle] = (request.PlayerHandle, request.ArenaIndex);
+        pendingBotMatchStarts[botHandle] =
+            () => StartMatchWithBot(request, botController, botHandle);
 
-                // Named only now: the bot's hero reload resets its name.
-                SetPracticeBotDifficultyName(botController, difficulty);
-                if (!server.Queue.StartBotMatch(
-                    player,
-                    botController,
-                    arena,
-                    reply,
-                    alreadyInArena: true
-                ))
-                {
-                    RemovePracticeBot(botHandle);
-                    return;
-                }
+        // Fallback in case the hero-loaded hook never fires for the bot.
+        server.ScheduleOnce(
+            PendingBotMatchTimeoutSeconds.Seconds(),
+            () => RunPendingBotMatchStart(botHandle)
+        );
+    }
 
-                // The bot's Fixation, once the match setup is in.
-                server.ScheduleOnce(0.25.Seconds(), () =>
-                {
-                    var botPawn = botController.IsValid ? botController.GetHeroPawn() : null;
-                    if (botPawn is { IsValid: true } && botPawn.HeroID == Heroes.Haze)
-                        ApplyHazeLoadout(botPawn, force: true);
-                });
-            };
+    /* Step 3: the bot's hero has loaded, start the match */
+    private void StartMatchWithBot(
+        BotMatchRequest request,
+        CCitadelPlayerController botController,
+        uint botHandle
+    )
+    {
+        var player = request.Player;
+        ReleasePendingBotMatch(request.PlayerHandle, request.ArenaIndex);
+        if (
+            !player.IsValid ||
+            !botController.IsValid ||
+            IsInMatchOrSpectating(player)
+        )
+        {
+            RemovePracticeBot(botHandle);
+            return;
+        }
 
-            // Fallback in case the hero-loaded hook never fires for the bot.
-            server.ScheduleOnce(
-                PendingBotMatchTimeoutSeconds.Seconds(),
-                () => RunPendingBotMatchStart(botHandle)
-            );
+        // Named only now: the bot's hero reload resets its name.
+        SetPracticeBotDifficultyName(botController, request.Difficulty);
+        if (!server.Queue.StartBotMatch(
+            player,
+            botController,
+            server.DuelLocations[request.ArenaIndex],
+            request.Reply,
+            alreadyInArena: true
+        ))
+        {
+            RemovePracticeBot(botHandle);
+            return;
+        }
+
+        // The bot's Fixation, once the match setup is in.
+        server.ScheduleOnce(0.25.Seconds(), () =>
+        {
+            var botPawn = botController.IsValid ? botController.GetHeroPawn() : null;
+            if (botPawn is { IsValid: true } && botPawn.HeroID == Heroes.Haze)
+                ApplyHazeLoadout(botPawn, force: true);
         });
     }
 
