@@ -1,6 +1,5 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Numerics;
@@ -23,43 +22,18 @@ public enum PlayerTag
 
 public sealed class PlayerTagManager
 {
-    private sealed class TagOrientationRefresh
-    {
-        public CCitadelPlayerController Player { get; }
-        public CPointWorldText BackgroundText { get; }
-        public CPointWorldText[] TagEntities { get; }
-        public TagSegment[] Segments { get; }
-        public int Version { get; }
-        public System.Action Callback { get; }
-
-        public TagOrientationRefresh(
-            PlayerTagManager manager,
-            CCitadelPlayerController player,
-            CPointWorldText backgroundText,
-            CPointWorldText[] tagEntities,
-            TagSegment[] segments,
-            int version)
-        {
-            Player = player;
-            BackgroundText = backgroundText;
-            TagEntities = tagEntities;
-            Segments = segments;
-            Version = version;
-            Callback = () => manager.RefreshTagOrientation(this);
-        }
-    }
-
     private const string EntityNamePrefix = "aimlock_player_tag_";
     private const int PawnRetries = 8;
     private const float TagHeight = 100f;
     private const float FontSize = 64f;
     private const float WorldUnitsPerPx = 0.2f;
     private const float TagBackgroundPadding = 8f;
-    private const float AimlockTagBackgroundExtraPadding = 16f;
     private const int TagBackgroundRows = 1;
     private const byte TagBackgroundAlpha = 160;
     private const char TagBackgroundGlyph = '\u2588';
-    private static readonly Vector3 TextAngles = new(180f, 90f, 270f);
+    // Suffixes of the entity names, used to find stale entities after a reload.
+    private const int BackgroundEntityIndex = -1;
+    private const int TextEntityIndex = 0;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -82,17 +56,11 @@ public sealed class PlayerTagManager
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ulong, PlayerTag> stableTags = new();
     private readonly Dictionary<ulong, HashSet<PlayerTag>> grantedTags = new();
-    private readonly Dictionary<ulong, CPointWorldText[]> activeTags = new();
+    private readonly Dictionary<ulong, CPointWorldText> activeTags = new();
     private readonly Dictionary<ulong, CPointWorldText> activeTagBackgrounds = new();
     private readonly Dictionary<ulong, PlayerTag> activeTagValues = new();
     private readonly Dictionary<ulong, uint> activeTagPawnHandles = new();
-    private readonly Dictionary<ulong, (Vector3 Position, Vector3 Angles)>
-        lastTagTransforms = new();
     private readonly Dictionary<ulong, int> refreshVersions = new();
-    // Camera yaw each tag was last oriented to. Tags are parented to the pawn, so they
-    // follow it automatically; they only need re-orienting when the view turns.
-    private readonly Dictionary<ulong, float> lastTagYaw = new();
-    private const float TagReorientThresholdDegrees = 1.5f;
     private readonly HashSet<string> hiddenTags =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<ulong> hiddenSteamIds = new();
@@ -285,19 +253,12 @@ public sealed class PlayerTagManager
 
         EnsureStaleTagEntitiesRemoved();
         ulong steamId = player.PlayerSteamId;
-        string playerName = player.PlayerName;
 
         if (
             hiddenSteamIds.Contains(steamId) ||
-            !stableTags.TryGetValue(steamId, out PlayerTag tag)
+            !stableTags.TryGetValue(steamId, out PlayerTag tag) ||
+            GetTagStyle(tag, steamId) is not { } style
         )
-        {
-            RemoveTagEntity(steamId);
-            return;
-        }
-
-        TagSegment[]? segments = GetTagSegments(tag, steamId);
-        if (segments == null)
         {
             RemoveTagEntity(steamId);
             return;
@@ -312,53 +273,11 @@ public sealed class PlayerTagManager
             return;
         }
 
-        if (
-            !TryGetReusableTagEntities(
-                steamId,
-                tag,
-                pawn,
-                out CPointWorldText? background,
-                out CPointWorldText[]? tagEntities
-            )
-        )
-        {
-            RemoveTagEntity(steamId);
-            if (
-                !TryCreateTagEntities(
-                    steamId,
-                    playerName,
-                    pawn,
-                    tag,
-                    segments,
-                    out background,
-                    out tagEntities
-                )
-            )
-            {
-                return;
-            }
+        if (HasCurrentTagEntities(steamId, tag, pawn))
+            return;
 
-            activeTags[steamId] = tagEntities;
-            activeTagBackgrounds[steamId] = background;
-            activeTagValues[steamId] = tag;
-            activeTagPawnHandles[steamId] = pawn.EntityHandle;
-        }
-
-        UpdateTagTransforms(
-            steamId,
-            pawn,
-            background,
-            tagEntities,
-            segments
-        );
-        ScheduleTagOrientationRefresh(new TagOrientationRefresh(
-            this,
-            player,
-            background,
-            tagEntities,
-            segments,
-            version
-        ));
+        RemoveTagEntity(steamId);
+        CreateTagEntities(steamId, player.PlayerName, pawn, tag, style);
     }
 
     /* The hero pawn is not ready yet: try again unless a newer refresh started */
@@ -382,246 +301,113 @@ public sealed class PlayerTagManager
     }
 
     /* The same tag on the same pawn keeps its entities; guild tags are always rebuilt */
-    private bool TryGetReusableTagEntities(
+    private bool HasCurrentTagEntities(
         ulong steamId,
         PlayerTag tag,
-        CCitadelPlayerPawn pawn,
-        [NotNullWhen(true)] out CPointWorldText? background,
-        [NotNullWhen(true)] out CPointWorldText[]? tagEntities
-    )
-    {
-        background = null;
-        tagEntities = null;
-        return
-            activeTagValues.TryGetValue(steamId, out PlayerTag activeTag) &&
-            activeTag == tag &&
-            tag != PlayerTag.GuildTag &&
-            activeTagPawnHandles.TryGetValue(steamId, out uint activePawnHandle) &&
-            activePawnHandle == pawn.EntityHandle &&
-            activeTagBackgrounds.TryGetValue(steamId, out background) &&
-            background.IsValid &&
-            activeTags.TryGetValue(steamId, out tagEntities) &&
-            AreTagEntitiesValid(tagEntities);
-    }
+        CCitadelPlayerPawn pawn
+    ) =>
+        tag != PlayerTag.GuildTag &&
+        activeTagValues.TryGetValue(steamId, out PlayerTag activeTag) &&
+        activeTag == tag &&
+        activeTagPawnHandles.TryGetValue(steamId, out uint activePawnHandle) &&
+        activePawnHandle == pawn.EntityHandle &&
+        activeTagBackgrounds.TryGetValue(steamId, out var background) &&
+        background.IsValid &&
+        activeTags.TryGetValue(steamId, out var text) &&
+        text.IsValid;
 
-    private static bool TryCreateTagEntities(
+    private void CreateTagEntities(
         ulong steamId,
         string playerName,
         CCitadelPlayerPawn pawn,
         PlayerTag tag,
-        TagSegment[] segments,
-        [NotNullWhen(true)] out CPointWorldText? background,
-        [NotNullWhen(true)] out CPointWorldText[]? tagEntities
+        TagStyle style
     )
     {
-        tagEntities = null;
-        background = CreateTagBackground(
+        var background = CreateOverheadText(
             steamId,
+            BackgroundEntityIndex,
             pawn,
-            tag,
-            segments
+            BuildBackgroundRow(style.Text),
+            (uint)TagBackgroundAlpha << 24
         );
         if (background == null)
         {
             Console.WriteLine(
                 $"[aimLOCK] Failed to create the background for {playerName}'s overhead tag."
             );
-            return false;
-        }
-
-        var createdTags = new List<CPointWorldText>(segments.Length);
-        for (int i = 0; i < segments.Length; i++)
-        {
-            TagSegment segment = segments[i];
-            var tagEntity = CPointWorldText.Create(
-                segment.Text,
-                pawn.Position + new Vector3(0f, 0f, TagHeight),
-                fontSize: FontSize,
-                worldUnitsPerPx: WorldUnitsPerPx,
-                fontName: "RetailDemo-Bold",
-                reorientMode: 0
-            );
-
-            if (tagEntity == null)
-            {
-                background.Remove();
-                foreach (var createdTag in createdTags)
-                    createdTag.Remove();
-
-                Console.WriteLine(
-                    $"[aimLOCK] Failed to create the overhead tag for {playerName}."
-                );
-                return false;
-            }
-
-            tagEntity.ColorABGR = segment.Color;
-            tagEntity.JustifyHorizontal = HorizontalJustify.Center;
-            tagEntity.AcceptInput(
-                "AddOutput",
-                null,
-                null,
-                $"targetname {GetEntityName(steamId, i)}"
-            );
-            tagEntity.SetParent(pawn);
-            createdTags.Add(tagEntity);
-        }
-
-        tagEntities = createdTags.ToArray();
-        return true;
-    }
-
-    private void ScheduleTagOrientationRefresh(
-        TagOrientationRefresh refresh)
-    {
-        server.ScheduleOnce(0.1.Seconds(), refresh.Callback);
-    }
-
-    private void RefreshTagOrientation(TagOrientationRefresh refresh)
-    {
-        ulong steamId = refresh.Player.PlayerSteamId;
-        if (
-            !refresh.Player.IsValid ||
-            !refresh.BackgroundText.IsValid ||
-            !AreTagEntitiesValid(refresh.TagEntities) ||
-            !refreshVersions.TryGetValue(steamId, out int activeVersion) ||
-            activeVersion != refresh.Version ||
-            !activeTags.TryGetValue(steamId, out var currentTags) ||
-            !ReferenceEquals(currentTags, refresh.TagEntities) ||
-            !activeTagBackgrounds.TryGetValue(
-                steamId,
-                out var currentBackground
-            ) ||
-            !ReferenceEquals(currentBackground, refresh.BackgroundText)
-        )
-        {
             return;
         }
 
-        var pawn = refresh.Player.GetHeroPawn();
-        if (pawn == null || !pawn.IsValid)
-        {
-            RefreshPlayerTag(refresh.Player);
-            return;
-        }
+        background.Fullbright = true;
+        background.DepthOffset = -1f;
 
-        UpdateTagTransforms(
+        var text = CreateOverheadText(
             steamId,
+            TextEntityIndex,
             pawn,
-            refresh.BackgroundText,
-            refresh.TagEntities,
-            refresh.Segments
+            style.Text,
+            style.Color
         );
-        ScheduleTagOrientationRefresh(refresh);
-    }
-
-    private static bool AreTagEntitiesValid(CPointWorldText[] tagEntities)
-    {
-        for (int i = 0; i < tagEntities.Length; i++)
+        if (text == null)
         {
-            if (!tagEntities[i].IsValid)
-                return false;
-        }
-
-        return true;
-    }
-
-    private void UpdateTagTransforms(
-        ulong steamId,
-        CCitadelPlayerPawn pawn,
-        CPointWorldText backgroundText,
-        CPointWorldText[] tagEntities,
-        TagSegment[] segments)
-    {
-        Vector3 right = GetHorizontalRight(pawn.CameraAngles.Y);
-        Vector3 headPosition =
-            pawn.Position + new Vector3(0f, 0f, TagHeight);
-        Vector3 tagAngles = GetTagAngles(pawn.CameraAngles);
-        // The tag entities are parented to the pawn, so they follow it on their own.
-        // They only need re-orienting when the view turns: comparing the exact position
-        // re-teleported every tag entity 10 times a second whenever its player moved.
-        float yaw = pawn.CameraAngles.Y;
-        if (
-            lastTagTransforms.ContainsKey(steamId) &&
-            lastTagYaw.TryGetValue(steamId, out float previousYaw) &&
-            MathF.Abs(DeltaYaw(yaw, previousYaw)) < TagReorientThresholdDegrees
-        )
-        {
+            background.Remove();
+            Console.WriteLine(
+                $"[aimLOCK] Failed to create the overhead tag for {playerName}."
+            );
             return;
         }
 
-        lastTagTransforms[steamId] = (headPosition, tagAngles);
-        lastTagYaw[steamId] = yaw;
-
-        backgroundText.Teleport(
-            position: headPosition,
-            angles: tagAngles
-        );
-        for (int i = 0; i < tagEntities.Length; i++)
-        {
-            tagEntities[i].Teleport(
-                position: headPosition + right * segments[i].HorizontalOffset,
-                angles: tagAngles
-            );
-        }
+        activeTags[steamId] = text;
+        activeTagBackgrounds[steamId] = background;
+        activeTagValues[steamId] = tag;
+        activeTagPawnHandles[steamId] = pawn.EntityHandle;
     }
 
-    private static CPointWorldText? CreateTagBackground(
+    /* Text above the pawn's head: it follows the pawn and turns to face every viewer */
+    private static CPointWorldText? CreateOverheadText(
         ulong steamId,
+        int entityIndex,
         CCitadelPlayerPawn pawn,
-        PlayerTag tag,
-        TagSegment[] segments
+        string text,
+        uint color
     )
     {
-        float characterWidth = FontSize * WorldUnitsPerPx * 0.41f;
-        float left = segments.Min(segment =>
-            segment.HorizontalOffset - segment.Text.Length * characterWidth / 2f
-        );
-        float right = segments.Max(segment =>
-            segment.HorizontalOffset + segment.Text.Length * characterWidth / 2f
-        );
-        float glyphWidth = FontSize * WorldUnitsPerPx;
-        float horizontalPadding = TagBackgroundPadding +
-            (tag == PlayerTag.Aimlock ? AimlockTagBackgroundExtraPadding : 0f);
-        int glyphCount = Math.Max(
-            1,
-            (int)Math.Ceiling(
-                (right - left + horizontalPadding * 2f) / glyphWidth
-            )
-        );
-        string row = new(TagBackgroundGlyph, glyphCount);
-        string message = string.Join(
-            "\n",
-            Enumerable.Repeat(row, TagBackgroundRows)
-        );
-        Vector3 headPosition =
-            pawn.Position + new Vector3(0f, 0f, TagHeight);
-        var backgroundText = CPointWorldText.Create(
-            message,
-            headPosition,
+        var entity = CPointWorldText.Create(
+            text,
+            pawn.Position + new Vector3(0f, 0f, TagHeight),
             fontSize: FontSize,
             worldUnitsPerPx: WorldUnitsPerPx,
             fontName: "RetailDemo-Bold",
-            reorientMode: 0
+            reorientMode: 1
         );
-        if (backgroundText == null)
+        if (entity == null)
             return null;
 
-        backgroundText.ColorABGR = (uint)TagBackgroundAlpha << 24;
-        backgroundText.Fullbright = true;
-        backgroundText.DepthOffset = -1f;
-        backgroundText.JustifyHorizontal = HorizontalJustify.Center;
-        backgroundText.AcceptInput(
+        entity.ColorABGR = color;
+        entity.JustifyHorizontal = HorizontalJustify.Center;
+        entity.AcceptInput(
             "AddOutput",
             null,
             null,
-            $"targetname {GetEntityName(steamId, -1)}"
+            $"targetname {GetEntityName(steamId, entityIndex)}"
         );
-        backgroundText.SetParent(pawn);
-        backgroundText.Teleport(
-            position: headPosition,
-            angles: GetTagAngles(pawn.CameraAngles)
+        entity.SetParent(pawn);
+        return entity;
+    }
+
+    /* A row of block glyphs wide enough to sit behind the tag text */
+    private static string BuildBackgroundRow(string tagText)
+    {
+        // 0.41 is the average character width of the font relative to its size.
+        float textWidth = tagText.Length * FontSize * WorldUnitsPerPx * 0.41f;
+        float glyphWidth = FontSize * WorldUnitsPerPx;
+        int glyphCount = Math.Max(
+            1,
+            (int)Math.Ceiling((textWidth + TagBackgroundPadding * 2f) / glyphWidth)
         );
-        return backgroundText;
+        string row = new(TagBackgroundGlyph, glyphCount);
+        return string.Join("\n", Enumerable.Repeat(row, TagBackgroundRows));
     }
 
     public static bool TryParseTag(string tagName, out PlayerTag tag)
@@ -653,93 +439,27 @@ public sealed class PlayerTagManager
             _ => throw new ArgumentOutOfRangeException(nameof(tag))
         };
 
-    private TagSegment[]? GetTagSegments(PlayerTag tag, ulong steamId)
+    private TagStyle? GetTagStyle(PlayerTag tag, ulong steamId)
     {
         if (tag == PlayerTag.GuildTag)
         {
             string? guildTag = server.GuildManager.GetMemberTag(steamId);
             return string.IsNullOrWhiteSpace(guildTag)
                 ? null
-                : new[]
-                {
-                    new TagSegment($"[{guildTag}]", 0xFFFFFFFF, 0f)
-                };
+                : new TagStyle($"[{guildTag}]", 0xFFFFFFFF);
         }
 
-        if (tag == PlayerTag.Aimlock)
+        // Colors are ABGR.
+        return tag switch
         {
-            float characterWidth = FontSize * WorldUnitsPerPx * 0.41f;
-            float aimlockWidth = 7f * characterWidth;
-            float domainWidth = 4f * characterWidth;
-            float bracketWidth = characterWidth * 0.5f;
-            float fullWidth = bracketWidth + aimlockWidth + domainWidth + bracketWidth;
-
-            // World-text's local horizontal axis runs opposite the camera-right axis.
-            return new[]
-            {
-                new TagSegment(
-                    "[",
-                    0xFF555555,
-                    fullWidth / 2f - bracketWidth / 2f
-                ),
-                new TagSegment(
-                    "aimlock",
-                    0xFFFFFFFF,
-                    fullWidth / 2f - bracketWidth - aimlockWidth / 2f
-                ),
-                new TagSegment(
-                    ".xyz",
-                    0xFF555555,
-                    fullWidth / 2f - bracketWidth - aimlockWidth -
-                    domainWidth / 2f
-                ),
-                new TagSegment(
-                    "]",
-                    0xFF555555,
-                    -fullWidth / 2f + bracketWidth / 2f
-                )
-            };
-        }
-
-        (string text, uint color) = tag switch
-        {
-            PlayerTag.YouTube => ("[YT]", 0xFF0000FF),
-            PlayerTag.Twitch => ("[TTV]", 0xFFF755A8),
-            PlayerTag.Owner => ("[OWNER]", 0xFF000000),
-            PlayerTag.Staff => ("[STAFF]", 0xFF00FFFF),
-            PlayerTag.Supporter => ("[♥]", 0xFFB469FF),
+            PlayerTag.YouTube => new TagStyle("[YT]", 0xFF0000FF),
+            PlayerTag.Twitch => new TagStyle("[TTV]", 0xFFF755A8),
+            PlayerTag.Owner => new TagStyle("[OWNER]", 0xFF00D7FF),
+            PlayerTag.Staff => new TagStyle("[STAFF]", 0xFF00FFFF),
+            PlayerTag.Aimlock => new TagStyle("[aimlock.xyz]", 0xFFFFFFFF),
+            PlayerTag.Supporter => new TagStyle("[♥]", 0xFFB469FF),
             _ => throw new ArgumentOutOfRangeException(nameof(tag))
         };
-        return new[] { new TagSegment(text, color, 0f) };
-    }
-
-    private static Vector3 GetHorizontalRight(float yaw)
-    {
-        float radians = yaw * (MathF.PI / 180f);
-        return new Vector3(-MathF.Sin(radians), MathF.Cos(radians), 0f);
-    }
-
-    private static Vector3 GetTagAngles(Vector3 cameraAngles) =>
-        new(
-            TextAngles.X,
-            NormalizeYaw(cameraAngles.Y + TextAngles.Y),
-            TextAngles.Z
-        );
-
-    private static float DeltaYaw(float a, float b)
-    {
-        float delta = (a - b) % 360f;
-        if (delta > 180f)
-            delta -= 360f;
-        else if (delta < -180f)
-            delta += 360f;
-        return delta;
-    }
-
-    private static float NormalizeYaw(float yaw)
-    {
-        yaw %= 360f;
-        return yaw < 0f ? yaw + 360f : yaw;
     }
 
     private void RefreshOnlinePlayer(ulong steamId)
@@ -870,19 +590,11 @@ public sealed class PlayerTagManager
             backgroundText.Remove();
         }
 
-        if (activeTags.Remove(steamId, out var tagEntities))
-        {
-            foreach (var tagEntity in tagEntities)
-            {
-                if (tagEntity.IsValid)
-                    tagEntity.Remove();
-            }
-        }
+        if (activeTags.Remove(steamId, out var text) && text.IsValid)
+            text.Remove();
 
         activeTagValues.Remove(steamId);
         activeTagPawnHandles.Remove(steamId);
-        lastTagTransforms.Remove(steamId);
-        lastTagYaw.Remove(steamId);
     }
 
     private void EnsureStaleTagEntitiesRemoved()
@@ -895,8 +607,6 @@ public sealed class PlayerTagManager
         activeTagBackgrounds.Clear();
         activeTagValues.Clear();
         activeTagPawnHandles.Clear();
-        lastTagTransforms.Clear();
-        lastTagYaw.Clear();
         staleTagEntitiesRemoved = true;
     }
 
@@ -921,11 +631,7 @@ public sealed class PlayerTagManager
     private static string GetEntityNamePrefix(ulong steamId) =>
         EntityNamePrefix + steamId + "_";
 
-    private readonly record struct TagSegment(
-        string Text,
-        uint Color,
-        float HorizontalOffset
-    );
+    private readonly record struct TagStyle(string Text, uint Color);
 
     private void ReplaceStableTags(Dictionary<ulong, PlayerTag> updatedTags)
     {
