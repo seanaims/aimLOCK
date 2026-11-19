@@ -168,6 +168,7 @@ public class UIManager
                     .WithStyle("font-size", "17px")
                     .WithStyle("font-weight", "bold")
                     .WithStyle("color", "#7FD4FF")
+                    .WithStyle("horizontal-align", "center")
                     .WithStyle("margin-top", "10px"),
 
                 UI.Horizontal()
