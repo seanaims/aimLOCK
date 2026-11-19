@@ -66,6 +66,81 @@ public partial class PlayerManager
     private static readonly Dictionary<string, float> ZeroHealthRegenValues =
         DuelHealthRegenerationProperties.ToDictionary(name => name, _ => 0f);
 
+    /* Duel items: what a player owned before the match is restored after it */
+    private static readonly string[] TrackedDuelItems =
+    {
+        "upgrade_vampire",
+        "upgrade_blitz_bullets",
+        "upgrade_high_velocity_mag",
+        "upgrade_pristine_emblem",
+        "upgrade_fleetfoot_boots",
+        "upgrade_titan_round",
+        "upgrade_cardio_calibrator",
+        "upgrade_burst_fire",
+        "upgrade_health",
+    };
+    // Removed after the match unless the player owned them before it.
+    private static readonly string[] GrantedDuelItems =
+    {
+        "upgrade_pristine_emblem",
+        "upgrade_fleetfoot_boots",
+        "upgrade_titan_round",
+        "upgrade_cardio_calibrator",
+        "upgrade_burst_fire",
+        "upgrade_health",
+    };
+
+    public static HashSet<string> GetOwnedDuelItems(CCitadelPlayerPawn? pawn)
+    {
+        var ownedItems = new HashSet<string>();
+        foreach (string itemName in TrackedDuelItems)
+        {
+            if (pawn?.AbilityComponent?.FindAbilityByName(itemName) != null)
+                ownedItems.Add(itemName);
+        }
+
+        return ownedItems;
+    }
+
+    private void RestorePawnAfterDuel(
+        CCitadelPlayerPawn? pawn,
+        HashSet<string> itemsBeforeMatch
+    )
+    {
+        if (pawn == null)
+            return;
+
+        RestoreDuelBulletLifesteal(
+            pawn,
+            itemsBeforeMatch.Contains("upgrade_vampire")
+        );
+        RestoreDuelBlitzBullets(
+            pawn,
+            itemsBeforeMatch.Contains("upgrade_blitz_bullets")
+        );
+        RestoreDuelHighVelocityRounds(
+            pawn,
+            itemsBeforeMatch.Contains("upgrade_high_velocity_mag")
+        );
+        foreach (string itemName in GrantedDuelItems)
+        {
+            RemoveDuelItemIfGranted(
+                pawn,
+                itemName,
+                itemsBeforeMatch.Contains(itemName)
+            );
+        }
+        RestoreDuelItemHealthRegen(
+            pawn,
+            "upgrade_health",
+            itemsBeforeMatch.Contains("upgrade_health")
+        );
+
+        ClampHealthToMax(pawn);
+        pawn.RemoveModifier("modifier_speed_boost");
+        RemovePermanentBurstFire(pawn);
+    }
+
     public void RestoreDuelBulletLifesteal(
         CCitadelPlayerPawn pawn,
         bool hadItemBeforeMatch

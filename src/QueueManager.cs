@@ -855,31 +855,12 @@ public class QueueManager
             server.PlayerManager.GetMatchParticipantName(player2);
         var player1Pawn = player1.GetHeroPawn();
         var player2Pawn = player2.GetHeroPawn();
-        bool HasItem(CCitadelPlayerPawn? pawn, string itemName) =>
-            pawn?.AbilityComponent?.FindAbilityByName(itemName) != null;
-
         var match = new DuelMatch
         {
             Player1 = player1MatchKey,
             Player2 = player2MatchKey,
-            Player1HadBulletLifestealItem = HasItem(player1Pawn, "upgrade_vampire"),
-            Player2HadBulletLifestealItem = HasItem(player2Pawn, "upgrade_vampire"),
-            Player1HadBlitzBulletsItem = HasItem(player1Pawn, "upgrade_blitz_bullets"),
-            Player2HadBlitzBulletsItem = HasItem(player2Pawn, "upgrade_blitz_bullets"),
-            Player1HadOpeningRoundsItem = HasItem(player1Pawn, "upgrade_pristine_emblem"),
-            Player2HadOpeningRoundsItem = HasItem(player2Pawn, "upgrade_pristine_emblem"),
-            Player1HadHighVelocityRoundsItem = HasItem(player1Pawn, "upgrade_high_velocity_mag"),
-            Player2HadHighVelocityRoundsItem = HasItem(player2Pawn, "upgrade_high_velocity_mag"),
-            Player1HadFleetfootItem = HasItem(player1Pawn, "upgrade_fleetfoot_boots"),
-            Player2HadFleetfootItem = HasItem(player2Pawn, "upgrade_fleetfoot_boots"),
-            Player1HadTitanicMagazineItem = HasItem(player1Pawn, "upgrade_titan_round"),
-            Player2HadTitanicMagazineItem = HasItem(player2Pawn, "upgrade_titan_round"),
-            Player1HadCardioCalibratorItem = HasItem(player1Pawn, "upgrade_cardio_calibrator"),
-            Player2HadCardioCalibratorItem = HasItem(player2Pawn, "upgrade_cardio_calibrator"),
-            Player1HadBurstFireItem = HasItem(player1Pawn, "upgrade_burst_fire"),
-            Player2HadBurstFireItem = HasItem(player2Pawn, "upgrade_burst_fire"),
-            Player1HadHealthItem = HasItem(player1Pawn, "upgrade_health"),
-            Player2HadHealthItem = HasItem(player2Pawn, "upgrade_health"),
+            Player1ItemsBeforeMatch = PlayerManager.GetOwnedDuelItems(player1Pawn),
+            Player2ItemsBeforeMatch = PlayerManager.GetOwnedDuelItems(player2Pawn),
             QueueType = queueType,
             ArenaPosition = arena,
             ArenaIndex = arenaIndex,

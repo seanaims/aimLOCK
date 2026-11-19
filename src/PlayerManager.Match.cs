@@ -461,8 +461,7 @@ public partial class PlayerManager
         DuelMatch match
     )
     {
-        if (!match.Finished)
-            match.Finished = true;
+        match.Finished = true;
         match.CountdownActive = false;
         match.CountdownGeneration++;
 
@@ -471,63 +470,13 @@ public partial class PlayerManager
         var player2 = FindMatchParticipant(match.Player2, onlinePlayers);
         SetMatchDisarmed(match, true, player1, player2);
 
-        string winner;
-        if (match.ForfeitingPlayer is { } forfeitingPlayer)
-        {
-            winner = StringComparer.OrdinalIgnoreCase.Equals(
-                forfeitingPlayer,
-                match.Player1
-            )
-                ? match.Player2
-                : match.Player1;
-        }
-        else
-        {
-            winner =
-                match.Score1 > match.Score2
-                    ? match.Player1
-                    : match.Player2;
-        }
-
-        bool player1Won = StringComparer.OrdinalIgnoreCase.Equals(
-            winner,
-            match.Player1
+        bool player1Won = DidPlayer1Win(match);
+        RecordMatchResult(
+            match,
+            player1Won ? player1 : player2,
+            player1Won ? player2 : player1
         );
-        var winnerController = player1Won ? player1 : player2;
-        var loserController = player1Won ? player2 : player1;
-        if (
-            winnerController != null &&
-            loserController != null &&
-            !winnerController.IsBot &&
-            !loserController.IsBot
-        )
-        {
-            if (match.QueueType == MatchQueueType.Ranked)
-            {
-                RecordRankedResult(
-                    match,
-                    winnerController,
-                    loserController
-                );
-            }
-            else
-            {
-                var winnerRecord = GetRecord(winnerController);
-                var loserRecord = GetRecord(loserController);
-
-                winnerRecord.Wins++;
-                loserRecord.Losses++;
-                SaveRecords();
-
-                Chat.PrintToChatAll(
-                    $"{winnerController.PlayerName} wins! " +
-                    $"Unranked record: {winnerRecord.Wins}-{winnerRecord.Losses}"
-                );
-            }
-
-            server.LeaderboardManager.RequestRefresh();
-        }
-
+        string winner = player1Won ? match.Player1 : match.Player2;
         Console.WriteLine(
             $"Match Over! Winner: {GetMatchParticipantDisplayName(winner)}"
         );
@@ -542,165 +491,94 @@ public partial class PlayerManager
 
         var pawn1 = player1?.GetHeroPawn();
         var pawn2 = player2?.GetHeroPawn();
-        if (pawn1 != null)
-        {
-            server.PlayerManager.RestoreDuelBulletLifesteal(
-                pawn1,
-                match.Player1HadBulletLifestealItem
-            );
-        }
-        if (pawn2 != null)
-        {
-            server.PlayerManager.RestoreDuelBulletLifesteal(
-                pawn2,
-                match.Player2HadBulletLifestealItem
-            );
-        }
-        if (pawn1 != null)
-        {
-            server.PlayerManager.RestoreDuelBlitzBullets(
-                pawn1,
-                match.Player1HadBlitzBulletsItem
-            );
-        }
-        if (pawn2 != null)
-        {
-            server.PlayerManager.RestoreDuelBlitzBullets(
-                pawn2,
-                match.Player2HadBlitzBulletsItem
-            );
-        }
-        if (pawn1 != null)
-        {
-            server.PlayerManager.RestoreDuelHighVelocityRounds(
-                pawn1,
-                match.Player1HadHighVelocityRoundsItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn1,
-                "upgrade_pristine_emblem",
-                match.Player1HadOpeningRoundsItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn1,
-                "upgrade_fleetfoot_boots",
-                match.Player1HadFleetfootItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn1,
-                "upgrade_titan_round",
-                match.Player1HadTitanicMagazineItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn1,
-                "upgrade_cardio_calibrator",
-                match.Player1HadCardioCalibratorItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn1,
-                "upgrade_burst_fire",
-                match.Player1HadBurstFireItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn1,
-                "upgrade_health",
-                match.Player1HadHealthItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn1,
-                "upgrade_health",
-                match.Player1HadHealthItem
-            );
-        }
-        if (pawn2 != null)
-        {
-            server.PlayerManager.RestoreDuelHighVelocityRounds(
-                pawn2,
-                match.Player2HadHighVelocityRoundsItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn2,
-                "upgrade_pristine_emblem",
-                match.Player2HadOpeningRoundsItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn2,
-                "upgrade_fleetfoot_boots",
-                match.Player2HadFleetfootItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn2,
-                "upgrade_titan_round",
-                match.Player2HadTitanicMagazineItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn2,
-                "upgrade_cardio_calibrator",
-                match.Player2HadCardioCalibratorItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn2,
-                "upgrade_burst_fire",
-                match.Player2HadBurstFireItem
-            );
-            server.PlayerManager.RemoveDuelItemIfGranted(
-                pawn2,
-                "upgrade_health",
-                match.Player2HadHealthItem
-            );
-            RestoreDuelItemHealthRegen(
-                pawn2,
-                "upgrade_health",
-                match.Player2HadHealthItem
-            );
-        }
-        ClampHealthToMax(pawn1);
-        ClampHealthToMax(pawn2);
+        RestorePawnAfterDuel(pawn1, match.Player1ItemsBeforeMatch);
+        RestorePawnAfterDuel(pawn2, match.Player2ItemsBeforeMatch);
         server.ScheduleOnce(0.1.Seconds(), () =>
         {
             ClampHealthToMax(pawn1);
             ClampHealthToMax(pawn2);
         });
-        pawn1?.RemoveModifier("modifier_speed_boost");
-        pawn2?.RemoveModifier("modifier_speed_boost");
-        if (pawn1 != null)
-            RemovePermanentBurstFire(pawn1);
-        if (pawn2 != null)
-            RemovePermanentBurstFire(pawn2);
-        // The practice bot is parked or removed right after this, so it skips the trip
-        // to spawn, the teleport particles and the team change.
-        bool player1IsBot = IsPracticeBotController(player1);
-        bool player2IsBot = IsPracticeBotController(player2);
-        if (player1IsBot)
-            pawn1 = null;
-        if (player2IsBot)
-            pawn2 = null;
 
-        pawn1?.Teleport(
-            aimLOCK.MidtownSpawnPosition,
-            null,
-            null
-        );
-        pawn2?.Teleport(
-            aimLOCK.MidtownSpawnPosition,
-            null,
-            null
-        );
-        if (pawn1 != null)
-            server.PlayerManager.PlayMatchTeleportEffect(pawn1);
-        if (pawn2 != null)
-            server.PlayerManager.PlayMatchTeleportEffect(pawn2);
-
-        if (!player1IsBot)
-            EnsureTeam(player1, 2);
-        if (!player2IsBot)
-            EnsureTeam(player2, 2);
+        ReturnToSpawnAfterDuel(player1, pawn1);
+        ReturnToSpawnAfterDuel(player2, pawn2);
 
         server.UIManager.HideMatchHud(player1, player2);
-        server.PlayerManager.OnDuelMatchFinished(match);
+        OnDuelMatchFinished(match);
         server.UIManager.RestoreHudAfterMatch(match);
         ReturnMatchSpectators(match);
         server.Queue.TryStartMatches();
+    }
+
+    private static bool DidPlayer1Win(DuelMatch match)
+    {
+        if (match.ForfeitingPlayer is { } forfeitingPlayer)
+        {
+            return !StringComparer.OrdinalIgnoreCase.Equals(
+                forfeitingPlayer,
+                match.Player1
+            );
+        }
+
+        return match.Score1 > match.Score2;
+    }
+
+    /* Bot matches and matches with a missing player are not recorded */
+    private void RecordMatchResult(
+        DuelMatch match,
+        CCitadelPlayerController? winner,
+        CCitadelPlayerController? loser
+    )
+    {
+        if (winner == null || loser == null || winner.IsBot || loser.IsBot)
+            return;
+
+        if (match.QueueType == MatchQueueType.Ranked)
+            RecordRankedResult(match, winner, loser);
+        else
+            RecordUnrankedResult(winner, loser);
+
+        server.LeaderboardManager.RequestRefresh();
+    }
+
+    private void RecordUnrankedResult(
+        CCitadelPlayerController winner,
+        CCitadelPlayerController loser
+    )
+    {
+        var winnerRecord = GetRecord(winner);
+        var loserRecord = GetRecord(loser);
+
+        winnerRecord.Wins++;
+        loserRecord.Losses++;
+        SaveRecords();
+
+        Chat.PrintToChatAll(
+            $"{winner.PlayerName} wins! " +
+            $"Unranked record: {winnerRecord.Wins}-{winnerRecord.Losses}"
+        );
+    }
+
+    private void ReturnToSpawnAfterDuel(
+        CCitadelPlayerController? player,
+        CCitadelPlayerPawn? pawn
+    )
+    {
+        // The practice bot is parked or removed right after this, so it skips the trip
+        // to spawn, the teleport particles and the team change.
+        if (IsPracticeBotController(player))
+            return;
+
+        if (pawn != null)
+        {
+            pawn.Teleport(
+                aimLOCK.MidtownSpawnPosition,
+                null,
+                null
+            );
+            PlayMatchTeleportEffect(pawn);
+        }
+
+        EnsureTeam(player, 2);
     }
 
     public bool ForfeitMatch(string playerName)

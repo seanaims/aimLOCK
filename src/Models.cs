@@ -21,24 +21,9 @@ public sealed class DuelMatch
     public MatchQueueType QueueType;
     public string Player1 = "";
     public string Player2 = "";
-    public bool Player1HadBulletLifestealItem;
-    public bool Player2HadBulletLifestealItem;
-    public bool Player1HadBlitzBulletsItem;
-    public bool Player2HadBlitzBulletsItem;
-    public bool Player1HadOpeningRoundsItem;
-    public bool Player2HadOpeningRoundsItem;
-    public bool Player1HadHighVelocityRoundsItem;
-    public bool Player2HadHighVelocityRoundsItem;
-    public bool Player1HadFleetfootItem;
-    public bool Player2HadFleetfootItem;
-    public bool Player1HadTitanicMagazineItem;
-    public bool Player2HadTitanicMagazineItem;
-    public bool Player1HadCardioCalibratorItem;
-    public bool Player2HadCardioCalibratorItem;
-    public bool Player1HadBurstFireItem;
-    public bool Player2HadBurstFireItem;
-    public bool Player1HadHealthItem;
-    public bool Player2HadHealthItem;
+    // Duel items each player owned before the match; these are kept when it ends.
+    public HashSet<string> Player1ItemsBeforeMatch = new();
+    public HashSet<string> Player2ItemsBeforeMatch = new();
     public int Score1;
     public int Score2;
     public bool CombatActive;
