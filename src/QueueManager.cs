@@ -605,109 +605,12 @@ public class QueueManager
 
         bool hasArena = TryGetAvailableArena(out int arenaIndex);
 
-        var playersBySteamId = Players.GetAll()
-            .Where(player => !player.IsBot)
-            .GroupBy(player => player.PlayerSteamId)
-            .ToDictionary(
-                group => group.Key,
-                group => group.First()
-            );
-        var queuedPlayers = queue
-            .Select((entry, index) => new QueuedPlayer(
-                entry,
-                index,
-                playersBySteamId.TryGetValue(entry.SteamId, out var player)
-                    ? player
-                    : null
-            ))
-            .Where(item =>
-                item.Player != null &&
-                (
-                    !server.PlayerManager.TryGetActiveMatch(item.Player, out var match) ||
-                    server.PlayerManager.IsBotMatch(match)
-                )
-            )
-            .ToArray();
-
-        int selectedFirstIndex = -1;
-        int selectedSecondIndex = -1;
-        CCitadelPlayerController? player1 = null;
-        CCitadelPlayerController? player2 = null;
-        DateTimeOffset selectedOldestEntry = DateTimeOffset.MaxValue;
-        long selectedPingDifference = long.MaxValue;
-        int selectedIndexSum = int.MaxValue;
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-
-        for (int first = 0; first < queuedPlayers.Length; first++)
-        {
-            var firstQueued = queuedPlayers[first];
-            for (int second = first + 1; second < queuedPlayers.Length; second++)
-            {
-                var secondQueued = queuedPlayers[second];
-                var firstPlayer = firstQueued.Player!;
-                var secondPlayer = secondQueued.Player!;
-                long pingDifference = 0;
-                bool usePingMatching =
-                    server.PlayerManager.IsPingBasedMatchmakingEnabled(firstPlayer) &&
-                    server.PlayerManager.IsPingBasedMatchmakingEnabled(secondPlayer);
-
-                if (
-                    !firstPlayer.IsBot &&
-                    !secondPlayer.IsBot &&
-                    usePingMatching
-                )
-                {
-                    DateTimeOffset oldestEntry = firstQueued.Entry.EnqueuedAt
-                        <= secondQueued.Entry.EnqueuedAt
-                            ? firstQueued.Entry.EnqueuedAt
-                            : secondQueued.Entry.EnqueuedAt;
-                    int allowedDifference = GetAllowedPingDifference(
-                        Math.Max(0d, (now - oldestEntry).TotalSeconds)
-                    );
-
-                    int firstPing = 0;
-                    int secondPing = 0;
-                    bool hasPings =
-                        server.PingManager.TryGetPing(firstPlayer, out firstPing) &&
-                        server.PingManager.TryGetPing(secondPlayer, out secondPing);
-                    if (hasPings)
-                    {
-                        pingDifference = Math.Abs((long)firstPing - secondPing);
-                        if (pingDifference > allowedDifference)
-                            continue;
-                    }
-                    else if (allowedDifference != int.MaxValue)
-                    {
-                        continue;
-                    }
-                }
-
-                DateTimeOffset pairOldestEntry = firstQueued.Entry.EnqueuedAt
-                    <= secondQueued.Entry.EnqueuedAt
-                        ? firstQueued.Entry.EnqueuedAt
-                        : secondQueued.Entry.EnqueuedAt;
-                int indexSum = firstQueued.QueueIndex + secondQueued.QueueIndex;
-                bool isBetter = pairOldestEntry < selectedOldestEntry
-                    || (pairOldestEntry == selectedOldestEntry
-                        && pingDifference < selectedPingDifference)
-                    || (pairOldestEntry == selectedOldestEntry
-                        && pingDifference == selectedPingDifference
-                        && indexSum < selectedIndexSum);
-                if (!isBetter)
-                    continue;
-
-                selectedFirstIndex = firstQueued.QueueIndex;
-                selectedSecondIndex = secondQueued.QueueIndex;
-                player1 = firstPlayer;
-                player2 = secondPlayer;
-                selectedOldestEntry = pairOldestEntry;
-                selectedPingDifference = pingDifference;
-                selectedIndexSum = indexSum;
-            }
-        }
-
-        if (selectedFirstIndex < 0 || player1 == null || player2 == null)
+        var pair = SelectBestPair(GetMatchableQueuedPlayers(queue));
+        if (pair is not var (first, second))
             return;
+
+        var player1 = first.Player!;
+        var player2 = second.Player!;
 
         /* End practice bot matches; finishing a match runs the queue again */
         foreach (var player in new[] { player1, player2 })
@@ -728,11 +631,124 @@ public class QueueManager
         if (!StartMatch(player1, player2, queueType, arenaIndex))
             return;
 
-        queue.RemoveAt(selectedSecondIndex);
-        queue.RemoveAt(selectedFirstIndex);
+        // The later queue position first, so the earlier index stays valid.
+        queue.RemoveAt(second.QueueIndex);
+        queue.RemoveAt(first.QueueIndex);
 
         server.UIManager.RefreshHud();
         TryStartMatch(queueType);
+    }
+
+    /* Queued players who are online and not in a duel (a bot match does not block) */
+    private QueuedPlayer[] GetMatchableQueuedPlayers(List<QueueEntry> queue)
+    {
+        var playersBySteamId = Players.GetAll()
+            .Where(player => !player.IsBot)
+            .GroupBy(player => player.PlayerSteamId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First()
+            );
+        return queue
+            .Select((entry, index) => new QueuedPlayer(
+                entry,
+                index,
+                playersBySteamId.TryGetValue(entry.SteamId, out var player)
+                    ? player
+                    : null
+            ))
+            .Where(item =>
+                item.Player != null &&
+                (
+                    !server.PlayerManager.TryGetActiveMatch(item.Player, out var match) ||
+                    server.PlayerManager.IsBotMatch(match)
+                )
+            )
+            .ToArray();
+    }
+
+    /* Best pair: longest wait first, then smallest ping gap, then queue order */
+    private (QueuedPlayer First, QueuedPlayer Second)? SelectBestPair(
+        QueuedPlayer[] queuedPlayers
+    )
+    {
+        (QueuedPlayer First, QueuedPlayer Second)? best = null;
+        DateTimeOffset bestOldestEntry = DateTimeOffset.MaxValue;
+        long bestPingDifference = long.MaxValue;
+        int bestIndexSum = int.MaxValue;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        for (int i = 0; i < queuedPlayers.Length; i++)
+        {
+            var first = queuedPlayers[i];
+            for (int j = i + 1; j < queuedPlayers.Length; j++)
+            {
+                var second = queuedPlayers[j];
+                DateTimeOffset oldestEntry =
+                    first.Entry.EnqueuedAt <= second.Entry.EnqueuedAt
+                        ? first.Entry.EnqueuedAt
+                        : second.Entry.EnqueuedAt;
+                if (
+                    !IsPingCompatible(
+                        first.Player!,
+                        second.Player!,
+                        (now - oldestEntry).TotalSeconds,
+                        out long pingDifference
+                    )
+                )
+                {
+                    continue;
+                }
+
+                int indexSum = first.QueueIndex + second.QueueIndex;
+                bool isBetter = oldestEntry < bestOldestEntry
+                    || (oldestEntry == bestOldestEntry
+                        && pingDifference < bestPingDifference)
+                    || (oldestEntry == bestOldestEntry
+                        && pingDifference == bestPingDifference
+                        && indexSum < bestIndexSum);
+                if (!isBetter)
+                    continue;
+
+                best = (first, second);
+                bestOldestEntry = oldestEntry;
+                bestPingDifference = pingDifference;
+                bestIndexSum = indexSum;
+            }
+        }
+
+        return best;
+    }
+
+    /* With ping matching on for both, the ping gap must fit the window for their wait */
+    private bool IsPingCompatible(
+        CCitadelPlayerController firstPlayer,
+        CCitadelPlayerController secondPlayer,
+        double oldestWaitSeconds,
+        out long pingDifference
+    )
+    {
+        pingDifference = 0;
+        bool usePingMatching =
+            server.PlayerManager.IsPingBasedMatchmakingEnabled(firstPlayer) &&
+            server.PlayerManager.IsPingBasedMatchmakingEnabled(secondPlayer);
+        if (firstPlayer.IsBot || secondPlayer.IsBot || !usePingMatching)
+            return true;
+
+        int allowedDifference = GetAllowedPingDifference(
+            Math.Max(0d, oldestWaitSeconds)
+        );
+        if (
+            server.PingManager.TryGetPing(firstPlayer, out int firstPing) &&
+            server.PingManager.TryGetPing(secondPlayer, out int secondPing)
+        )
+        {
+            pingDifference = Math.Abs((long)firstPing - secondPing);
+            return pingDifference <= allowedDifference;
+        }
+
+        // No ping reading: only pair once the window is fully open.
+        return allowedDifference == int.MaxValue;
     }
 
     public bool TryGetAvailableArena(out int arenaIndex)
