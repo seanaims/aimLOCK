@@ -129,7 +129,7 @@ public class UIManager
             .WithStyle("horizontal-align", "right")
             .WithStyle("vertical-align", "center")
             .WithStyle("margin-top", "-80px")
-            .WithStyle("background-color", "rgba(17, 17, 17, 0.65)")
+            .WithStyle("background-color", "rgba(17, 17, 17, 0.88)")
             .WithStyle("padding", "15px 15px")
             .Add(
 
