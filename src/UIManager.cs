@@ -147,11 +147,14 @@ public class UIManager
                             .WithStyle("color", "#555555")
                     ),
 
+                PanelDivider(),
+
                 UI.Label("playercount", stats.PlayerCountText)
                     .WithStyle("font-size", "16px")
                     .WithStyle("color", "#AAAAAA")
-                    .WithStyle("horizontal-align", "center")
-                    .WithStyle("margin-bottom", "10px"),
+                    .WithStyle("horizontal-align", "center"),
+
+                PanelDivider(),
 
                 UI.Horizontal()
                     .WithStyle("horizontal-align", "center")
@@ -197,6 +200,15 @@ public class UIManager
                     )
             );
     }
+
+    private static UINode PanelDivider() =>
+        UI.Horizontal()
+            .WithStyle("width", "260px")
+            .WithStyle("height", "1px")
+            .WithStyle("horizontal-align", "center")
+            .WithStyle("margin-top", "8px")
+            .WithStyle("margin-bottom", "8px")
+            .WithStyle("background-color", "rgba(255, 255, 255, 0.15)");
 
     /* Queue table: fixed column widths keep the numbers lined up */
     private const string QueueNameColumnWidth = "100px";
