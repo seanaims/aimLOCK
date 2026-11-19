@@ -22,7 +22,6 @@ public enum PlayerTag
 
 public sealed class PlayerTagManager
 {
-    private const string EntityNamePrefix = "aimlock_player_tag_";
     private const int PawnRetries = 8;
     private const float TagHeight = 100f;
     private const float FontSize = 64f;
@@ -33,9 +32,6 @@ public sealed class PlayerTagManager
     private const char TagBackgroundGlyph = '\u2588';
     // Stands the text upright; billboard mode then only turns it around the up axis.
     private static readonly Vector3 UprightTextAngles = new(180f, 90f, 270f);
-    // Suffixes of the entity names, used to find stale entities after a reload.
-    private const int BackgroundEntityIndex = -1;
-    private const int TextEntityIndex = 0;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -66,7 +62,6 @@ public sealed class PlayerTagManager
     private readonly HashSet<string> hiddenTags =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<ulong> hiddenSteamIds = new();
-    private bool staleTagEntitiesRemoved;
 
     public PlayerTagManager(aimLOCK server)
     {
@@ -81,7 +76,6 @@ public sealed class PlayerTagManager
     public void Initialize()
     {
         MigrateNameKeyedTags();
-        EnsureStaleTagEntitiesRemoved();
 
         foreach (var player in Players.GetAll())
             RefreshPlayerTag(player);
@@ -253,7 +247,6 @@ public sealed class PlayerTagManager
         if (!player.IsValid)
             return;
 
-        EnsureStaleTagEntitiesRemoved();
         ulong steamId = player.PlayerSteamId;
 
         if (
@@ -327,8 +320,6 @@ public sealed class PlayerTagManager
     )
     {
         var background = CreateOverheadText(
-            steamId,
-            BackgroundEntityIndex,
             pawn,
             BuildBackgroundRow(style.Text),
             (uint)TagBackgroundAlpha << 24
@@ -345,8 +336,6 @@ public sealed class PlayerTagManager
         background.DepthOffset = -1f;
 
         var text = CreateOverheadText(
-            steamId,
-            TextEntityIndex,
             pawn,
             style.Text,
             style.Color
@@ -368,8 +357,6 @@ public sealed class PlayerTagManager
 
     /* Text above the pawn's head: it follows the pawn and turns to face every viewer */
     private static CPointWorldText? CreateOverheadText(
-        ulong steamId,
-        int entityIndex,
         CCitadelPlayerPawn pawn,
         string text,
         uint color
@@ -389,12 +376,6 @@ public sealed class PlayerTagManager
 
         entity.ColorABGR = color;
         entity.JustifyHorizontal = HorizontalJustify.Center;
-        entity.AcceptInput(
-            "AddOutput",
-            null,
-            null,
-            $"targetname {GetEntityName(steamId, entityIndex)}"
-        );
         entity.SetParent(pawn);
         entity.Teleport(
             position: headPosition,
@@ -610,40 +591,6 @@ public sealed class PlayerTagManager
         foreach (ulong steamId in activeTags.Keys.Concat(activeTagBackgrounds.Keys).ToArray())
             RemoveTagEntity(steamId);
     }
-
-    private void EnsureStaleTagEntitiesRemoved()
-    {
-        if (staleTagEntitiesRemoved)
-            return;
-
-        RemoveStaleTagEntities();
-        activeTags.Clear();
-        activeTagBackgrounds.Clear();
-        activeTagValues.Clear();
-        activeTagPawnHandles.Clear();
-        staleTagEntitiesRemoved = true;
-    }
-
-    private void RemoveStaleTagEntities()
-    {
-        foreach (var entity in Entities.All)
-        {
-            if (
-                entity.IsValid &&
-                entity.Name is { } name &&
-                name.StartsWith(EntityNamePrefix, StringComparison.Ordinal)
-            )
-            {
-                entity.Remove();
-            }
-        }
-    }
-
-    private static string GetEntityName(ulong steamId, int index) =>
-        GetEntityNamePrefix(steamId) + index;
-
-    private static string GetEntityNamePrefix(ulong steamId) =>
-        EntityNamePrefix + steamId + "_";
 
     private readonly record struct TagStyle(string Text, uint Color);
 
