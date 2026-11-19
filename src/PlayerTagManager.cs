@@ -31,6 +31,8 @@ public sealed class PlayerTagManager
     private const int TagBackgroundRows = 1;
     private const byte TagBackgroundAlpha = 160;
     private const char TagBackgroundGlyph = '\u2588';
+    // Stands the text upright; billboard mode then only turns it around the up axis.
+    private static readonly Vector3 UprightTextAngles = new(180f, 90f, 270f);
     // Suffixes of the entity names, used to find stale entities after a reload.
     private const int BackgroundEntityIndex = -1;
     private const int TextEntityIndex = 0;
@@ -373,9 +375,10 @@ public sealed class PlayerTagManager
         uint color
     )
     {
+        Vector3 headPosition = pawn.Position + new Vector3(0f, 0f, TagHeight);
         var entity = CPointWorldText.Create(
             text,
-            pawn.Position + new Vector3(0f, 0f, TagHeight),
+            headPosition,
             fontSize: FontSize,
             worldUnitsPerPx: WorldUnitsPerPx,
             fontName: "RetailDemo-Bold",
@@ -393,6 +396,10 @@ public sealed class PlayerTagManager
             $"targetname {GetEntityName(steamId, entityIndex)}"
         );
         entity.SetParent(pawn);
+        entity.Teleport(
+            position: headPosition,
+            angles: UprightTextAngles
+        );
         return entity;
     }
 
@@ -595,6 +602,13 @@ public sealed class PlayerTagManager
 
         activeTagValues.Remove(steamId);
         activeTagPawnHandles.Remove(steamId);
+    }
+
+    /* On unload: a reloaded plugin starts without knowing these entities */
+    public void RemoveAllTagEntities()
+    {
+        foreach (ulong steamId in activeTags.Keys.Concat(activeTagBackgrounds.Keys).ToArray())
+            RemoveTagEntity(steamId);
     }
 
     private void EnsureStaleTagEntitiesRemoved()

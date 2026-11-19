@@ -322,6 +322,7 @@ public partial class aimLOCK : DeadworksPluginBase
         PlayerManager.RemoveDuelArenaRadiusMarkers();
         PlayerManager.RemoveEntryZoneLabels();
         PlayerManager.RemoveArenaScoreboards();
+        PlayerTagManager.RemoveAllTagEntities();
         BackgroundFileWriter.Flush(TimeSpan.FromSeconds(5));
         base.OnUnload();
     }
