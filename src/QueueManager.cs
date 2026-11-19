@@ -944,17 +944,10 @@ public class QueueManager
         pawn1.RemoveModifier("modifier_speed_boost");
         pawn2.RemoveModifier("modifier_speed_boost");
 
-        Vector3 arenaCenter = playerManager.GetDuelArenaCenter(match.ArenaPosition);
-        pawn1.Teleport(
-            arenaCenter + new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-            new Vector3(0f, 45f, 0f),
-            null
-        );
-        pawn2.Teleport(
-            arenaCenter + new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-            new Vector3(0f, 180f, 0f),
-            null
-        );
+        var (position1, angles1) = playerManager.GetDuelSpawn(match, isPlayer1: true);
+        var (position2, angles2) = playerManager.GetDuelSpawn(match, isPlayer1: false);
+        pawn1.Teleport(position1, angles1, null);
+        pawn2.Teleport(position2, angles2, null);
         playerManager.ConfigurePracticeBotStrafe(pawn1, pawn2);
         server.UIManager.ShowMatchHud(match);
 
@@ -1012,7 +1005,7 @@ public class QueueManager
             player2.ChangeTeam(2);
         server.UIManager.RestoreHudAfterMatch(match);
         server.PlayerManager.OnDuelMatchFinished(match);
-        server.Queue.TryStartMatches();
+        TryStartMatches();
     }
 
     private static int GetAllowedPingDifference(double oldestWaitSeconds)

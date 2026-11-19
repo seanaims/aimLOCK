@@ -378,71 +378,75 @@ public partial class PlayerManager
 
         SetMatchDisarmed(match, true);
 
-        Vector3 arenaCenter = GetDuelArenaSphereCenter(match.ArenaPosition);
-
-        if (string.Equals(
+        bool isPlayer1 = string.Equals(
             playerName,
             match.Player1,
             StringComparison.OrdinalIgnoreCase
-        ))
-        {
-            pawn.Teleport(
-                arenaCenter + new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-                new Vector3(0f, 45f, 0f),
-                null
-            );
-            PlayMatchTeleportEffect(pawn);
-        }
-        else if (string.Equals(
+        );
+        bool isPlayer2 = string.Equals(
             playerName,
             match.Player2,
             StringComparison.OrdinalIgnoreCase
-        ))
+        );
+        if (isPlayer1 || isPlayer2)
         {
-            pawn.Teleport(
-                arenaCenter + new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-                new Vector3(0f, 180f, 0f),
-                null
-            );
+            var (position, angles) = GetDuelSpawn(match, isPlayer1);
+            pawn.Teleport(position, angles, null);
             PlayMatchTeleportEffect(pawn);
         }
 
         server.PendingRespawns.Remove(playerName);
         respawnRecoveryInProgress.Remove(playerName);
 
-        // The respawn frame only teleports and disarms. The modifier and item work
-        // (lifesteal, the item stack, max health) is spread over the next few ticks: the player is disarmed until the
-        // countdown anyway, and RestoreDuelRespawnHealth re-checks health afterwards.
+        // The respawn frame only teleports and disarms. The modifier and item work is
+        // spread over the next ticks: the player is disarmed until the countdown
+        // anyway, and RestoreDuelRespawnHealth re-checks health afterwards.
         CCitadelPlayerPawn respawnedPawn = pawn;
-        server.ScheduleNextTick(() =>
-        {
-            if (match.Finished || !respawnedPawn.IsValid)
-                return;
-
-            ApplyDuelBulletLifesteal(respawnedPawn);
-            server.ScheduleNextTick(() =>
+        RunDuelStepsOverTicks(
+            match,
+            respawnedPawn,
+            new Action[]
             {
-                if (match.Finished || !respawnedPawn.IsValid)
-                    return;
-
-                ApplyDuelItemStack(respawnedPawn);
-                respawnedPawn.RemoveAbility("upgrade_infinite_rounds");
-                server.ScheduleNextTick(() =>
+                () => ApplyDuelBulletLifesteal(respawnedPawn),
+                () =>
                 {
-                    if (match.Finished || !respawnedPawn.IsValid)
-                        return;
-
+                    ApplyDuelItemStack(respawnedPawn);
+                    respawnedPawn.RemoveAbility("upgrade_infinite_rounds");
+                },
+                () =>
+                {
                     ApplyMaxBoons(respawnedPawn);
                     if (!HasDuelMaxHealth(respawnedPawn))
                         ApplyDuelMaxHealth(respawnedPawn);
                     SetDuelStartingHealth(respawnedPawn);
-                });
-            });
-        });
+                },
+            }
+        );
 
         server.ScheduleOnce(0.5.Seconds(), () =>
         {
             RestoreDuelRespawnHealth(match, playerName);
+        });
+    }
+
+    /* Runs one step per tick; stops when the match ends or the pawn is gone */
+    private void RunDuelStepsOverTicks(
+        DuelMatch match,
+        CCitadelPlayerPawn pawn,
+        Action[] steps,
+        int index = 0
+    )
+    {
+        if (index >= steps.Length)
+            return;
+
+        server.ScheduleNextTick(() =>
+        {
+            if (match.Finished || !pawn.IsValid)
+                return;
+
+            steps[index]();
+            RunDuelStepsOverTicks(match, pawn, steps, index + 1);
         });
     }
 

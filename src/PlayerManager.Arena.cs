@@ -551,6 +551,21 @@ public partial class PlayerManager
     public void RemoveDuelArenaRadiusMarkers() =>
         CBeam.RemoveAll(duelArenaRadiusBeams);
 
+    /* Where a duelist stands at round start: one on each side, facing in */
+    public (Vector3 Position, Vector3 Angles) GetDuelSpawn(DuelMatch match, bool isPlayer1)
+    {
+        Vector3 arenaCenter = GetDuelArenaSphereCenter(match.ArenaPosition);
+        return isPlayer1
+            ? (
+                arenaCenter + new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
+                new Vector3(0f, 45f, 0f)
+            )
+            : (
+                arenaCenter + new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
+                new Vector3(0f, 180f, 0f)
+            );
+    }
+
     private static Vector3 GetDuelArenaSphereCenter(Vector3 arena) =>
         arena + new Vector3(0f, 0f, DuelArenaCourtHeight / 2f);
 
