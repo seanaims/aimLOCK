@@ -154,8 +154,18 @@ public partial class aimLOCK
 
             ScheduleOnce(2.Seconds(), () =>
             {
-                if (connectedPlayer.IsValid)
-                    Chat.PrintToChat(connectedPlayer, WelcomeMessage);
+                if (!connectedPlayer.IsValid)
+                    return;
+
+                foreach (string message in WelcomeMessages)
+                    Chat.PrintToChat(connectedPlayer, message);
+                if (connectedPlayer.IsBot)
+                    return;
+
+                ulong steamId = connectedPlayer.PlayerSteamId;
+                PlayerTagManager.TryAutoEquipBestTag(steamId);
+                if (PlayerTagManager.GetTagHint(steamId) is { } tagHint)
+                    Chat.PrintToChat(connectedPlayer, tagHint);
             });
         }
 

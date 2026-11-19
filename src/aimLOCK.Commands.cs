@@ -246,7 +246,8 @@ public partial class aimLOCK
                 PlayerTagManager.RefreshGuildTags();
             }
 
-            caller.Reply(response);
+            foreach (string line in response.Split('\n'))
+                caller.Reply(line);
         }
         catch (IOException ex)
         {

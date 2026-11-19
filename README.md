@@ -89,10 +89,10 @@ The in-world leaderboards show unranked win rate (minimum five games), unranked 
 | `/scoreboard <on\|off>` | Show or hide your server-info UI. |
 | `/timezone` | Show your saved time zone. |
 | `/timezone <IANA ID>` | Set your time zone, for example `/timezone America/New_York`. IDs are case-insensitive; daylight-saving changes follow the selected zone's rules. |
-| `/tag <tagname\|clear>` | Equip a granted overhead tag or clear your selected tag. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. |
+| `/tag <tagname\|clear>` | Equip a granted overhead tag or clear your selected tag. Supported tags: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, and GUILDTAG. A player with no tag is given their best usable one automatically (OWNER, STAFF, AIMLOCK, YT, TTV, SUPPORTER, then GUILDTAG) on join, on a grant and on joining a guild; `clear` turns that off until they pick a tag again. |
 | `/tag list` | List the overhead tags you can use. Guild members can always use `GUILDTAG` for their own guild; it does not need to be granted. |
-| `/tag give <player name\|SteamID64> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. Names must match one online player exactly; use the SteamID64 for offline players. |
-| `/tag revoke <player name\|SteamID64> <tagname>` | Take away tag access, and remove the tag if they are wearing it. Requires `aimlock.tags.manage`. |
+| `/tag give <player name\|SteamID64> <tagname>` | Grant a player access to a tag. Requires `aimlock.tags.manage`; use `GUILDTAG` to grant their current guild tag. Names must match one online player exactly; use the SteamID64 for offline players. An online player is told about the grant. |
+| `/tag revoke <player name\|SteamID64> <tagname>` | Take away tag access. If they are wearing the tag, they switch to their next best usable tag. Requires `aimlock.tags.manage`. |
 | `/tag <player name\|SteamID64> <tagname\|clear>` | Directly set or clear a player's overhead tag. Requires `aimlock.tags.manage`. |
 | `/tagoff` | Hide your own overhead tag. |
 | `/tagon` | Show your overhead tag again. |
