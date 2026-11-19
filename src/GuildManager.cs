@@ -618,14 +618,19 @@ public sealed class GuildManager
         }
     }
 
+    // One chat message per line: a single long message is shrunk until it is unreadable.
     private static string GetHelp() =>
-        "Guild commands: /guild create <tag>, " +
-        "join <tag|name>, invite <player>, invites, accept [tag|name], " +
-        "decline [tag|name], leave, lookup [tag|name], members [tag|name], " +
-        "list, mode <open|invite>, newtag <tag>, rename <name>, " +
-        "kick <member>, transfer <member>, disband confirm. " +
-        $"Tags are 1-5 letters or numbers and cannot use built-in player tags; " +
-        $"names are 2-{MaxGuildNameCharacters} characters.";
+        string.Join(
+            "\n",
+            "Guild commands (each starts with /guild):",
+            "create <tag> | join <tag|name> | leave | disband confirm",
+            "invite <player> | invites | accept [tag|name] | decline [tag|name]",
+            "lookup [tag|name] | members [tag|name] | list",
+            "mode <open|invite> | newtag <tag> | rename <name>",
+            "kick <member> | transfer <member>",
+            "Tags: 1-5 letters or numbers, no built-in player tags. " +
+            $"Names: 2-{MaxGuildNameCharacters} characters."
+        );
 
     private static CCitadelPlayerController? FindOnlinePlayer(
         string query,
