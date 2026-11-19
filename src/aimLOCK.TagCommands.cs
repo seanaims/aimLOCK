@@ -71,10 +71,29 @@ public partial class aimLOCK
             return;
 
         string token = PlayerTagManager.GetTagToken(tag);
+        PlayerTagManager.TryAutoEquipBestTag(targetSteamId);
+        bool wearing = PlayerTagManager.IsWearing(targetSteamId, tag);
         caller.Reply(
             $"Granted {token} tag access to {targetName}. " +
-            $"They can equip it with /tag {token}."
+            (wearing
+                ? "It is now their overhead tag."
+                : $"They can equip it with /tag {token}.")
         );
+
+        // Tell the player too; until now only the admin was told.
+        var target = Players.GetAll().FirstOrDefault(player =>
+            player.IsValid && !player.IsBot && player.PlayerSteamId == targetSteamId
+        );
+        if (target != null)
+        {
+            Chat.PrintToChat(
+                target,
+                $"[aimLOCK] You were granted the {token} tag. " +
+                (wearing
+                    ? "It is now your overhead tag."
+                    : $"Equip it with /tag {token}.")
+            );
+        }
     }
 
     /* /tag revoke <player name|SteamID64> <tagname> */
@@ -187,7 +206,7 @@ public partial class aimLOCK
         {
             bool removed = TrySaveTagChange(
                 caller,
-                () => PlayerTagManager.RemoveTag(steamId),
+                () => PlayerTagManager.ClearTag(steamId),
                 $"remove tag for {playerName}"
             );
             if (removed)
@@ -254,7 +273,7 @@ public partial class aimLOCK
         {
             bool removed = TrySaveTagChange(
                 caller,
-                () => PlayerTagManager.RemoveTag(steamId),
+                () => PlayerTagManager.ClearTag(steamId),
                 $"remove tag for {targetName}"
             );
             if (removed)

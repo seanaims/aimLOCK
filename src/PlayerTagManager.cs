@@ -50,6 +50,19 @@ public sealed class PlayerTagManager
     private readonly string visibilityFilePath = JsonStore.PathFor(VisibilityFileName);
     private readonly string stableVisibilityFilePath =
         JsonStore.PathFor(StableVisibilityFileName);
+    public const string ClearedTagsFileName = "player-tag-cleared-by-id.json";
+    private readonly string clearedTagsFilePath = JsonStore.PathFor(ClearedTagsFileName);
+    // Best first: the tag a player gets automatically when they have not chosen one.
+    private static readonly PlayerTag[] TagPriority =
+    {
+        PlayerTag.Owner,
+        PlayerTag.Staff,
+        PlayerTag.Aimlock,
+        PlayerTag.YouTube,
+        PlayerTag.Twitch,
+        PlayerTag.Supporter,
+        PlayerTag.GuildTag,
+    };
     private readonly Dictionary<string, PlayerTag> tags =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ulong, PlayerTag> stableTags = new();
@@ -62,6 +75,8 @@ public sealed class PlayerTagManager
     private readonly HashSet<string> hiddenTags =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<ulong> hiddenSteamIds = new();
+    // Players who removed their tag on purpose; they are not given one automatically.
+    private readonly HashSet<ulong> clearedSteamIds = new();
 
     public PlayerTagManager(aimLOCK server)
     {
@@ -71,6 +86,7 @@ public sealed class PlayerTagManager
         LoadStableTags();
         LoadGrantedTags();
         LoadHiddenSteamIds();
+        LoadClearedSteamIds();
     }
 
     public void Initialize()
@@ -90,7 +106,15 @@ public sealed class PlayerTagManager
 
         SaveStableTags(updatedStableTags);
         ReplaceStableTags(updatedStableTags);
+        SetTagCleared(steamId, false);
         RefreshOnlinePlayer(steamId);
+    }
+
+    /* A deliberate removal: the player is not given a tag automatically afterwards */
+    public void ClearTag(ulong steamId)
+    {
+        RemoveTag(steamId);
+        SetTagCleared(steamId, true);
     }
 
     public bool RemoveTag(ulong steamId)
@@ -148,9 +172,74 @@ public sealed class PlayerTagManager
         )
         {
             RemoveTag(steamId);
+            TryAutoEquipBestTag(steamId);
         }
 
         return true;
+    }
+
+    /* Tags the player may wear, best first */
+    public PlayerTag[] GetUsableTags(ulong steamId)
+    {
+        bool inGuild = server.GuildManager.GetMemberTag(steamId) != null;
+        return TagPriority
+            .Where(tag =>
+                tag == PlayerTag.GuildTag ? inGuild : CanUseTag(steamId, tag)
+            )
+            .ToArray();
+    }
+
+    public bool IsWearing(ulong steamId, PlayerTag tag) =>
+        stableTags.TryGetValue(steamId, out PlayerTag equippedTag) && equippedTag == tag;
+
+    /* Gives the best usable tag to a player who has none and never removed theirs */
+    public bool TryAutoEquipBestTag(ulong steamId)
+    {
+        if (stableTags.ContainsKey(steamId) || clearedSteamIds.Contains(steamId))
+            return false;
+
+        PlayerTag[] usableTags = GetUsableTags(steamId);
+        if (usableTags.Length == 0)
+            return false;
+
+        try
+        {
+            SetTag(steamId, usableTags[0]);
+            return true;
+        }
+        catch (IOException ex)
+        {
+            Console.WriteLine($"Failed to auto-equip a tag for {steamId}: {ex}");
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.WriteLine($"Failed to auto-equip a tag for {steamId}: {ex}");
+        }
+
+        return false;
+    }
+
+    /* Join hint, only for players wearing a visible tag who have others to choose from */
+    public string? GetTagHint(ulong steamId)
+    {
+        if (
+            hiddenSteamIds.Contains(steamId) ||
+            !stableTags.TryGetValue(steamId, out PlayerTag equippedTag)
+        )
+        {
+            return null;
+        }
+
+        string[] otherTags = GetUsableTags(steamId)
+            .Where(tag => tag != equippedTag)
+            .Select(GetTagToken)
+            .ToArray();
+        if (otherTags.Length == 0)
+            return null;
+
+        return
+            $"[aimLOCK] Your overhead tag is {GetTagToken(equippedTag)}. " +
+            $"You also have: {string.Join(", ", otherTags)}. Change it with /tag <name>.";
     }
 
 
@@ -210,7 +299,12 @@ public sealed class PlayerTagManager
     public void RefreshGuildTags()
     {
         foreach (var player in Players.GetAll())
+        {
+            // A player with no tag who just joined a guild gets the guild tag.
+            if (!player.IsBot)
+                TryAutoEquipBestTag(player.PlayerSteamId);
             RefreshPlayerTag(player);
+        }
     }
 
     public void RefreshPlayerTag(CCitadelPlayerController player)
@@ -690,6 +784,40 @@ public sealed class PlayerTagManager
         );
         foreach (ulong steamId in loaded)
             hiddenSteamIds.Add(steamId);
+    }
+
+    private void LoadClearedSteamIds()
+    {
+        var loaded = JsonStore.Load(
+            clearedTagsFilePath,
+            () => new HashSet<ulong>(),
+            JsonOptions
+        );
+        foreach (ulong steamId in loaded)
+            clearedSteamIds.Add(steamId);
+    }
+
+    private void SetTagCleared(ulong steamId, bool cleared)
+    {
+        if (clearedSteamIds.Contains(steamId) == cleared)
+            return;
+
+        var updatedClearedSteamIds = new HashSet<ulong>(clearedSteamIds);
+        if (cleared)
+            updatedClearedSteamIds.Add(steamId);
+        else
+            updatedClearedSteamIds.Remove(steamId);
+
+        JsonStore.Save(
+            clearedTagsFilePath,
+            updatedClearedSteamIds,
+            JsonOptions,
+            durable: false
+        );
+        if (cleared)
+            clearedSteamIds.Add(steamId);
+        else
+            clearedSteamIds.Remove(steamId);
     }
 
     private void SaveHiddenTags(HashSet<string> hiddenTagsToSave) =>
