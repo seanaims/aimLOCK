@@ -717,21 +717,4 @@ public partial class PlayerManager
 
     private static string FormatEloChange(int change) =>
         change > 0 ? $"+{change}" : change.ToString(CultureInfo.InvariantCulture);
-
-    public void SetPlayersInvulnerable(
-        CCitadelPlayerController player1,
-        CCitadelPlayerController player2,
-        bool enabled)
-    {
-        if (enabled)
-        {
-            player1.GetHeroPawn()?.AddModifier("modifier_invulnerable");
-            player2.GetHeroPawn()?.AddModifier("modifier_invulnerable");
-        }
-        else
-        {
-            player1.GetHeroPawn()?.RemoveModifier("modifier_invulnerable");
-            player2.GetHeroPawn()?.RemoveModifier("modifier_invulnerable");
-        }
-    }
 }

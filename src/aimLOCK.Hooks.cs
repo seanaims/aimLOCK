@@ -359,4 +359,22 @@ public partial class aimLOCK
     {
         return PlayerManager.OnPlayerDeath(args);
     }
+
+    private static string GetPenaltyTimeLeft(Penalty penalty)
+    {
+        string text = penalty.DescribeRemaining(DateTime.UtcNow);
+        return text.StartsWith("for ", StringComparison.OrdinalIgnoreCase)
+            ? text[4..]
+            : text;
+    }
+
+    private static string BuildMuteNotice(Penalty penalty)
+    {
+        string reason = string.IsNullOrWhiteSpace(penalty.Reason)
+            ? "No reason provided."
+            : penalty.Reason;
+        return
+            $"You are muted. Reason: {reason}. " +
+            $"Time left: {GetPenaltyTimeLeft(penalty)}.";
+    }
 }
