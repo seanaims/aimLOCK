@@ -100,9 +100,9 @@ public partial class aimLOCK : DeadworksPluginBase
     public readonly Random random = new();
 
     // Managers
-    public QueueManager Queue { get; private set; }
-    public PlayerManager PlayerManager { get; private set; }
-    public UIManager UIManager { get; private set; }
+    public QueueManager Queue { get; private set; } = null!;
+    public PlayerManager PlayerManager { get; private set; } = null!;
+    public UIManager UIManager { get; private set; } = null!;
     public RankedEloManager RankedElo { get; private set; } = null!;
     public LeaderboardManager LeaderboardManager { get; private set; } = null!;
     public PingManager PingManager { get; private set; } = null!;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Numerics;
@@ -307,75 +308,125 @@ public sealed class PlayerTagManager
         {
             RemoveTagEntity(steamId);
             if (retriesRemaining > 0)
-            {
-                server.ScheduleOnce(0.5.Seconds(), () =>
-                {
-                    if (
-                        refreshVersions.TryGetValue(steamId, out int activeVersion) &&
-                        activeVersion == version
-                    )
-                    {
-                        RefreshPlayerTag(
-                            player,
-                            version,
-                            retriesRemaining - 1
-                        );
-                    }
-                });
-            }
-
+                ScheduleTagRetry(player, steamId, version, retriesRemaining - 1);
             return;
         }
 
         if (
+            !TryGetReusableTagEntities(
+                steamId,
+                tag,
+                pawn,
+                out CPointWorldText? background,
+                out CPointWorldText[]? tagEntities
+            )
+        )
+        {
+            RemoveTagEntity(steamId);
+            if (
+                !TryCreateTagEntities(
+                    steamId,
+                    playerName,
+                    pawn,
+                    tag,
+                    segments,
+                    out background,
+                    out tagEntities
+                )
+            )
+            {
+                return;
+            }
+
+            activeTags[steamId] = tagEntities;
+            activeTagBackgrounds[steamId] = background;
+            activeTagValues[steamId] = tag;
+            activeTagPawnHandles[steamId] = pawn.EntityHandle;
+        }
+
+        UpdateTagTransforms(
+            steamId,
+            pawn,
+            background,
+            tagEntities,
+            segments
+        );
+        ScheduleTagOrientationRefresh(new TagOrientationRefresh(
+            this,
+            player,
+            background,
+            tagEntities,
+            segments,
+            version
+        ));
+    }
+
+    /* The hero pawn is not ready yet: try again unless a newer refresh started */
+    private void ScheduleTagRetry(
+        CCitadelPlayerController player,
+        ulong steamId,
+        int version,
+        int retriesRemaining
+    )
+    {
+        server.ScheduleOnce(0.5.Seconds(), () =>
+        {
+            if (
+                refreshVersions.TryGetValue(steamId, out int activeVersion) &&
+                activeVersion == version
+            )
+            {
+                RefreshPlayerTag(player, version, retriesRemaining);
+            }
+        });
+    }
+
+    /* The same tag on the same pawn keeps its entities; guild tags are always rebuilt */
+    private bool TryGetReusableTagEntities(
+        ulong steamId,
+        PlayerTag tag,
+        CCitadelPlayerPawn pawn,
+        [NotNullWhen(true)] out CPointWorldText? background,
+        [NotNullWhen(true)] out CPointWorldText[]? tagEntities
+    )
+    {
+        background = null;
+        tagEntities = null;
+        return
             activeTagValues.TryGetValue(steamId, out PlayerTag activeTag) &&
             activeTag == tag &&
             tag != PlayerTag.GuildTag &&
-            activeTagPawnHandles.TryGetValue(
-                steamId,
-                out uint activePawnHandle
-            ) &&
+            activeTagPawnHandles.TryGetValue(steamId, out uint activePawnHandle) &&
             activePawnHandle == pawn.EntityHandle &&
-            activeTagBackgrounds.TryGetValue(
-                steamId,
-                out var activeBackground
-            ) &&
-            activeBackground.IsValid &&
-            activeTags.TryGetValue(steamId, out var existingTags) &&
-            AreTagEntitiesValid(existingTags)
-        )
-        {
-            UpdateTagTransforms(
-                steamId,
-                pawn,
-                activeBackground,
-                existingTags,
-                segments
-            );
-            ScheduleTagOrientationRefresh(new TagOrientationRefresh(
-                this,
-                player,
-                activeBackground,
-                existingTags,
-                segments,
-                version
-            ));
-            return;
-        }
+            activeTagBackgrounds.TryGetValue(steamId, out background) &&
+            background.IsValid &&
+            activeTags.TryGetValue(steamId, out tagEntities) &&
+            AreTagEntitiesValid(tagEntities);
+    }
 
-        RemoveTagEntity(steamId);
-        CPointWorldText? backgroundText = CreateTagBackground(
+    private static bool TryCreateTagEntities(
+        ulong steamId,
+        string playerName,
+        CCitadelPlayerPawn pawn,
+        PlayerTag tag,
+        TagSegment[] segments,
+        [NotNullWhen(true)] out CPointWorldText? background,
+        [NotNullWhen(true)] out CPointWorldText[]? tagEntities
+    )
+    {
+        tagEntities = null;
+        background = CreateTagBackground(
             steamId,
             pawn,
             tag,
             segments
         );
-        if (backgroundText == null)
+        if (background == null)
         {
             Console.WriteLine(
                 $"[aimLOCK] Failed to create the background for {playerName}'s overhead tag."
             );
-            return;
+            return false;
         }
 
         var createdTags = new List<CPointWorldText>(segments.Length);
@@ -393,14 +444,14 @@ public sealed class PlayerTagManager
 
             if (tagEntity == null)
             {
-                backgroundText.Remove();
+                background.Remove();
                 foreach (var createdTag in createdTags)
                     createdTag.Remove();
 
                 Console.WriteLine(
                     $"[aimLOCK] Failed to create the overhead tag for {playerName}."
                 );
-                return;
+                return false;
             }
 
             tagEntity.ColorABGR = segment.Color;
@@ -415,26 +466,8 @@ public sealed class PlayerTagManager
             createdTags.Add(tagEntity);
         }
 
-        CPointWorldText[] tagEntities = createdTags.ToArray();
-        activeTags[steamId] = tagEntities;
-        activeTagBackgrounds[steamId] = backgroundText;
-        activeTagValues[steamId] = tag;
-        activeTagPawnHandles[steamId] = pawn.EntityHandle;
-        UpdateTagTransforms(
-            steamId,
-            pawn,
-            backgroundText,
-            tagEntities,
-            segments
-        );
-        ScheduleTagOrientationRefresh(new TagOrientationRefresh(
-            this,
-            player,
-            backgroundText,
-            tagEntities,
-            segments,
-            version
-        ));
+        tagEntities = createdTags.ToArray();
+        return true;
     }
 
     private void ScheduleTagOrientationRefresh(
