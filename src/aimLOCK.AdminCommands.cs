@@ -46,38 +46,17 @@ public partial class aimLOCK
     )]
     public void ResetEloCommand(Caller caller, string playerName)
     {
-        if (!TryResolvePlayerSteamId(
+        ResetPlayerData(
+            caller,
             playerName,
-            out ulong steamId,
-            out string targetName,
-            out string error
-        ))
-        {
-            caller.Reply(error);
-            return;
-        }
-
-        try
-        {
-            RankedElo.ResetRating(
+            "Elo",
+            (steamId, targetName) => RankedElo.ResetRating(
                 steamId.ToString(CultureInfo.InvariantCulture),
                 targetName
-            );
-            LeaderboardManager.Refresh();
-            caller.Reply(
+            ),
+            targetName =>
                 $"Reset {targetName}'s ranked Elo to {RankedEloManager.InitialRating} and ranked wins/losses."
-            );
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to reset Elo for {targetName}: {ex}");
-            caller.Reply("Could not save the Elo reset.");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Access denied resetting Elo for {targetName}: {ex}");
-            caller.Reply("Could not save the Elo reset.");
-        }
+        );
     }
 
     [Command(
@@ -116,40 +95,16 @@ public partial class aimLOCK
     )]
     public void ResetRankedRecordCommand(Caller caller, string playerName)
     {
-        if (!TryResolvePlayerSteamId(
+        ResetPlayerData(
+            caller,
             playerName,
-            out ulong steamId,
-            out string targetName,
-            out string error
-        ))
-        {
-            caller.Reply(error);
-            return;
-        }
-
-        try
-        {
-            RankedElo.ResetRecord(
+            "ranked record",
+            (steamId, targetName) => RankedElo.ResetRecord(
                 steamId.ToString(CultureInfo.InvariantCulture),
                 targetName
-            );
-            LeaderboardManager.Refresh();
-            caller.Reply(
-                $"Reset {targetName}'s ranked wins/losses; Elo was preserved."
-            );
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Failed to reset ranked record for {targetName}: {ex}");
-            caller.Reply("Could not save the ranked record reset.");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine(
-                $"Access denied resetting ranked record for {targetName}: {ex}"
-            );
-            caller.Reply("Could not save the ranked record reset.");
-        }
+            ),
+            targetName => $"Reset {targetName}'s ranked wins/losses; Elo was preserved."
+        );
     }
 
     [Command(
@@ -160,6 +115,24 @@ public partial class aimLOCK
         SuppressChat = true
     )]
     public void ResetUnrankedRecordCommand(Caller caller, string playerName)
+    {
+        ResetPlayerData(
+            caller,
+            playerName,
+            "unranked record",
+            (steamId, targetName) => PlayerManager.ResetUnrankedRecord(steamId, targetName),
+            targetName => $"Reset {targetName}'s unranked wins/losses."
+        );
+    }
+
+    /* Shared by the reset commands; dataName names the data in logs and replies */
+    private void ResetPlayerData(
+        Caller caller,
+        string playerName,
+        string dataName,
+        Action<ulong, string> reset,
+        Func<string, string> successReply
+    )
     {
         if (!TryResolvePlayerSteamId(
             playerName,
@@ -174,23 +147,19 @@ public partial class aimLOCK
 
         try
         {
-            PlayerManager.ResetUnrankedRecord(steamId, targetName);
+            reset(steamId, targetName);
             LeaderboardManager.Refresh();
-            caller.Reply($"Reset {targetName}'s unranked wins/losses.");
+            caller.Reply(successReply(targetName));
         }
         catch (IOException ex)
         {
-            Console.WriteLine(
-                $"Failed to reset unranked record for {targetName}: {ex}"
-            );
-            caller.Reply("Could not save the unranked record reset.");
+            Console.WriteLine($"Failed to reset {dataName} for {targetName}: {ex}");
+            caller.Reply($"Could not save the {dataName} reset.");
         }
         catch (UnauthorizedAccessException ex)
         {
-            Console.WriteLine(
-                $"Access denied resetting unranked record for {targetName}: {ex}"
-            );
-            caller.Reply("Could not save the unranked record reset.");
+            Console.WriteLine($"Failed to reset {dataName} for {targetName}: {ex}");
+            caller.Reply($"Could not save the {dataName} reset.");
         }
     }
 
