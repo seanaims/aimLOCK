@@ -260,27 +260,13 @@ public class QueueManager
             return false;
         }
 
-        var onlinePlayers = Players.GetAll()
-            .Where(player =>
+        var matches = PlayerLookup.FindByName(
+            Players.GetAll().Where(player =>
                 !player.IsBot &&
                 player.EntityHandle != initiator.EntityHandle
-            )
-            .ToArray();
-        var exactMatches = onlinePlayers
-            .Where(player => string.Equals(
-                player.PlayerName,
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ))
-            .ToArray();
-        var matches = exactMatches.Length > 0
-            ? exactMatches
-            : onlinePlayers
-                .Where(player => player.PlayerName.StartsWith(
-                    targetName,
-                    StringComparison.OrdinalIgnoreCase
-                ))
-                .ToArray();
+            ),
+            targetName
+        );
 
         if (matches.Length == 0)
         {
@@ -348,22 +334,7 @@ public class QueueManager
             lifestealProposals.TryGetValue(currentMatch, out var proposal)
         )
         {
-            if (proposal.ProposerHandle == target.EntityHandle)
-            {
-                reply("Your opponent has to accept your lifesteal proposal.");
-                return false;
-            }
-
-            lifestealProposals.Remove(currentMatch);
-            if (proposal.ExpiresAt <= DateTimeOffset.UtcNow || currentMatch.Finished)
-            {
-                reply("That lifesteal proposal has expired.");
-                return false;
-            }
-
-            SetMatchLifesteal(currentMatch, proposal.Percent,
-                $"{target.PlayerName} accepted: this duel's lifesteal is now {proposal.Percent:0.#}%.");
-            return true;
+            return AcceptLifestealProposal(target, currentMatch, proposal, reply);
         }
 
         if (!pendingDuelRequests.TryGetValue(target.EntityHandle, out var request))
@@ -396,22 +367,13 @@ public class QueueManager
             return false;
         }
 
-        int arenaIndex;
-        if (request.ArenaIndex is int requestedArena)
+        if (!TryPickArena(request.ArenaIndex, out int arenaIndex))
         {
-            if (!IsArenaAvailable(requestedArena))
-            {
-                reply(
-                    $"Arena {requestedArena + 1} ({aimLOCK.DuelArenaNames[requestedArena]}) is currently in use. Try again when it is free."
-                );
-                return false;
-            }
-
-            arenaIndex = requestedArena;
-        }
-        else if (!TryGetAvailableArena(out arenaIndex))
-        {
-            reply("All duel arenas are currently in use. Try again when one is free.");
+            reply(
+                request.ArenaIndex is int requestedArena
+                    ? $"Arena {requestedArena + 1} ({aimLOCK.DuelArenaNames[requestedArena]}) is currently in use. Try again when it is free."
+                    : "All duel arenas are currently in use. Try again when one is free."
+            );
             return false;
         }
 
@@ -441,6 +403,34 @@ public class QueueManager
         Chat.PrintToChat(
             request.Initiator,
             $"{target.PlayerName} accepted your duel request{arenaMessage}. Starting match..."
+        );
+        return true;
+    }
+
+    private bool AcceptLifestealProposal(
+        CCitadelPlayerController target,
+        DuelMatch match,
+        LifestealProposal proposal,
+        Action<string> reply
+    )
+    {
+        if (proposal.ProposerHandle == target.EntityHandle)
+        {
+            reply("Your opponent has to accept your lifesteal proposal.");
+            return false;
+        }
+
+        lifestealProposals.Remove(match);
+        if (proposal.ExpiresAt <= DateTimeOffset.UtcNow || match.Finished)
+        {
+            reply("That lifesteal proposal has expired.");
+            return false;
+        }
+
+        SetMatchLifesteal(
+            match,
+            proposal.Percent,
+            $"{target.PlayerName} accepted: this duel's lifesteal is now {proposal.Percent:0.#}%."
         );
         return true;
     }

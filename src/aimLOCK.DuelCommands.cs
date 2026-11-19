@@ -332,37 +332,19 @@ public partial class aimLOCK
         caller.Reply($"Teleported to {matches[0].PlayerName}.");
     }
 
-    /* Other human players by name: exact matches win, otherwise names starting with the text */
     private static CCitadelPlayerController[] FindTeleportTargets(
         CCitadelPlayerController player,
         string targetName
-    )
-    {
-        var onlinePlayers = Players.GetAll()
-            .Where(target =>
+    ) =>
+        PlayerLookup.FindByName(
+            Players.GetAll().Where(target =>
                 !target.IsBot &&
                 !string.Equals(
                     target.PlayerName,
                     player.PlayerName,
                     StringComparison.OrdinalIgnoreCase
                 )
-            )
-            .ToArray();
-        var exactMatches = onlinePlayers
-            .Where(target => string.Equals(
-                target.PlayerName,
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ))
-            .ToArray();
-        if (exactMatches.Length > 0)
-            return exactMatches;
-
-        return onlinePlayers
-            .Where(target => target.PlayerName.StartsWith(
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ))
-            .ToArray();
-    }
+            ),
+            targetName
+        );
 }
