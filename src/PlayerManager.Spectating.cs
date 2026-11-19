@@ -31,23 +31,7 @@ public partial class PlayerManager
             string.Equals(arguments[0], "list", StringComparison.OrdinalIgnoreCase)
         )
         {
-            if (matches.Length == 0)
-            {
-                caller.Reply("There are no active matches.");
-                return;
-            }
-
-            foreach (var match in matches)
-            {
-                string state = match.ArenaInitialized
-                    ? ""
-                    : " | initializing";
-                caller.Reply(
-                    $"{GetMatchParticipantDisplayName(match.Player1)} vs " +
-                    $"{GetMatchParticipantDisplayName(match.Player2)} | " +
-                    $"{match.Score1}-{match.Score2}{state}"
-                );
-            }
+            ListActiveMatches(caller, matches);
             return;
         }
 
@@ -87,45 +71,7 @@ public partial class PlayerManager
             return;
         }
 
-        bool MatchesParticipantExactly(string matchKey) =>
-            string.Equals(
-                matchKey,
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ) ||
-            string.Equals(
-                GetMatchParticipantDisplayName(matchKey),
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            );
-        bool MatchesParticipantPrefix(string matchKey)
-        {
-            string displayName = GetMatchParticipantDisplayName(matchKey);
-            return matchKey.StartsWith(
-                    targetName,
-                    StringComparison.OrdinalIgnoreCase
-                ) ||
-                displayName.StartsWith(
-                    targetName,
-                    StringComparison.OrdinalIgnoreCase
-                );
-        }
-
-        var exactMatches = matches
-            .Where(match =>
-                MatchesParticipantExactly(match.Player1) ||
-                MatchesParticipantExactly(match.Player2)
-            )
-            .ToArray();
-        var matchingMatches = exactMatches.Length > 0
-            ? exactMatches
-            : matches
-                .Where(match =>
-                    MatchesParticipantPrefix(match.Player1) ||
-                    MatchesParticipantPrefix(match.Player2)
-                )
-                .ToArray();
-
+        var matchingMatches = FindMatchesByParticipant(matches, targetName);
         if (matchingMatches.Length == 0)
         {
             caller.Reply(
@@ -166,6 +112,62 @@ public partial class PlayerManager
             $"Spectating {GetMatchParticipantDisplayName(matchToSpectate.Player1)} " +
             $"vs {GetMatchParticipantDisplayName(matchToSpectate.Player2)}."
         );
+    }
+
+    private void ListActiveMatches(Caller caller, DuelMatch[] matches)
+    {
+        if (matches.Length == 0)
+        {
+            caller.Reply("There are no active matches.");
+            return;
+        }
+
+        foreach (var match in matches)
+        {
+            string state = match.ArenaInitialized
+                ? ""
+                : " | initializing";
+            caller.Reply(
+                $"{GetMatchParticipantDisplayName(match.Player1)} vs " +
+                $"{GetMatchParticipantDisplayName(match.Player2)} | " +
+                $"{match.Score1}-{match.Score2}{state}"
+            );
+        }
+    }
+
+    /* Exact name matches win; otherwise names starting with the text */
+    private DuelMatch[] FindMatchesByParticipant(DuelMatch[] matches, string targetName)
+    {
+        bool IsExactly(string matchKey) =>
+            string.Equals(
+                matchKey,
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            ) ||
+            string.Equals(
+                GetMatchParticipantDisplayName(matchKey),
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            );
+        bool StartsWith(string matchKey) =>
+            matchKey.StartsWith(
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            ) ||
+            GetMatchParticipantDisplayName(matchKey).StartsWith(
+                targetName,
+                StringComparison.OrdinalIgnoreCase
+            );
+
+        var exactMatches = matches
+            .Where(match => IsExactly(match.Player1) || IsExactly(match.Player2))
+            .ToArray();
+        if (exactMatches.Length > 0)
+            return exactMatches;
+
+        return matches
+            .Where(match => StartsWith(match.Player1) || StartsWith(match.Player2))
+            .ToArray();
     }
 
     public void StopSpectating(CCitadelPlayerController player)
