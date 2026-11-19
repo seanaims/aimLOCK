@@ -805,18 +805,8 @@ public class QueueManager
         bool alreadyInArena = false
     )
     {
-        int arenaIndex;
-        if (selectedArenaIndex is int selectedIndex)
-        {
-            if (!IsArenaAvailable(selectedIndex))
-                return false;
-
-            arenaIndex = selectedIndex;
-        }
-        else if (!TryGetAvailableArena(out arenaIndex))
-        {
+        if (!TryPickArena(selectedArenaIndex, out int arenaIndex))
             return false;
-        }
 
         if (player1.IsBot)
             server.PlayerManager.ResetPracticeBotRecord(player1);
@@ -824,158 +814,199 @@ public class QueueManager
             server.PlayerManager.ResetPracticeBotRecord(player2);
 
         if (!player1.IsBot && !player2.IsBot)
-        {
-            string[] matchFoundLines =
-            {
-                "  [MATCH FOUND]",
-                GetMatchFoundPlayerLine(player1, queueType),
-                GetMatchFoundPingLine(player1),
-                "                 VS",
-                GetMatchFoundPlayerLine(player2, queueType),
-                GetMatchFoundPingLine(player2)
-            };
-            int matchFoundWidth = matchFoundLines.Max(line => line.Length);
-            string matchFoundMessage = string.Join(
-                "\n",
-                matchFoundLines.Select(line =>
-                    line.PadLeft((matchFoundWidth + line.Length) / 2))
-            );
-            Chat.PrintToChat(player1, matchFoundMessage);
-            Chat.PrintToChat(player2, matchFoundMessage);
-        }
+            AnnounceMatchFound(player1, player2, queueType);
 
         Console.WriteLine(
             $"Starting match: {player1.PlayerName} vs {player2.PlayerName}"
         );
 
-        Vector3 arena = server.DuelLocations[arenaIndex];
-        string player1MatchKey =
-            server.PlayerManager.GetMatchParticipantName(player1);
-        string player2MatchKey =
-            server.PlayerManager.GetMatchParticipantName(player2);
-        var player1Pawn = player1.GetHeroPawn();
-        var player2Pawn = player2.GetHeroPawn();
-        var match = new DuelMatch
-        {
-            Player1 = player1MatchKey,
-            Player2 = player2MatchKey,
-            Player1ItemsBeforeMatch = PlayerManager.GetOwnedDuelItems(player1Pawn),
-            Player2ItemsBeforeMatch = PlayerManager.GetOwnedDuelItems(player2Pawn),
-            QueueType = queueType,
-            ArenaPosition = arena,
-            ArenaIndex = arenaIndex,
-            Score1 = 0,
-            Score2 = 0
-        };
-        match.BuyingAllowed =
-            player1.IsBot ||
-            player2.IsBot ||
-            (
-                server.PlayerManager.AllowsDuelBuying(player1) &&
-                server.PlayerManager.AllowsDuelBuying(player2)
-            );
-
-        server.PendingRespawns.Remove(player1MatchKey);
-        server.PendingRespawns.Remove(player2MatchKey);
-        server.ActiveMatches[player1MatchKey] = match;
-        server.ActiveMatches[player2MatchKey] = match;
+        DuelMatch match = CreateMatch(player1, player2, queueType, arenaIndex);
+        server.PendingRespawns.Remove(match.Player1);
+        server.PendingRespawns.Remove(match.Player2);
+        server.ActiveMatches[match.Player1] = match;
+        server.ActiveMatches[match.Player2] = match;
         server.LeaderboardManager.RefreshActiveMatches();
-        // A bot match starts next tick and InitializeMatchInArena shows the HUD then;
-        // building it here too sent every panel twice within two frames.
-        if (!alreadyInArena)
-            server.UIManager.ShowMatchHud(match);
 
-        void InitializeMatchInArena()
+        // A bot match whose player is already standing in the arena skips the 2 s
+        // wait: there is nowhere to teleport to. InitializeMatchInArena shows its HUD;
+        // building it here too sent every panel twice within two frames.
+        if (alreadyInArena)
+        {
+            server.ScheduleNextTick(
+                () => InitializeMatchInArena(match, player1, player2)
+            );
+        }
+        else
+        {
+            server.UIManager.ShowMatchHud(match);
+            server.ScheduleOnce(
+                2.Seconds(),
+                () => InitializeMatchInArena(match, player1, player2)
+            );
+        }
+
+        return true;
+    }
+
+    private bool TryPickArena(int? selectedArenaIndex, out int arenaIndex)
+    {
+        if (selectedArenaIndex is int selectedIndex)
+        {
+            arenaIndex = selectedIndex;
+            return IsArenaAvailable(selectedIndex);
+        }
+
+        return TryGetAvailableArena(out arenaIndex);
+    }
+
+    private void AnnounceMatchFound(
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2,
+        MatchQueueType queueType
+    )
+    {
+        string[] lines =
+        {
+            "  [MATCH FOUND]",
+            GetMatchFoundPlayerLine(player1, queueType),
+            GetMatchFoundPingLine(player1),
+            "                 VS",
+            GetMatchFoundPlayerLine(player2, queueType),
+            GetMatchFoundPingLine(player2)
+        };
+        // Centre every line on the widest one.
+        int width = lines.Max(line => line.Length);
+        string message = string.Join(
+            "\n",
+            lines.Select(line => line.PadLeft((width + line.Length) / 2))
+        );
+        Chat.PrintToChat(player1, message);
+        Chat.PrintToChat(player2, message);
+    }
+
+    private DuelMatch CreateMatch(
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2,
+        MatchQueueType queueType,
+        int arenaIndex
+    )
+    {
+        var playerManager = server.PlayerManager;
+        return new DuelMatch
+        {
+            Player1 = playerManager.GetMatchParticipantName(player1),
+            Player2 = playerManager.GetMatchParticipantName(player2),
+            Player1ItemsBeforeMatch =
+                PlayerManager.GetOwnedDuelItems(player1.GetHeroPawn()),
+            Player2ItemsBeforeMatch =
+                PlayerManager.GetOwnedDuelItems(player2.GetHeroPawn()),
+            QueueType = queueType,
+            ArenaPosition = server.DuelLocations[arenaIndex],
+            ArenaIndex = arenaIndex,
+            BuyingAllowed =
+                player1.IsBot ||
+                player2.IsBot ||
+                (
+                    playerManager.AllowsDuelBuying(player1) &&
+                    playerManager.AllowsDuelBuying(player2)
+                )
+        };
+    }
+
+    private void InitializeMatchInArena(
+        DuelMatch match,
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2
+    )
+    {
+        if (match.Finished)
+            return;
+
+        PlayerManager.EnsureTeam(player1, 2);
+        PlayerManager.EnsureTeam(player2, 3);
+
+        var pawn1 = player1.IsValid ? player1.GetHeroPawn() : null;
+        var pawn2 = player2.IsValid ? player2.GetHeroPawn() : null;
+        if (pawn1 == null || pawn2 == null)
+        {
+            Console.WriteLine("A player pawn is null.");
+            CancelMatch(match, player1, player2);
+            return;
+        }
+
+        var playerManager = server.PlayerManager;
+        pawn1.RemoveModifier("modifier_speed_boost");
+        pawn2.RemoveModifier("modifier_speed_boost");
+
+        Vector3 arenaCenter = playerManager.GetDuelArenaCenter(match.ArenaPosition);
+        pawn1.Teleport(
+            arenaCenter + new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
+            new Vector3(0f, 45f, 0f),
+            null
+        );
+        pawn2.Teleport(
+            arenaCenter + new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
+            new Vector3(0f, 180f, 0f),
+            null
+        );
+        playerManager.ConfigurePracticeBotStrafe(pawn1, pawn2);
+        server.UIManager.ShowMatchHud(match);
+
+        playerManager.ApplyDuelMatchModifiers(pawn1);
+        playerManager.ApplyDuelMatchModifiers(pawn2);
+        playerManager.ApplyDuelBulletLifesteal(pawn1);
+        playerManager.ApplyDuelBulletLifesteal(pawn2);
+        // The item stack is the biggest batch of changes per pawn; do the second
+        // pawn on the next tick so both don't land in the same server frame.
+        playerManager.ApplyDuelItemStack(pawn1);
+        pawn1.RemoveAbility("upgrade_infinite_rounds");
+        server.ScheduleNextTick(() =>
+        {
+            if (match.Finished || !pawn2.IsValid)
+                return;
+
+            server.PlayerManager.ApplyDuelItemStack(pawn2);
+            pawn2.RemoveAbility("upgrade_infinite_rounds");
+        });
+
+        match.ArenaInitialized = true;
+        playerManager.ShowArenaScoreboard(match);
+        playerManager.StartDuelHealthCapMonitor(match);
+        playerManager.SetMatchDisarmed(match, true);
+        server.ScheduleOnce(0.25.Seconds(), () =>
         {
             if (match.Finished)
                 return;
 
-            PlayerManager.EnsureTeam(player1, 2);
-            PlayerManager.EnsureTeam(player2, 3);
+            server.PlayerManager.PrepareDuelMatchHealth(match);
+            server.EnableMatchInfiniteAmmo();
+            StartCountdown(match);
+        });
 
-            var pawn1 = player1.IsValid ? player1.GetHeroPawn() : null;
-            var pawn2 = player2.IsValid ? player2.GetHeroPawn() : null;
+        Console.WriteLine(
+            $"Match Found! {player1.PlayerName} vs {player2.PlayerName}"
+        );
+    }
 
-            if (pawn1 == null || pawn2 == null)
-            {
-                Console.WriteLine("A player pawn is null.");
-                match.Finished = true;
-                server.ActiveMatches.Remove(match.Player1);
-                server.ActiveMatches.Remove(match.Player2);
-                server.PendingRespawns.Remove(match.Player1);
-                server.PendingRespawns.Remove(match.Player2);
-                if (player1.IsValid)
-                    player1.ChangeTeam(2);
-                if (player2.IsValid)
-                    player2.ChangeTeam(2);
-                server.UIManager.RestoreHudAfterMatch(match);
-                server.PlayerManager.OnDuelMatchFinished(match);
-                server.Queue.TryStartMatches();
-                return;
-            }
-
-            pawn1.RemoveModifier("modifier_speed_boost");
-            pawn2.RemoveModifier("modifier_speed_boost");
-
-            Vector3 arenaCenter =
-                server.PlayerManager.GetDuelArenaCenter(arena);
-            pawn1.Teleport(
-                arenaCenter + new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-                new Vector3(0f, 45f, 0f),
-                null
-            );
-
-            pawn2.Teleport(
-                arenaCenter + new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-                new Vector3(0f, 180f, 0f),
-                null
-            );
-            server.PlayerManager.ConfigurePracticeBotStrafe(pawn1, pawn2);
-            server.UIManager.ShowMatchHud(match);
-
-            server.PlayerManager.ApplyDuelMatchModifiers(pawn1);
-            server.PlayerManager.ApplyDuelMatchModifiers(pawn2);
-            server.PlayerManager.ApplyDuelBulletLifesteal(pawn1);
-            server.PlayerManager.ApplyDuelBulletLifesteal(pawn2);
-            // The item stack is the biggest batch of changes per pawn; do the second
-            // pawn on the next tick so both don't land in the same server frame.
-            server.PlayerManager.ApplyDuelItemStack(pawn1);
-            pawn1.RemoveAbility("upgrade_infinite_rounds");
-            server.ScheduleNextTick(() =>
-            {
-                if (match.Finished || !pawn2.IsValid)
-                    return;
-
-                server.PlayerManager.ApplyDuelItemStack(pawn2);
-                pawn2.RemoveAbility("upgrade_infinite_rounds");
-            });
-
-            match.ArenaInitialized = true;
-            server.PlayerManager.ShowArenaScoreboard(match);
-            server.PlayerManager.StartDuelHealthCapMonitor(match);
-            server.PlayerManager.SetMatchDisarmed(match, true);
-            server.ScheduleOnce(0.25.Seconds(), () =>
-            {
-                if (match.Finished)
-                    return;
-
-                server.PlayerManager.PrepareDuelMatchHealth(match);
-                server.EnableMatchInfiniteAmmo();
-                StartCountdown(match);
-            });
-
-            Console.WriteLine(
-                $"Match Found! {player1.PlayerName} vs {player2.PlayerName}"
-            );
-        }
-
-        // A bot match whose player is already standing in the arena skips the 2 s
-        // wait: there is nowhere to teleport to.
-        if (alreadyInArena)
-            server.ScheduleNextTick(InitializeMatchInArena);
-        else
-            server.ScheduleOnce(2.Seconds(), InitializeMatchInArena);
-        return true;
+    /* A player lost their pawn before the match could start */
+    private void CancelMatch(
+        DuelMatch match,
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2
+    )
+    {
+        match.Finished = true;
+        server.ActiveMatches.Remove(match.Player1);
+        server.ActiveMatches.Remove(match.Player2);
+        server.PendingRespawns.Remove(match.Player1);
+        server.PendingRespawns.Remove(match.Player2);
+        if (player1.IsValid)
+            player1.ChangeTeam(2);
+        if (player2.IsValid)
+            player2.ChangeTeam(2);
+        server.UIManager.RestoreHudAfterMatch(match);
+        server.PlayerManager.OnDuelMatchFinished(match);
+        server.Queue.TryStartMatches();
     }
 
     private static int GetAllowedPingDifference(double oldestWaitSeconds)
