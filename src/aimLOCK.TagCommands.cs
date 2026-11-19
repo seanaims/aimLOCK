@@ -11,6 +11,8 @@ namespace aimLOCK;
 
 public partial class aimLOCK
 {
+    private const string TagManagePermission = "aimlock.tags.manage";
+
     [Command(
         "tag",
         Description = "Equip or clear an admin-granted overhead tag or manage access: tag <tagname|clear|list|give|revoke>.",
@@ -26,239 +28,207 @@ public partial class aimLOCK
             return;
         }
 
-        if (string.Equals(arguments[0], "give", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!caller.HasPermission("aimlock.tags.manage"))
-            {
-                caller.Reply("Only admins can grant overhead tag access.");
-                return;
-            }
+        if (IsTagKeyword(arguments[0], "give"))
+            GrantTagAccess(caller, arguments);
+        else if (IsTagKeyword(arguments[0], "revoke"))
+            RevokeTagAccess(caller, arguments);
+        else if (arguments.Length > 1)
+            SetOtherPlayerTag(caller, arguments);
+        else if (IsTagKeyword(arguments[0], "list"))
+            ListOwnTagAccess(caller);
+        else
+            SetOwnTag(caller, arguments[0]);
+    }
 
-            if (
-                arguments.Length < 3 ||
-                string.IsNullOrWhiteSpace(string.Join(" ", arguments.Skip(1).Take(arguments.Length - 2)))
-            )
-            {
-                caller.Reply("Use /tag give <player name|SteamID64> <tagname>.");
-                return;
-            }
+    private static bool IsTagKeyword(string argument, string keyword) =>
+        string.Equals(argument, keyword, StringComparison.OrdinalIgnoreCase);
 
-            string targetName = string.Join(
-                " ",
-                arguments.Skip(1).Take(arguments.Length - 2)
-            ).Trim();
-            if (!PlayerTagManager.TryParseTag(arguments[^1], out PlayerTag grantedTag))
-            {
-                caller.Reply(
-                    "Choose a tag: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, or GUILDTAG."
-                );
-                return;
-            }
-
-            if (
-                !TryResolveTagTarget(
-                    targetName,
-                    out ulong targetSteamId,
-                    out string error
-                )
-            )
-            {
-                caller.Reply(error);
-                return;
-            }
-
-            try
-            {
-                PlayerTagManager.GrantTag(targetSteamId, grantedTag);
-                caller.Reply(
-                    $"Granted {PlayerTagManager.GetTagToken(grantedTag)} tag access to {targetName}. " +
-                    $"They can equip it with /tag {PlayerTagManager.GetTagToken(grantedTag)}."
-                );
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine($"Failed to grant a tag to {targetName}: {ex}");
-                caller.Reply("Could not save the tag grant.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine($"Access denied granting a tag to {targetName}: {ex}");
-                caller.Reply("Could not save the tag grant.");
-            }
-
-            return;
-        }
-
-        if (string.Equals(arguments[0], "revoke", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!caller.HasPermission("aimlock.tags.manage"))
-            {
-                caller.Reply("Only admins can revoke overhead tag access.");
-                return;
-            }
-
-            if (
-                arguments.Length < 3 ||
-                string.IsNullOrWhiteSpace(string.Join(" ", arguments.Skip(1).Take(arguments.Length - 2)))
-            )
-            {
-                caller.Reply("Use /tag revoke <player name|SteamID64> <tagname>.");
-                return;
-            }
-
-            string targetName = string.Join(
-                " ",
-                arguments.Skip(1).Take(arguments.Length - 2)
-            ).Trim();
-            if (!PlayerTagManager.TryParseTag(arguments[^1], out PlayerTag revokedTag))
-            {
-                caller.Reply(
-                    "Choose a tag: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, or GUILDTAG."
-                );
-                return;
-            }
-
-            if (
-                !TryResolveTagTarget(
-                    targetName,
-                    out ulong targetSteamId,
-                    out string error
-                )
-            )
-            {
-                caller.Reply(error);
-                return;
-            }
-
-            try
-            {
-                if (!PlayerTagManager.RevokeTag(targetSteamId, revokedTag))
-                {
-                    caller.Reply(
-                        $"{targetName} does not have {PlayerTagManager.GetTagToken(revokedTag)} tag access."
-                    );
-                    return;
-                }
-
-                caller.Reply(
-                    $"Revoked {PlayerTagManager.GetTagToken(revokedTag)} tag access from {targetName}."
-                );
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine($"Failed to revoke a tag from {targetName}: {ex}");
-                caller.Reply("Could not save the tag change.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine($"Access denied revoking a tag from {targetName}: {ex}");
-                caller.Reply("Could not save the tag change.");
-            }
-
-            return;
-        }
-
+    /* /tag give <player name|SteamID64> <tagname> */
+    private void GrantTagAccess(Caller caller, string[] arguments)
+    {
         if (
-            arguments.Length == 1 &&
-            string.Equals(arguments[0], "list", StringComparison.OrdinalIgnoreCase)
+            !TryParseTagAccessArguments(
+                caller,
+                arguments,
+                "give",
+                "grant",
+                out string targetName,
+                out ulong targetSteamId,
+                out PlayerTag tag
+            )
         )
         {
-            var player = caller.Player;
-            if (player == null)
-            {
-                caller.Reply("Tag access lists are only available to players.");
-                return;
-            }
-
-            caller.Reply(PlayerTagManager.GetGrantedTagList(player.PlayerSteamId));
             return;
         }
 
-        if (arguments.Length == 1)
-        {
-            var player = caller.Player;
-            if (player == null)
-            {
-                caller.Reply("Only players can equip their own overhead tags.");
-                return;
-            }
+        bool saved = TrySaveTagChange(
+            caller,
+            () => PlayerTagManager.GrantTag(targetSteamId, tag),
+            $"grant a tag to {targetName}",
+            "Could not save the tag grant."
+        );
+        if (!saved)
+            return;
 
-            if (string.Equals(arguments[0], "clear", StringComparison.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    PlayerTagManager.RemoveTag(player.PlayerSteamId);
-                    caller.Reply("Your overhead tag was removed.");
-                }
-                catch (IOException ex)
-                {
-                    Console.WriteLine(
-                        $"Failed to remove tag for {player.PlayerName}: {ex}"
-                    );
-                    caller.Reply("Could not save the tag change.");
-                }
-                catch (UnauthorizedAccessException ex)
-                {
-                    Console.WriteLine(
-                        $"Access denied removing tag for {player.PlayerName}: {ex}"
-                    );
-                    caller.Reply("Could not save the tag change.");
-                }
+        string token = PlayerTagManager.GetTagToken(tag);
+        caller.Reply(
+            $"Granted {token} tag access to {targetName}. " +
+            $"They can equip it with /tag {token}."
+        );
+    }
 
-                return;
-            }
-
-            if (!PlayerTagManager.TryParseTag(arguments[0], out PlayerTag ownTag))
-            {
-                caller.Reply(
-                    "Use /tag <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG>, /tag clear, or /tagoff."
-                );
-                return;
-            }
-
-            if (!PlayerTagManager.CanUseTag(player.PlayerSteamId, ownTag))
-            {
-                caller.Reply(
-                    $"An admin must grant you {PlayerTagManager.GetTagToken(ownTag)} tag access first."
-                );
-                return;
-            }
-
-            if (
-                ownTag == PlayerTag.GuildTag &&
-                GuildManager.GetMemberTag(player.PlayerSteamId) == null
+    /* /tag revoke <player name|SteamID64> <tagname> */
+    private void RevokeTagAccess(Caller caller, string[] arguments)
+    {
+        if (
+            !TryParseTagAccessArguments(
+                caller,
+                arguments,
+                "revoke",
+                "revoke",
+                out string targetName,
+                out ulong targetSteamId,
+                out PlayerTag tag
             )
-            {
-                caller.Reply("You must be in a guild to use your guild tag.");
-                return;
-            }
-
-            try
-            {
-                PlayerTagManager.SetTag(player.PlayerSteamId, ownTag);
-                caller.Reply(
-                    $"Your overhead tag is now {PlayerTagManager.GetTagToken(ownTag)}."
-                );
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine(
-                    $"Failed to set tag for {player.PlayerName}: {ex}"
-                );
-                caller.Reply("Could not save the tag change.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine(
-                    $"Access denied setting tag for {player.PlayerName}: {ex}"
-                );
-                caller.Reply("Could not save the tag change.");
-            }
-
+        )
+        {
             return;
         }
 
-        if (!caller.HasPermission("aimlock.tags.manage"))
+        bool hadAccess = false;
+        bool saved = TrySaveTagChange(
+            caller,
+            () => hadAccess = PlayerTagManager.RevokeTag(targetSteamId, tag),
+            $"revoke a tag from {targetName}"
+        );
+        if (!saved)
+            return;
+
+        string token = PlayerTagManager.GetTagToken(tag);
+        caller.Reply(
+            hadAccess
+                ? $"Revoked {token} tag access from {targetName}."
+                : $"{targetName} does not have {token} tag access."
+        );
+    }
+
+    private bool TryParseTagAccessArguments(
+        Caller caller,
+        string[] arguments,
+        string subcommand,
+        string verb,
+        out string targetName,
+        out ulong targetSteamId,
+        out PlayerTag tag
+    )
+    {
+        targetName = "";
+        targetSteamId = 0;
+        tag = default;
+
+        if (!caller.HasPermission(TagManagePermission))
+        {
+            caller.Reply($"Only admins can {verb} overhead tag access.");
+            return false;
+        }
+
+        // Everything between the subcommand and the tag is the player name.
+        if (arguments.Length >= 3)
+            targetName = string.Join(" ", arguments[1..^1]).Trim();
+        if (targetName.Length == 0)
+        {
+            caller.Reply($"Use /tag {subcommand} <player name|SteamID64> <tagname>.");
+            return false;
+        }
+
+        if (!PlayerTagManager.TryParseTag(arguments[^1], out tag))
+        {
+            caller.Reply(
+                "Choose a tag: YT, TTV, OWNER, STAFF, AIMLOCK, SUPPORTER, or GUILDTAG."
+            );
+            return false;
+        }
+
+        if (!TryResolveTagTarget(targetName, out targetSteamId, out string error))
+        {
+            caller.Reply(error);
+            return false;
+        }
+
+        return true;
+    }
+
+    /* /tag list */
+    private void ListOwnTagAccess(Caller caller)
+    {
+        var player = caller.Player;
+        if (player == null)
+        {
+            caller.Reply("Tag access lists are only available to players.");
+            return;
+        }
+
+        caller.Reply(PlayerTagManager.GetGrantedTagList(player.PlayerSteamId));
+    }
+
+    /* /tag <tagname|clear> */
+    private void SetOwnTag(Caller caller, string tagName)
+    {
+        var player = caller.Player;
+        if (player == null)
+        {
+            caller.Reply("Only players can equip their own overhead tags.");
+            return;
+        }
+
+        ulong steamId = player.PlayerSteamId;
+        string playerName = player.PlayerName;
+        if (IsTagKeyword(tagName, "clear"))
+        {
+            bool removed = TrySaveTagChange(
+                caller,
+                () => PlayerTagManager.RemoveTag(steamId),
+                $"remove tag for {playerName}"
+            );
+            if (removed)
+                caller.Reply("Your overhead tag was removed.");
+            return;
+        }
+
+        if (!PlayerTagManager.TryParseTag(tagName, out PlayerTag tag))
+        {
+            caller.Reply(
+                "Use /tag <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG>, /tag clear, or /tagoff."
+            );
+            return;
+        }
+
+        string token = PlayerTagManager.GetTagToken(tag);
+        if (!PlayerTagManager.CanUseTag(steamId, tag))
+        {
+            caller.Reply($"An admin must grant you {token} tag access first.");
+            return;
+        }
+
+        if (tag == PlayerTag.GuildTag && GuildManager.GetMemberTag(steamId) == null)
+        {
+            caller.Reply("You must be in a guild to use your guild tag.");
+            return;
+        }
+
+        bool saved = TrySaveTagChange(
+            caller,
+            () => PlayerTagManager.SetTag(steamId, tag),
+            $"set tag for {playerName}"
+        );
+        if (saved)
+            caller.Reply($"Your overhead tag is now {token}.");
+    }
+
+    /* /tag <player name|SteamID64> <tagname|clear> */
+    private void SetOtherPlayerTag(Caller caller, string[] arguments)
+    {
+        if (!caller.HasPermission(TagManagePermission))
         {
             caller.Reply(
                 "Only admins can assign tags to other players. Use /tag <tagname|clear> for yourself."
@@ -266,51 +236,33 @@ public partial class aimLOCK
             return;
         }
 
-        string normalizedName = string.Join(
-            " ",
-            arguments.Take(arguments.Length - 1)
-        ).Trim();
-        string tag = arguments[^1];
-        if (string.IsNullOrWhiteSpace(normalizedName))
+        string targetName = string.Join(" ", arguments[..^1]).Trim();
+        string tagName = arguments[^1];
+        if (targetName.Length == 0)
         {
             caller.Reply("A player name is required.");
             return;
         }
 
-        if (
-            !TryResolveTagTarget(
-                normalizedName,
-                out ulong steamId,
-                out string resolveError
-            )
-        )
+        if (!TryResolveTagTarget(targetName, out ulong steamId, out string error))
         {
-            caller.Reply(resolveError);
+            caller.Reply(error);
             return;
         }
 
-        if (string.Equals(tag, "clear", StringComparison.OrdinalIgnoreCase))
+        if (IsTagKeyword(tagName, "clear"))
         {
-            try
-            {
-                PlayerTagManager.RemoveTag(steamId);
-                caller.Reply($"Removed the overhead tag for {normalizedName}.");
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine($"Failed to remove tag for {normalizedName}: {ex}");
-                caller.Reply("Could not save the tag change.");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Console.WriteLine($"Access denied removing tag for {normalizedName}: {ex}");
-                caller.Reply("Could not save the tag change.");
-            }
-
+            bool removed = TrySaveTagChange(
+                caller,
+                () => PlayerTagManager.RemoveTag(steamId),
+                $"remove tag for {targetName}"
+            );
+            if (removed)
+                caller.Reply($"Removed the overhead tag for {targetName}.");
             return;
         }
 
-        if (!PlayerTagManager.TryParseTag(tag, out PlayerTag playerTag))
+        if (!PlayerTagManager.TryParseTag(tagName, out PlayerTag tag))
         {
             caller.Reply(
                 "Use /tag <player name|SteamID64> <YT|TTV|OWNER|STAFF|AIMLOCK|SUPPORTER|GUILDTAG|clear>."
@@ -318,28 +270,48 @@ public partial class aimLOCK
             return;
         }
 
+        bool saved = TrySaveTagChange(
+            caller,
+            () => PlayerTagManager.SetTag(steamId, tag),
+            $"set tag for {targetName}"
+        );
+        if (saved)
+            caller.Reply($"Set the overhead tag for {targetName} to {GetTagDisplayText(tag)}.");
+    }
+
+    private static string GetTagDisplayText(PlayerTag tag) =>
+        tag switch
+        {
+            PlayerTag.Aimlock => "aimlock.xyz",
+            PlayerTag.Supporter => "[♥]",
+            PlayerTag.GuildTag => "guild tag",
+            _ => $"[{PlayerTagManager.GetTagToken(tag)}]",
+        };
+
+    /* Runs a tag change that saves to disk; replies and returns false when saving fails */
+    private static bool TrySaveTagChange(
+        Caller caller,
+        Action change,
+        string description,
+        string failureReply = "Could not save the tag change."
+    )
+    {
         try
         {
-            PlayerTagManager.SetTag(steamId, playerTag);
-            string displayTag = playerTag == PlayerTag.Aimlock
-                ? "aimlock.xyz"
-                : playerTag == PlayerTag.Supporter
-                    ? "[♥]"
-                    : playerTag == PlayerTag.GuildTag
-                        ? "guild tag"
-                        : $"[{PlayerTagManager.GetTagToken(playerTag)}]";
-            caller.Reply($"Set the overhead tag for {normalizedName} to {displayTag}.");
+            change();
+            return true;
         }
         catch (IOException ex)
         {
-            Console.WriteLine($"Failed to set tag for {normalizedName}: {ex}");
-            caller.Reply("Could not save the tag change.");
+            Console.WriteLine($"Failed to {description}: {ex}");
         }
         catch (UnauthorizedAccessException ex)
         {
-            Console.WriteLine($"Access denied setting tag for {normalizedName}: {ex}");
-            caller.Reply("Could not save the tag change.");
+            Console.WriteLine($"Failed to {description}: {ex}");
         }
+
+        caller.Reply(failureReply);
+        return false;
     }
 
     private bool TryResolveTagTarget(
