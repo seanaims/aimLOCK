@@ -149,36 +149,18 @@ public partial class PlayerManager
             return;
         }
 
-        float percent;
-        if (server.ActiveMatches.Count != 0 && TryGetActiveMatch(attackerController, out var match))
+        if (
+            !TryGetLifestealPercent(
+                attackerController,
+                victimController,
+                out float percent,
+                out string skipReason
+            )
+        )
         {
-            string? reason =
-                match.Finished ? "match finished" :
-                !match.CombatActive ? "round not live (countdown or between rounds)" :
-                !TryGetActiveMatch(victimController, out var victimMatch) ||
-                    !ReferenceEquals(match, victimMatch) ? "target is not your opponent" :
-                null;
-            if (reason != null)
-            {
-                if (debugging)
-                    LifestealDebugSkip(attackerEntity, victimEntity, healthLost, reason);
-                return;
-            }
-
-            percent = GetDuelLifestealPercent(attackerController, match);
-        }
-        else
-        {
-            // Outside a duel: never heal off someone who is in one.
-            if (server.ActiveMatches.Count != 0 && TryGetActiveMatch(victimController, out _))
-            {
-                if (debugging)
-                    LifestealDebugSkip(attackerEntity, victimEntity, healthLost,
-                        "target is in a duel and you are not");
-                return;
-            }
-
-            percent = DefaultServerLifestealPercent;
+            if (debugging)
+                LifestealDebugSkip(attackerEntity, victimEntity, healthLost, skipReason);
+            return;
         }
 
         // Fractions of a point carry over to the next hit instead of being dropped
@@ -225,6 +207,46 @@ public partial class PlayerManager
         if (debugging)
             LifestealDebugHit(attacker, victim, healthLost, percent, expected, healed, topped,
                 before, maxHealth, GetDamageAbilityName(info));
+    }
+
+    /* Lifesteal percent for a hit, or the reason the hit does not heal */
+    private bool TryGetLifestealPercent(
+        CBasePlayerController attacker,
+        CBasePlayerController victim,
+        out float percent,
+        out string skipReason
+    )
+    {
+        percent = 0f;
+        skipReason = "";
+        bool anyMatches = server.ActiveMatches.Count != 0;
+
+        if (anyMatches && TryGetActiveMatch(attacker, out var match))
+        {
+            if (match.Finished)
+                skipReason = "match finished";
+            else if (!match.CombatActive)
+                skipReason = "round not live (countdown or between rounds)";
+            else if (
+                !TryGetActiveMatch(victim, out var victimMatch) ||
+                !ReferenceEquals(match, victimMatch)
+            )
+                skipReason = "target is not your opponent";
+            else
+                percent = GetDuelLifestealPercent(attacker, match);
+
+            return skipReason.Length == 0;
+        }
+
+        // Outside a duel: never heal off someone who is in one.
+        if (anyMatches && TryGetActiveMatch(victim, out _))
+        {
+            skipReason = "target is in a duel and you are not";
+            return false;
+        }
+
+        percent = DefaultServerLifestealPercent;
+        return true;
     }
 
     // Fixation's stack damage heals at the same lifesteal percent as the bullet.
