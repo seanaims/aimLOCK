@@ -260,27 +260,13 @@ public class QueueManager
             return false;
         }
 
-        var onlinePlayers = Players.GetAll()
-            .Where(player =>
+        var matches = PlayerLookup.FindByName(
+            Players.GetAll().Where(player =>
                 !player.IsBot &&
                 player.EntityHandle != initiator.EntityHandle
-            )
-            .ToArray();
-        var exactMatches = onlinePlayers
-            .Where(player => string.Equals(
-                player.PlayerName,
-                targetName,
-                StringComparison.OrdinalIgnoreCase
-            ))
-            .ToArray();
-        var matches = exactMatches.Length > 0
-            ? exactMatches
-            : onlinePlayers
-                .Where(player => player.PlayerName.StartsWith(
-                    targetName,
-                    StringComparison.OrdinalIgnoreCase
-                ))
-                .ToArray();
+            ),
+            targetName
+        );
 
         if (matches.Length == 0)
         {
@@ -348,22 +334,7 @@ public class QueueManager
             lifestealProposals.TryGetValue(currentMatch, out var proposal)
         )
         {
-            if (proposal.ProposerHandle == target.EntityHandle)
-            {
-                reply("Your opponent has to accept your lifesteal proposal.");
-                return false;
-            }
-
-            lifestealProposals.Remove(currentMatch);
-            if (proposal.ExpiresAt <= DateTimeOffset.UtcNow || currentMatch.Finished)
-            {
-                reply("That lifesteal proposal has expired.");
-                return false;
-            }
-
-            SetMatchLifesteal(currentMatch, proposal.Percent,
-                $"{target.PlayerName} accepted: this duel's lifesteal is now {proposal.Percent:0.#}%.");
-            return true;
+            return AcceptLifestealProposal(target, currentMatch, proposal, reply);
         }
 
         if (!pendingDuelRequests.TryGetValue(target.EntityHandle, out var request))
@@ -396,22 +367,13 @@ public class QueueManager
             return false;
         }
 
-        int arenaIndex;
-        if (request.ArenaIndex is int requestedArena)
+        if (!TryPickArena(request.ArenaIndex, out int arenaIndex))
         {
-            if (!IsArenaAvailable(requestedArena))
-            {
-                reply(
-                    $"Arena {requestedArena + 1} ({aimLOCK.DuelArenaNames[requestedArena]}) is currently in use. Try again when it is free."
-                );
-                return false;
-            }
-
-            arenaIndex = requestedArena;
-        }
-        else if (!TryGetAvailableArena(out arenaIndex))
-        {
-            reply("All duel arenas are currently in use. Try again when one is free.");
+            reply(
+                request.ArenaIndex is int requestedArena
+                    ? $"Arena {requestedArena + 1} ({aimLOCK.DuelArenaNames[requestedArena]}) is currently in use. Try again when it is free."
+                    : "All duel arenas are currently in use. Try again when one is free."
+            );
             return false;
         }
 
@@ -441,6 +403,34 @@ public class QueueManager
         Chat.PrintToChat(
             request.Initiator,
             $"{target.PlayerName} accepted your duel request{arenaMessage}. Starting match..."
+        );
+        return true;
+    }
+
+    private bool AcceptLifestealProposal(
+        CCitadelPlayerController target,
+        DuelMatch match,
+        LifestealProposal proposal,
+        Action<string> reply
+    )
+    {
+        if (proposal.ProposerHandle == target.EntityHandle)
+        {
+            reply("Your opponent has to accept your lifesteal proposal.");
+            return false;
+        }
+
+        lifestealProposals.Remove(match);
+        if (proposal.ExpiresAt <= DateTimeOffset.UtcNow || match.Finished)
+        {
+            reply("That lifesteal proposal has expired.");
+            return false;
+        }
+
+        SetMatchLifesteal(
+            match,
+            proposal.Percent,
+            $"{target.PlayerName} accepted: this duel's lifesteal is now {proposal.Percent:0.#}%."
         );
         return true;
     }
@@ -605,109 +595,12 @@ public class QueueManager
 
         bool hasArena = TryGetAvailableArena(out int arenaIndex);
 
-        var playersBySteamId = Players.GetAll()
-            .Where(player => !player.IsBot)
-            .GroupBy(player => player.PlayerSteamId)
-            .ToDictionary(
-                group => group.Key,
-                group => group.First()
-            );
-        var queuedPlayers = queue
-            .Select((entry, index) => new QueuedPlayer(
-                entry,
-                index,
-                playersBySteamId.TryGetValue(entry.SteamId, out var player)
-                    ? player
-                    : null
-            ))
-            .Where(item =>
-                item.Player != null &&
-                (
-                    !server.PlayerManager.TryGetActiveMatch(item.Player, out var match) ||
-                    server.PlayerManager.IsBotMatch(match)
-                )
-            )
-            .ToArray();
-
-        int selectedFirstIndex = -1;
-        int selectedSecondIndex = -1;
-        CCitadelPlayerController? player1 = null;
-        CCitadelPlayerController? player2 = null;
-        DateTimeOffset selectedOldestEntry = DateTimeOffset.MaxValue;
-        long selectedPingDifference = long.MaxValue;
-        int selectedIndexSum = int.MaxValue;
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-
-        for (int first = 0; first < queuedPlayers.Length; first++)
-        {
-            var firstQueued = queuedPlayers[first];
-            for (int second = first + 1; second < queuedPlayers.Length; second++)
-            {
-                var secondQueued = queuedPlayers[second];
-                var firstPlayer = firstQueued.Player!;
-                var secondPlayer = secondQueued.Player!;
-                long pingDifference = 0;
-                bool usePingMatching =
-                    server.PlayerManager.IsPingBasedMatchmakingEnabled(firstPlayer) &&
-                    server.PlayerManager.IsPingBasedMatchmakingEnabled(secondPlayer);
-
-                if (
-                    !firstPlayer.IsBot &&
-                    !secondPlayer.IsBot &&
-                    usePingMatching
-                )
-                {
-                    DateTimeOffset oldestEntry = firstQueued.Entry.EnqueuedAt
-                        <= secondQueued.Entry.EnqueuedAt
-                            ? firstQueued.Entry.EnqueuedAt
-                            : secondQueued.Entry.EnqueuedAt;
-                    int allowedDifference = GetAllowedPingDifference(
-                        Math.Max(0d, (now - oldestEntry).TotalSeconds)
-                    );
-
-                    int firstPing = 0;
-                    int secondPing = 0;
-                    bool hasPings =
-                        server.PingManager.TryGetPing(firstPlayer, out firstPing) &&
-                        server.PingManager.TryGetPing(secondPlayer, out secondPing);
-                    if (hasPings)
-                    {
-                        pingDifference = Math.Abs((long)firstPing - secondPing);
-                        if (pingDifference > allowedDifference)
-                            continue;
-                    }
-                    else if (allowedDifference != int.MaxValue)
-                    {
-                        continue;
-                    }
-                }
-
-                DateTimeOffset pairOldestEntry = firstQueued.Entry.EnqueuedAt
-                    <= secondQueued.Entry.EnqueuedAt
-                        ? firstQueued.Entry.EnqueuedAt
-                        : secondQueued.Entry.EnqueuedAt;
-                int indexSum = firstQueued.QueueIndex + secondQueued.QueueIndex;
-                bool isBetter = pairOldestEntry < selectedOldestEntry
-                    || (pairOldestEntry == selectedOldestEntry
-                        && pingDifference < selectedPingDifference)
-                    || (pairOldestEntry == selectedOldestEntry
-                        && pingDifference == selectedPingDifference
-                        && indexSum < selectedIndexSum);
-                if (!isBetter)
-                    continue;
-
-                selectedFirstIndex = firstQueued.QueueIndex;
-                selectedSecondIndex = secondQueued.QueueIndex;
-                player1 = firstPlayer;
-                player2 = secondPlayer;
-                selectedOldestEntry = pairOldestEntry;
-                selectedPingDifference = pingDifference;
-                selectedIndexSum = indexSum;
-            }
-        }
-
-        if (selectedFirstIndex < 0 || player1 == null || player2 == null)
+        var pair = SelectBestPair(GetMatchableQueuedPlayers(queue));
+        if (pair is not var (first, second))
             return;
+
+        var player1 = first.Player!;
+        var player2 = second.Player!;
 
         /* End practice bot matches; finishing a match runs the queue again */
         foreach (var player in new[] { player1, player2 })
@@ -728,11 +621,124 @@ public class QueueManager
         if (!StartMatch(player1, player2, queueType, arenaIndex))
             return;
 
-        queue.RemoveAt(selectedSecondIndex);
-        queue.RemoveAt(selectedFirstIndex);
+        // The later queue position first, so the earlier index stays valid.
+        queue.RemoveAt(second.QueueIndex);
+        queue.RemoveAt(first.QueueIndex);
 
         server.UIManager.RefreshHud();
         TryStartMatch(queueType);
+    }
+
+    /* Queued players who are online and not in a duel (a bot match does not block) */
+    private QueuedPlayer[] GetMatchableQueuedPlayers(List<QueueEntry> queue)
+    {
+        var playersBySteamId = Players.GetAll()
+            .Where(player => !player.IsBot)
+            .GroupBy(player => player.PlayerSteamId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First()
+            );
+        return queue
+            .Select((entry, index) => new QueuedPlayer(
+                entry,
+                index,
+                playersBySteamId.TryGetValue(entry.SteamId, out var player)
+                    ? player
+                    : null
+            ))
+            .Where(item =>
+                item.Player != null &&
+                (
+                    !server.PlayerManager.TryGetActiveMatch(item.Player, out var match) ||
+                    server.PlayerManager.IsBotMatch(match)
+                )
+            )
+            .ToArray();
+    }
+
+    /* Best pair: longest wait first, then smallest ping gap, then queue order */
+    private (QueuedPlayer First, QueuedPlayer Second)? SelectBestPair(
+        QueuedPlayer[] queuedPlayers
+    )
+    {
+        (QueuedPlayer First, QueuedPlayer Second)? best = null;
+        DateTimeOffset bestOldestEntry = DateTimeOffset.MaxValue;
+        long bestPingDifference = long.MaxValue;
+        int bestIndexSum = int.MaxValue;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        for (int i = 0; i < queuedPlayers.Length; i++)
+        {
+            var first = queuedPlayers[i];
+            for (int j = i + 1; j < queuedPlayers.Length; j++)
+            {
+                var second = queuedPlayers[j];
+                DateTimeOffset oldestEntry =
+                    first.Entry.EnqueuedAt <= second.Entry.EnqueuedAt
+                        ? first.Entry.EnqueuedAt
+                        : second.Entry.EnqueuedAt;
+                if (
+                    !IsPingCompatible(
+                        first.Player!,
+                        second.Player!,
+                        (now - oldestEntry).TotalSeconds,
+                        out long pingDifference
+                    )
+                )
+                {
+                    continue;
+                }
+
+                int indexSum = first.QueueIndex + second.QueueIndex;
+                bool isBetter = oldestEntry < bestOldestEntry
+                    || (oldestEntry == bestOldestEntry
+                        && pingDifference < bestPingDifference)
+                    || (oldestEntry == bestOldestEntry
+                        && pingDifference == bestPingDifference
+                        && indexSum < bestIndexSum);
+                if (!isBetter)
+                    continue;
+
+                best = (first, second);
+                bestOldestEntry = oldestEntry;
+                bestPingDifference = pingDifference;
+                bestIndexSum = indexSum;
+            }
+        }
+
+        return best;
+    }
+
+    /* With ping matching on for both, the ping gap must fit the window for their wait */
+    private bool IsPingCompatible(
+        CCitadelPlayerController firstPlayer,
+        CCitadelPlayerController secondPlayer,
+        double oldestWaitSeconds,
+        out long pingDifference
+    )
+    {
+        pingDifference = 0;
+        bool usePingMatching =
+            server.PlayerManager.IsPingBasedMatchmakingEnabled(firstPlayer) &&
+            server.PlayerManager.IsPingBasedMatchmakingEnabled(secondPlayer);
+        if (firstPlayer.IsBot || secondPlayer.IsBot || !usePingMatching)
+            return true;
+
+        int allowedDifference = GetAllowedPingDifference(
+            Math.Max(0d, oldestWaitSeconds)
+        );
+        if (
+            server.PingManager.TryGetPing(firstPlayer, out int firstPing) &&
+            server.PingManager.TryGetPing(secondPlayer, out int secondPing)
+        )
+        {
+            pingDifference = Math.Abs((long)firstPing - secondPing);
+            return pingDifference <= allowedDifference;
+        }
+
+        // No ping reading: only pair once the window is fully open.
+        return allowedDifference == int.MaxValue;
     }
 
     public bool TryGetAvailableArena(out int arenaIndex)
@@ -805,18 +811,8 @@ public class QueueManager
         bool alreadyInArena = false
     )
     {
-        int arenaIndex;
-        if (selectedArenaIndex is int selectedIndex)
-        {
-            if (!IsArenaAvailable(selectedIndex))
-                return false;
-
-            arenaIndex = selectedIndex;
-        }
-        else if (!TryGetAvailableArena(out arenaIndex))
-        {
+        if (!TryPickArena(selectedArenaIndex, out int arenaIndex))
             return false;
-        }
 
         if (player1.IsBot)
             server.PlayerManager.ResetPracticeBotRecord(player1);
@@ -824,177 +820,192 @@ public class QueueManager
             server.PlayerManager.ResetPracticeBotRecord(player2);
 
         if (!player1.IsBot && !player2.IsBot)
-        {
-            string[] matchFoundLines =
-            {
-                "  [MATCH FOUND]",
-                GetMatchFoundPlayerLine(player1, queueType),
-                GetMatchFoundPingLine(player1),
-                "                 VS",
-                GetMatchFoundPlayerLine(player2, queueType),
-                GetMatchFoundPingLine(player2)
-            };
-            int matchFoundWidth = matchFoundLines.Max(line => line.Length);
-            string matchFoundMessage = string.Join(
-                "\n",
-                matchFoundLines.Select(line =>
-                    line.PadLeft((matchFoundWidth + line.Length) / 2))
-            );
-            Chat.PrintToChat(player1, matchFoundMessage);
-            Chat.PrintToChat(player2, matchFoundMessage);
-        }
+            AnnounceMatchFound(player1, player2, queueType);
 
         Console.WriteLine(
             $"Starting match: {player1.PlayerName} vs {player2.PlayerName}"
         );
 
-        Vector3 arena = server.DuelLocations[arenaIndex];
-        string player1MatchKey =
-            server.PlayerManager.GetMatchParticipantName(player1);
-        string player2MatchKey =
-            server.PlayerManager.GetMatchParticipantName(player2);
-        var player1Pawn = player1.GetHeroPawn();
-        var player2Pawn = player2.GetHeroPawn();
-        bool HasItem(CCitadelPlayerPawn? pawn, string itemName) =>
-            pawn?.AbilityComponent?.FindAbilityByName(itemName) != null;
-
-        var match = new DuelMatch
-        {
-            Player1 = player1MatchKey,
-            Player2 = player2MatchKey,
-            Player1HadBulletLifestealItem = HasItem(player1Pawn, "upgrade_vampire"),
-            Player2HadBulletLifestealItem = HasItem(player2Pawn, "upgrade_vampire"),
-            Player1HadBlitzBulletsItem = HasItem(player1Pawn, "upgrade_blitz_bullets"),
-            Player2HadBlitzBulletsItem = HasItem(player2Pawn, "upgrade_blitz_bullets"),
-            Player1HadOpeningRoundsItem = HasItem(player1Pawn, "upgrade_pristine_emblem"),
-            Player2HadOpeningRoundsItem = HasItem(player2Pawn, "upgrade_pristine_emblem"),
-            Player1HadHighVelocityRoundsItem = HasItem(player1Pawn, "upgrade_high_velocity_mag"),
-            Player2HadHighVelocityRoundsItem = HasItem(player2Pawn, "upgrade_high_velocity_mag"),
-            Player1HadFleetfootItem = HasItem(player1Pawn, "upgrade_fleetfoot_boots"),
-            Player2HadFleetfootItem = HasItem(player2Pawn, "upgrade_fleetfoot_boots"),
-            Player1HadTitanicMagazineItem = HasItem(player1Pawn, "upgrade_titan_round"),
-            Player2HadTitanicMagazineItem = HasItem(player2Pawn, "upgrade_titan_round"),
-            Player1HadCardioCalibratorItem = HasItem(player1Pawn, "upgrade_cardio_calibrator"),
-            Player2HadCardioCalibratorItem = HasItem(player2Pawn, "upgrade_cardio_calibrator"),
-            Player1HadBurstFireItem = HasItem(player1Pawn, "upgrade_burst_fire"),
-            Player2HadBurstFireItem = HasItem(player2Pawn, "upgrade_burst_fire"),
-            Player1HadHealthItem = HasItem(player1Pawn, "upgrade_health"),
-            Player2HadHealthItem = HasItem(player2Pawn, "upgrade_health"),
-            QueueType = queueType,
-            ArenaPosition = arena,
-            ArenaIndex = arenaIndex,
-            Score1 = 0,
-            Score2 = 0
-        };
-        match.BuyingAllowed =
-            player1.IsBot ||
-            player2.IsBot ||
-            (
-                server.PlayerManager.AllowsDuelBuying(player1) &&
-                server.PlayerManager.AllowsDuelBuying(player2)
-            );
-
-        server.PendingRespawns.Remove(player1MatchKey);
-        server.PendingRespawns.Remove(player2MatchKey);
-        server.ActiveMatches[player1MatchKey] = match;
-        server.ActiveMatches[player2MatchKey] = match;
+        DuelMatch match = CreateMatch(player1, player2, queueType, arenaIndex);
+        server.PendingRespawns.Remove(match.Player1);
+        server.PendingRespawns.Remove(match.Player2);
+        server.ActiveMatches[match.Player1] = match;
+        server.ActiveMatches[match.Player2] = match;
         server.LeaderboardManager.RefreshActiveMatches();
-        // A bot match starts next tick and InitializeMatchInArena shows the HUD then;
-        // building it here too sent every panel twice within two frames.
-        if (!alreadyInArena)
-            server.UIManager.ShowMatchHud(match);
 
-        void InitializeMatchInArena()
+        // A bot match whose player is already standing in the arena skips the 2 s
+        // wait: there is nowhere to teleport to. InitializeMatchInArena shows its HUD;
+        // building it here too sent every panel twice within two frames.
+        if (alreadyInArena)
+        {
+            server.ScheduleNextTick(
+                () => InitializeMatchInArena(match, player1, player2)
+            );
+        }
+        else
+        {
+            server.UIManager.ShowMatchHud(match);
+            server.ScheduleOnce(
+                2.Seconds(),
+                () => InitializeMatchInArena(match, player1, player2)
+            );
+        }
+
+        return true;
+    }
+
+    private bool TryPickArena(int? selectedArenaIndex, out int arenaIndex)
+    {
+        if (selectedArenaIndex is int selectedIndex)
+        {
+            arenaIndex = selectedIndex;
+            return IsArenaAvailable(selectedIndex);
+        }
+
+        return TryGetAvailableArena(out arenaIndex);
+    }
+
+    private void AnnounceMatchFound(
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2,
+        MatchQueueType queueType
+    )
+    {
+        string[] lines =
+        {
+            "  [MATCH FOUND]",
+            GetMatchFoundPlayerLine(player1, queueType),
+            GetMatchFoundPingLine(player1),
+            "                 VS",
+            GetMatchFoundPlayerLine(player2, queueType),
+            GetMatchFoundPingLine(player2)
+        };
+        // Centre every line on the widest one.
+        int width = lines.Max(line => line.Length);
+        string message = string.Join(
+            "\n",
+            lines.Select(line => line.PadLeft((width + line.Length) / 2))
+        );
+        Chat.PrintToChat(player1, message);
+        Chat.PrintToChat(player2, message);
+    }
+
+    private DuelMatch CreateMatch(
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2,
+        MatchQueueType queueType,
+        int arenaIndex
+    )
+    {
+        var playerManager = server.PlayerManager;
+        return new DuelMatch
+        {
+            Player1 = playerManager.GetMatchParticipantName(player1),
+            Player2 = playerManager.GetMatchParticipantName(player2),
+            Player1ItemsBeforeMatch =
+                PlayerManager.GetOwnedDuelItems(player1.GetHeroPawn()),
+            Player2ItemsBeforeMatch =
+                PlayerManager.GetOwnedDuelItems(player2.GetHeroPawn()),
+            QueueType = queueType,
+            ArenaPosition = server.DuelLocations[arenaIndex],
+            ArenaIndex = arenaIndex,
+            BuyingAllowed =
+                player1.IsBot ||
+                player2.IsBot ||
+                (
+                    playerManager.AllowsDuelBuying(player1) &&
+                    playerManager.AllowsDuelBuying(player2)
+                )
+        };
+    }
+
+    private void InitializeMatchInArena(
+        DuelMatch match,
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2
+    )
+    {
+        if (match.Finished)
+            return;
+
+        PlayerManager.EnsureTeam(player1, 2);
+        PlayerManager.EnsureTeam(player2, 3);
+
+        var pawn1 = player1.IsValid ? player1.GetHeroPawn() : null;
+        var pawn2 = player2.IsValid ? player2.GetHeroPawn() : null;
+        if (pawn1 == null || pawn2 == null)
+        {
+            Console.WriteLine("A player pawn is null.");
+            CancelMatch(match, player1, player2);
+            return;
+        }
+
+        var playerManager = server.PlayerManager;
+        pawn1.RemoveModifier("modifier_speed_boost");
+        pawn2.RemoveModifier("modifier_speed_boost");
+
+        var (position1, angles1) = playerManager.GetDuelSpawn(match, isPlayer1: true);
+        var (position2, angles2) = playerManager.GetDuelSpawn(match, isPlayer1: false);
+        pawn1.Teleport(position1, angles1, null);
+        pawn2.Teleport(position2, angles2, null);
+        playerManager.ConfigurePracticeBotStrafe(pawn1, pawn2);
+        server.UIManager.ShowMatchHud(match);
+
+        playerManager.ApplyDuelMatchModifiers(pawn1);
+        playerManager.ApplyDuelMatchModifiers(pawn2);
+        playerManager.ApplyDuelBulletLifesteal(pawn1);
+        playerManager.ApplyDuelBulletLifesteal(pawn2);
+        // The item stack is the biggest batch of changes per pawn; do the second
+        // pawn on the next tick so both don't land in the same server frame.
+        playerManager.ApplyDuelItemStack(pawn1);
+        pawn1.RemoveAbility("upgrade_infinite_rounds");
+        server.ScheduleNextTick(() =>
+        {
+            if (match.Finished || !pawn2.IsValid)
+                return;
+
+            server.PlayerManager.ApplyDuelItemStack(pawn2);
+            pawn2.RemoveAbility("upgrade_infinite_rounds");
+        });
+
+        match.ArenaInitialized = true;
+        playerManager.ShowArenaScoreboard(match);
+        playerManager.StartDuelHealthCapMonitor(match);
+        playerManager.SetMatchDisarmed(match, true);
+        server.ScheduleOnce(0.25.Seconds(), () =>
         {
             if (match.Finished)
                 return;
 
-            PlayerManager.EnsureTeam(player1, 2);
-            PlayerManager.EnsureTeam(player2, 3);
+            server.PlayerManager.PrepareDuelMatchHealth(match);
+            server.EnableMatchInfiniteAmmo();
+            StartCountdown(match);
+        });
 
-            var pawn1 = player1.IsValid ? player1.GetHeroPawn() : null;
-            var pawn2 = player2.IsValid ? player2.GetHeroPawn() : null;
+        Console.WriteLine(
+            $"Match Found! {player1.PlayerName} vs {player2.PlayerName}"
+        );
+    }
 
-            if (pawn1 == null || pawn2 == null)
-            {
-                Console.WriteLine("A player pawn is null.");
-                match.Finished = true;
-                server.ActiveMatches.Remove(match.Player1);
-                server.ActiveMatches.Remove(match.Player2);
-                server.PendingRespawns.Remove(match.Player1);
-                server.PendingRespawns.Remove(match.Player2);
-                if (player1.IsValid)
-                    player1.ChangeTeam(2);
-                if (player2.IsValid)
-                    player2.ChangeTeam(2);
-                server.UIManager.RestoreHudAfterMatch(match);
-                server.PlayerManager.OnDuelMatchFinished(match);
-                server.Queue.TryStartMatches();
-                return;
-            }
-
-            pawn1.RemoveModifier("modifier_speed_boost");
-            pawn2.RemoveModifier("modifier_speed_boost");
-
-            Vector3 arenaCenter =
-                server.PlayerManager.GetDuelArenaCenter(arena);
-            pawn1.Teleport(
-                arenaCenter + new Vector3(-aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-                new Vector3(0f, 45f, 0f),
-                null
-            );
-
-            pawn2.Teleport(
-                arenaCenter + new Vector3(aimLOCK.DUEL_SPAWN_OFFSET, 0f, 0f),
-                new Vector3(0f, 180f, 0f),
-                null
-            );
-            server.PlayerManager.ConfigurePracticeBotStrafe(pawn1, pawn2);
-            server.UIManager.ShowMatchHud(match);
-
-            server.PlayerManager.ApplyDuelMatchModifiers(pawn1);
-            server.PlayerManager.ApplyDuelMatchModifiers(pawn2);
-            server.PlayerManager.ApplyDuelBulletLifesteal(pawn1);
-            server.PlayerManager.ApplyDuelBulletLifesteal(pawn2);
-            // The item stack is the biggest batch of changes per pawn; do the second
-            // pawn on the next tick so both don't land in the same server frame.
-            server.PlayerManager.ApplyDuelItemStack(pawn1);
-            pawn1.RemoveAbility("upgrade_infinite_rounds");
-            server.ScheduleNextTick(() =>
-            {
-                if (match.Finished || !pawn2.IsValid)
-                    return;
-
-                server.PlayerManager.ApplyDuelItemStack(pawn2);
-                pawn2.RemoveAbility("upgrade_infinite_rounds");
-            });
-
-            match.ArenaInitialized = true;
-            server.PlayerManager.ShowArenaScoreboard(match);
-            server.PlayerManager.StartDuelHealthCapMonitor(match);
-            server.PlayerManager.SetMatchDisarmed(match, true);
-            server.ScheduleOnce(0.25.Seconds(), () =>
-            {
-                if (match.Finished)
-                    return;
-
-                server.PlayerManager.PrepareDuelMatchHealth(match);
-                server.EnableMatchInfiniteAmmo();
-                StartCountdown(match);
-            });
-
-            Console.WriteLine(
-                $"Match Found! {player1.PlayerName} vs {player2.PlayerName}"
-            );
-        }
-
-        // A bot match whose player is already standing in the arena skips the 2 s
-        // wait: there is nowhere to teleport to.
-        if (alreadyInArena)
-            server.ScheduleNextTick(InitializeMatchInArena);
-        else
-            server.ScheduleOnce(2.Seconds(), InitializeMatchInArena);
-        return true;
+    /* A player lost their pawn before the match could start */
+    private void CancelMatch(
+        DuelMatch match,
+        CCitadelPlayerController player1,
+        CCitadelPlayerController player2
+    )
+    {
+        match.Finished = true;
+        server.ActiveMatches.Remove(match.Player1);
+        server.ActiveMatches.Remove(match.Player2);
+        server.PendingRespawns.Remove(match.Player1);
+        server.PendingRespawns.Remove(match.Player2);
+        if (player1.IsValid)
+            player1.ChangeTeam(2);
+        if (player2.IsValid)
+            player2.ChangeTeam(2);
+        server.UIManager.RestoreHudAfterMatch(match);
+        server.PlayerManager.OnDuelMatchFinished(match);
+        TryStartMatches();
     }
 
     private static int GetAllowedPingDifference(double oldestWaitSeconds)
