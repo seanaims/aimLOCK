@@ -1,6 +1,6 @@
 # aimLOCK
 
-aimLOCK is a Deadlock server plugin for 1v1 matchmaking, practice-bot duels, player and guild leaderboards, and server-side quality-of-life features.
+aimLOCK is a Deadlock server plugin for 1v1 matchmaking, practice-bot duels, player and guild leaderboards, with server-side quality-of-life features.
 
 On connection, each player privately receives a short welcome message introducing the 1v1 server and explaining how to join ranked or unranked queues.
 
@@ -8,11 +8,13 @@ On connection, each player privately receives a short welcome message introducin
 
 Join a ranked 1v1 queue with `/join ranked` (ranked matches track Elo) or a casual 1v1 queue with `/join unranked`; the alias `/queue` also works. Use `/leave` to leave before a match is found. Players matched together receive the match-found notice and 3-2-1/FIGHT countdown; other players on the server do not.
 
-Matchmaking can use server-reported ping readings from the server-console `status` command. It uses the median of up to three recent readings and requires an unambiguous player-name match. The initial maximum ping difference is 6 ms; the window widens by 3 ms every 15 seconds (up to 27 ms), and after two minutes any ping difference is allowed, even when a ping reading is missing, to avoid leaving players queued indefinitely. Use `/pbmm off` to opt out of ping filtering for your matches, or `/pbmm on` to enable it again. The setting is saved per player. Practice-bot matches are not ping-filtered.
-
 When a match ends, only that duel's participants and its registered spectators are returned to Midtown spawn. A player who disconnects is removed with their hero and controlled pawns; leaving a duel records a forfeit. Server-info UI is restored after matches, and the duel countdown is private to the participants.
 
 Each active arena displays its current duel score above the arena. The Midtown `ACTIVE MATCHES` wall lists each live match's arena, queue type, players, and score. Scoreboards show only a player's selected overhead tag; they do not add a guild tag by default, and show no tag when the player has cleared theirs. Guild member listings show the selected overhead tag without repeating the guild tag. The final score remains visible until both participants have left, then the scoreboard is removed. New matches use only free arenas; queued matches wait for an arena, and practice-bot matches cannot start while all arenas are occupied. You can play a practice-bot match while queued; when the queue finds an opponent, the bot match ends and the real match starts.
+
+### Ping based Matchmaking
+
+Matchmaking can use server-reported ping readings from the server-console `status` command. It uses the median of up to three recent readings and requires an unambiguous player-name match. The initial maximum ping difference is 6 ms; the window widens by 3 ms every 15 seconds (up to 27 ms), and after two minutes any ping difference is allowed, even when a ping reading is missing, to avoid leaving players being in queue indefinitely. Use `/pbmm off` to opt out of ping filtering for your matches, or `/pbmm on` to enable it again. The setting is saved per player, please note practice-bot matches are not ping-filtered.
 
 Server pausing is disabled at startup.
 
@@ -155,7 +157,7 @@ These commands require `aimlock.debug`.
 
 ## Duel rules
 
-- Lifesteal is applied server-side to bullet damage only, including Fixation's stack damage: 100% of the health the target actually loses by default, 85% in duels and bot matches (`/lifesteal` for the server, `/duel ... ls` for one duel), or a player's own `/handicap` value. Practice bots lifesteal too; the hard bot heals for 40% instead of 85%. Item bullet lifesteal is suspended during duels, and while a round is live any other healing (regen, healing from bought items) is undone, so lifesteal is the only healing.
+- Lifesteal is applied server-side to bullet damage only, including Fixation's stack damage: 100% of the health the target actually loses by default, 85% in duels and bot matches (`/lifesteal` for the server, `/duel ... ls` for one duel), or a player's own `/handicap` value. Practice bots lifesteal too however the hard bot heals for 40% instead of 85%. Item bullet lifesteal is suspended during duels, and while a round is live any other healing (regen, healing from bought items) is undone, so lifesteal is the only healing.
 - Duel bullets deal normal damage (set `DUEL_BULLET_DAMAGE` above 25 to scale them up, e.g. 40).
 - Infinite ammo; no comeback or difficulty gold; bots never take over for players who leave; every player keeps 999,999 souls (set at spawn, topped up after each purchase or any other change, and checked once a second).
 - In a live duel round, health only changes through reported damage and lifesteal: any other gain is taken back within 1/20 s.
@@ -176,4 +178,4 @@ Build from the repository root:
 dotnet build aimLOCK.csproj
 ```
 
-The project build target copies `aimLOCK.dll` and `aimLOCK.pdb` into `game\bin\win64\managed\plugins`. The reference and deployment paths in `aimLOCK.csproj` use the default Steam installation path; update them if Deadlock is installed elsewhere.
+The project build target copies `aimLOCK.dll` and `aimLOCK.pdb` into `game\bin\win64\managed\plugins`. The reference and deployment paths in `aimLOCK.csproj` use the default Steam installation path, update them locally if Deadlock is installed elsewhere.
