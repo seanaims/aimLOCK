@@ -1,13 +1,12 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public partial class aimLOCK
 {
@@ -17,8 +16,7 @@ public partial class aimLOCK
         "help",
         "commands",
         Description = "List aimLOCK server commands: help [page].",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void HelpCommand(Caller caller, int page = 1)
     {
         if (page == 1)
@@ -76,32 +74,28 @@ public partial class aimLOCK
     [Command(
         "bot",
         Description = "Start a bot match: bot [easy|medium|hard] (default: hard).",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void BotCommand(Caller caller, string? difficulty = "hard")
     {
-        PlayerManager.StartPracticeBotMatch(caller, difficulty);
+        this.PlayerManager.StartPracticeBotMatch(caller, difficulty);
     }
 
     [Command(
         "fixationmax",
         Description = "Unlock and fully upgrade Fixation with a 999-stack cap in Signature3 for all online players.",
         Permission = "aimlock.fixation.max",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void FixationMaxCommand(Caller caller)
     {
-        int updatedPlayers = PlayerManager.MaxFixationForOnlinePlayers();
+        int updatedPlayers = this.PlayerManager.MaxFixationForOnlinePlayers();
         caller.Reply(
-            $"Fully upgraded Fixation with a 999-stack cap for {updatedPlayers} online player(s)."
-        );
+            $"Fully upgraded Fixation with a 999-stack cap for {updatedPlayers} online player(s).");
     }
 
     [Command(
         "botmirror",
         Description = "Toggle whether the practice bot copies the items you buy during a bot match (on by default).",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void BotMirrorCommand(Caller caller)
     {
         if (caller.Player is not { } player)
@@ -110,7 +104,7 @@ public partial class aimLOCK
             return;
         }
 
-        caller.Reply(PlayerManager.ToggleBotMirror(player)
+        caller.Reply(this.PlayerManager.ToggleBotMirror(player)
             ? "Bot mirror on: the bot buys every item you buy in a bot match."
             : "Bot mirror off: the bot keeps its items when you buy.");
     }
@@ -119,8 +113,7 @@ public partial class aimLOCK
         "ab",
         "allowbuy",
         Description = "Allow buying items during your duels: ab <on|off> (off by default). Both players need it on.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void AllowBuyCommand(Caller caller, string? setting = null)
     {
         if (caller.Player is not { } player)
@@ -131,32 +124,33 @@ public partial class aimLOCK
 
         bool allow;
         if (string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase))
+        {
             allow = true;
+        }
         else if (string.Equals(setting, "off", StringComparison.OrdinalIgnoreCase))
+        {
             allow = false;
+        }
         else
         {
             caller.Reply(
-                $"Use /ab on or /ab off. It is {(PlayerManager.AllowsDuelBuying(player) ? "on" : "off")} for you."
-            );
+                $"Use /ab on or /ab off. It is {(this.PlayerManager.AllowsDuelBuying(player) ? "on" : "off")} for you.");
             return;
         }
 
-        PlayerManager.SetAllowDuelBuying(player, allow);
+        this.PlayerManager.SetAllowDuelBuying(player, allow);
         caller.Reply(
             (allow
                 ? "Buying in duels on. It applies when both players have it on."
                 : "Buying in duels off.") +
-            (PlayerManager.TryGetActiveMatch(player, out _) ? " This takes effect from your next duel." : "")
-        );
+            (this.PlayerManager.TryGetActiveMatch(player, out _) ? " This takes effect from your next duel." : string.Empty));
     }
 
     [Command(
         "hidebots",
         Description = "Test: hidebots <off|hero|all> hides practice bots from players outside their match (off is the default).",
         Permission = "aimlock.debug",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void HideBotsCommand(Caller caller, string? setting = null)
     {
         PlayerManager.BotHideMode mode;
@@ -167,12 +161,11 @@ public partial class aimLOCK
             case "all": mode = PlayerManager.BotHideMode.All; break;
             default:
                 caller.Reply(
-                    $"Use /hidebots off, /hidebots hero or /hidebots all. It is {PlayerManager.PracticeBotHideMode.ToString().ToLowerInvariant()}."
-                );
+                    $"Use /hidebots off, /hidebots hero or /hidebots all. It is {this.PlayerManager.PracticeBotHideMode.ToString().ToLowerInvariant()}.");
                 return;
         }
 
-        PlayerManager.SetPracticeBotHideMode(mode);
+        this.PlayerManager.SetPracticeBotHideMode(mode);
         caller.Reply($"Practice bot hiding: {setting!.Trim().ToLowerInvariant()}. Resets to off on server restart.");
     }
 
@@ -180,47 +173,46 @@ public partial class aimLOCK
         "hidepassive",
         Description = "Crash test: hidepassive <on|off> keeps the Fixation passive off the clients (on, the default) or sends it (off).",
         Permission = "aimlock.debug",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void HidePassiveCommand(Caller caller, string? setting = null)
     {
         bool hide;
         if (string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase))
+        {
             hide = true;
+        }
         else if (string.Equals(setting, "off", StringComparison.OrdinalIgnoreCase))
+        {
             hide = false;
+        }
         else
         {
             caller.Reply(
-                $"Use /hidepassive on or /hidepassive off. It is {(PlayerManager.HideFixationPassive ? "on" : "off")}."
-            );
+                $"Use /hidepassive on or /hidepassive off. It is {(this.PlayerManager.HideFixationPassive ? "on" : "off")}.");
             return;
         }
 
-        int updated = PlayerManager.SetHideFixationPassive(hide);
+        int updated = this.PlayerManager.SetHideFixationPassive(hide);
         caller.Reply(
             (hide
                 ? "Fixation passive hidden again (no HUD icon)"
                 : "Fixation passive now sent to clients (the HUD icon comes back)") +
-            $"; Fixation redone for {updated} hero(es). Resets on server restart."
-        );
+            $"; Fixation redone for {updated} hero(es). Resets on server restart.");
     }
 
     [Command(
         "botspeed",
         Description = "Set the practice bot's strafe speed: botspeed <100-2500 units/sec>.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void BotSpeedCommand(Caller caller, float speed)
     {
-        PlayerManager.SetPracticeBotStrafeSpeed(caller, speed);
+        this.PlayerManager.SetPracticeBotStrafeSpeed(caller, speed);
     }
 
     [Command(
         "guild",
         Description = "Create and manage player guilds: guild help.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void GuildCommand(Caller caller, params string[] arguments)
     {
         var player = caller.Player;
@@ -232,22 +224,23 @@ public partial class aimLOCK
 
         try
         {
-            string response = GuildManager.ExecuteCommand(player, arguments);
+            string response = this.GuildManager.ExecuteCommand(player, arguments);
             if (
                 arguments.Length > 0 &&
                 arguments[0].ToLowerInvariant() is
                     "create" or "join" or "accept" or "leave" or "disband" or
                     "mode" or "access" or "newtag" or "rename" or "kick" or
-                    "transfer"
-            )
+                    "transfer")
             {
-                LeaderboardManager.Refresh();
-                PlayerManager.RefreshArenaScoreboards();
-                PlayerTagManager.RefreshGuildTags();
+                this.LeaderboardManager.Refresh();
+                this.PlayerManager.RefreshArenaScoreboards();
+                this.PlayerTagManager.RefreshGuildTags();
             }
 
             foreach (string line in response.Split('\n'))
+            {
                 caller.Reply(line);
+            }
         }
         catch (IOException ex)
         {
@@ -279,20 +272,19 @@ public partial class aimLOCK
             return;
         }
 
-        Queue.JoinQueue(caller, parsedQueueType);
+        this.Queue.JoinQueue(caller, parsedQueueType);
     }
 
     [Command("leave", Description = "Remove player from queue.")]
     public void LeaveQueue(Caller caller)
     {
-        Queue.LeaveQueue(caller);
+        this.Queue.LeaveQueue(caller);
     }
 
     [Command(
         "pbmm",
         Description = "Enable or disable ping-based matchmaking: pbmm <on|off>.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void PingBasedMatchmakingCommand(Caller caller, string setting)
     {
         var player = caller.Player;
@@ -319,26 +311,23 @@ public partial class aimLOCK
 
         try
         {
-            PlayerManager.SetPingBasedMatchmakingEnabled(player, enabled);
+            this.PlayerManager.SetPingBasedMatchmakingEnabled(player, enabled);
             caller.Reply(
                 enabled
                     ? "Ping-based matchmaking enabled."
-                    : "Ping-based matchmaking disabled; you can be matched with any queued player."
-            );
-            Queue.TryStartMatches();
+                    : "Ping-based matchmaking disabled; you can be matched with any queued player.");
+            this.Queue.TryStartMatches();
         }
         catch (IOException ex)
         {
             Console.WriteLine(
-                $"Failed to update ping-based matchmaking for {player.PlayerName}: {ex}"
-            );
+                $"Failed to update ping-based matchmaking for {player.PlayerName}: {ex}");
             caller.Reply("Could not save your ping-based matchmaking setting.");
         }
         catch (ArgumentOutOfRangeException ex)
         {
             Console.WriteLine(
-                $"Invalid Steam ID for ping-based matchmaking setting: {ex}"
-            );
+                $"Invalid Steam ID for ping-based matchmaking setting: {ex}");
             caller.Reply("Your player account is not ready; try again shortly.");
         }
     }
@@ -347,8 +336,7 @@ public partial class aimLOCK
         "handicap",
         "handi",
         Description = "Set your own duel lifesteal percent: handicap <number> (handicap off to clear).",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void HandicapCommand(Caller caller, string? value = null)
     {
         var player = caller.Player;
@@ -358,7 +346,7 @@ public partial class aimLOCK
             return;
         }
 
-        float duelPercent = PlayerManager.DuelLifestealPercent;
+        float duelPercent = this.PlayerManager.DuelLifestealPercent;
         float? percent;
         if (string.Equals(value, "off", StringComparison.OrdinalIgnoreCase))
         {
@@ -370,31 +358,28 @@ public partial class aimLOCK
         }
         else
         {
-            float? current = PlayerManager.GetHandicapLifestealPercent(player);
+            float? current = this.PlayerManager.GetHandicapLifestealPercent(player);
             caller.Reply(
                 $"Use /handicap <number from 0 to {duelPercent:0.#}>, for example /handi {duelPercent:0.#}, " +
                 "or /handicap off. " +
                 (current is { } currentPercent
                     ? $"Your duel lifesteal is set to {MathF.Min(currentPercent, duelPercent):0.#}%."
-                    : $"You have no handicap; your duel lifesteal is {duelPercent:0.#}%.")
-            );
+                    : $"You have no handicap; your duel lifesteal is {duelPercent:0.#}%."));
             return;
         }
 
         try
         {
-            PlayerManager.SetHandicapLifestealPercent(player, percent);
+            this.PlayerManager.SetHandicapLifestealPercent(player, percent);
             caller.Reply(
                 percent is { } saved
                     ? $"Handicap set. Your duel lifesteal is {saved:0.#}% until you change it."
-                    : $"Handicap off. Your duel lifesteal is back to {duelPercent:0.#}%."
-            );
+                    : $"Handicap off. Your duel lifesteal is back to {duelPercent:0.#}%.");
         }
         catch (IOException ex)
         {
             Console.WriteLine(
-                $"Failed to update handicap for {player.PlayerName}: {ex}"
-            );
+                $"Failed to update handicap for {player.PlayerName}: {ex}");
             caller.Reply("Could not save your handicap setting.");
         }
         catch (ArgumentOutOfRangeException ex)
@@ -409,40 +394,21 @@ public partial class aimLOCK
         "ls",
         Description = "Set the lifesteal percent for duels and bot matches: lifesteal <number>.",
         Permission = "aimlock.lifesteal",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void LifestealCommand(Caller caller, string? value = null)
     {
         if (!TryParsePercent(value, out float percent))
         {
             caller.Reply(
                 "Use /lifesteal <number from 0 to 100>, for example /ls 85. " +
-                $"Duel and bot lifesteal is {PlayerManager.DuelLifestealPercent:0.#}%."
-            );
+                $"Duel and bot lifesteal is {this.PlayerManager.DuelLifestealPercent:0.#}%.");
             return;
         }
 
-        PlayerManager.SetDuelLifestealPercent(percent);
+        this.PlayerManager.SetDuelLifestealPercent(percent);
         caller.Reply(
             $"Duel and bot lifesteal set to {percent:0.#}% until the server restarts. " +
-            "Lifesteal outside duels stays at 100%."
-        );
-    }
-
-    private static bool TryParsePercent(string? value, out float percent)
-    {
-        percent = 0f;
-        if (string.IsNullOrWhiteSpace(value))
-            return false;
-
-        return float.TryParse(
-                value.Trim().TrimEnd('%'),
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out percent
-            ) &&
-            percent >= 0f &&
-            percent <= 100f;
+            "Lifesteal outside duels stays at 100%.");
     }
 
     [Command("spawn", Description = "Return to spawn after a 2-second countdown or forfeit an active duel (instant in bot matches).")]
@@ -455,11 +421,11 @@ public partial class aimLOCK
             return;
         }
 
-        if (PlayerManager.TryGetActiveMatch(player, out var activeMatch))
+        if (this.PlayerManager.TryGetActiveMatch(player, out var activeMatch))
         {
             bool isBotMatch =
-                PlayerManager.FindMatchParticipant(activeMatch.Player1)?.IsBot == true ||
-                PlayerManager.FindMatchParticipant(activeMatch.Player2)?.IsBot == true;
+                this.PlayerManager.FindMatchParticipant(activeMatch.Player1)?.IsBot == true ||
+                this.PlayerManager.FindMatchParticipant(activeMatch.Player2)?.IsBot == true;
 
             // Bot matches record nothing, so leaving one needs no countdown.
             if (isBotMatch)
@@ -477,19 +443,21 @@ public partial class aimLOCK
             void ForfeitToSpawn()
             {
                 if (!player.IsValid)
+                {
                     return;
+                }
 
                 if (
-                    PlayerManager.TryGetActiveMatch(player, out var currentMatch) &&
+                    this.PlayerManager.TryGetActiveMatch(player, out var currentMatch) &&
                     ReferenceEquals(currentMatch, activeMatch) &&
-                    PlayerManager.ForfeitMatch(
-                        PlayerManager.GetMatchParticipantName(player)
-                    )
-                )
+                    this.PlayerManager.ForfeitMatch(
+                        this.PlayerManager.GetMatchParticipantName(player)))
                 {
-                    UIManager.RestoreServerInfoAfterSpawn(player);
+                    this.UIManager.RestoreServerInfoAfterSpawn(player);
                     if (!isBotMatch)
+                    {
                         caller.Reply("Forfeit recorded as a loss. The match has ended.");
+                    }
                 }
                 else
                 {
@@ -510,27 +478,45 @@ public partial class aimLOCK
         ScheduleOnce(2.Seconds(), () =>
         {
             if (!player.IsValid || !pawn.IsValid)
+            {
                 return;
+            }
 
-            if (PlayerManager.TryGetActiveMatch(player, out _))
+            if (this.PlayerManager.TryGetActiveMatch(player, out _))
             {
                 caller.Reply("You joined a match; /spawn was cancelled.");
                 return;
             }
 
-            PlayerManager.StopSpectating(player);
-            PlayerManager.EnsureTeam(player, 2);
+            this.PlayerManager.StopSpectating(player);
+            this.PlayerManager.EnsureTeam(player, 2);
             pawn.Teleport(MidtownSpawnPosition, null, null);
-            UIManager.RestoreServerInfoAfterSpawn(player);
+            this.UIManager.RestoreServerInfoAfterSpawn(player);
             caller.Reply("Returned to spawn.");
         });
+    }
+
+    private static bool TryParsePercent(string? value, out float percent)
+    {
+        percent = 0f;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return float.TryParse(
+                value.Trim().TrimEnd('%'),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out percent) &&
+            percent >= 0f &&
+            percent <= 100f;
     }
 
     [Command(
         "scoreboard",
         Description = "Show or hide the server info UI: scoreboard <on|off>.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void ScoreboardCommand(Caller caller, string state)
     {
         var player = caller.Player;
@@ -555,23 +541,21 @@ public partial class aimLOCK
             return;
         }
 
-        UIManager.SetServerInfoVisibility(player, visible);
+        this.UIManager.SetServerInfoVisibility(player, visible);
         caller.Reply(
-            $"Server info UI turned {(visible ? "on" : "off")}."
-        );
+            $"Server info UI turned {(visible ? "on" : "off")}.");
     }
 
     [Command("stats", Description = "View player stats.")]
     public void StatsCommand(Caller caller, string? targetName = null)
     {
-        PlayerManager.StatsCommand(caller, targetName);
+        this.PlayerManager.StatsCommand(caller, targetName);
     }
 
     [Command(
         "elo",
         Description = "Check your ranked Elo rating.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void EloCommand(Caller caller)
     {
         var player = caller.Player;
@@ -582,10 +566,9 @@ public partial class aimLOCK
             return;
         }
 
-        RankedEloStats stats = RankedElo.GetStats(
+        RankedEloStats stats = this.RankedElo.GetStats(
             player.PlayerSteamId.ToString(),
-            player.PlayerName
-        );
+            player.PlayerName);
         int rankedGames = stats.Wins + stats.Losses;
         float rankedWinRate = rankedGames > 0
             ? (float)stats.Wins / rankedGames * 100f
@@ -594,15 +577,13 @@ public partial class aimLOCK
         caller.Reply(
             $"[{player.PlayerName}] Ranked | " +
             $"Record: {stats.Wins}-{stats.Losses} | " +
-            $"Elo: {stats.Rating} | WR: {rankedWinRate:F1}%"
-        );
+            $"Elo: {stats.Rating} | WR: {rankedWinRate:F1}%");
     }
 
     [Command(
         "ping",
         Description = "View your server-reported ping.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void PingCommand(Caller caller)
     {
         var player = caller.Player;
@@ -612,24 +593,22 @@ public partial class aimLOCK
             return;
         }
 
-        if (PingManager.TryGetPing(player, out int pingMs))
+        if (this.PingManager.TryGetPing(player, out int pingMs))
         {
             caller.Reply($"[PING] {pingMs} ms (server-reported).");
             return;
         }
 
-        PingManager.Refresh();
+        this.PingManager.Refresh();
         caller.Reply(
             "[PING] No fresh, unambiguous server reading is available yet. " +
-            "Try /ping again shortly."
-        );
+            "Try /ping again shortly.");
     }
 
     [Command(
         "timezone",
         Description = "Show or set your timezone: timezone <IANA ID>.",
-        SuppressChat = true
-    )]
+        SuppressChat = true)]
     public void TimeZoneCommand(Caller caller, string? ianaTimeZoneId = null)
     {
         var player = caller.Player;
@@ -643,32 +622,29 @@ public partial class aimLOCK
         {
             Chat.PrintToChat(
                 player,
-                $"[TIME] Timezone: {PlayerManager.GetTimeZoneId(player.PlayerSteamId)}. " +
-                "Set it with /timezone <IANA ID>."
-            );
+                $"[TIME] Timezone: {this.PlayerManager.GetTimeZoneId(player.PlayerSteamId)}. " +
+                "Set it with /timezone <IANA ID>.");
             return;
         }
 
         try
         {
-            PlayerManager.SetTimeZone(player, ianaTimeZoneId);
-            UIManager.ShowQueuePanel(player);
+            this.PlayerManager.SetTimeZone(player, ianaTimeZoneId);
+            this.UIManager.ShowQueuePanel(player);
             Chat.PrintToChat(player, $"[TIME] Timezone set to {ianaTimeZoneId}.");
         }
         catch (TimeZoneNotFoundException)
         {
             Chat.PrintToChat(
                 player,
-                $"[TIME] Unknown IANA timezone: {ianaTimeZoneId}."
-            );
+                $"[TIME] Unknown IANA timezone: {ianaTimeZoneId}.");
         }
         catch (InvalidTimeZoneException ex)
         {
             Console.WriteLine($"Invalid timezone data for {ianaTimeZoneId}: {ex}");
             Chat.PrintToChat(
                 player,
-                "[TIME] That timezone is unavailable on the server."
-            );
+                "[TIME] That timezone is unavailable on the server.");
         }
         catch (IOException ex)
         {

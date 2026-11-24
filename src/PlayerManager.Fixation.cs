@@ -1,4 +1,6 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -6,17 +8,15 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
-
 using DeadworksManaged.Api;
 using DeadworksManaged.Game;
-
-namespace aimLOCK;
 
 public partial class PlayerManager
 {
     private const string FixationAbilityName = "ability_stacking_damage";
     private const string FixationModifierName =
         "ability_stacking_damage/modifier_passive_haze_stacking_damage";
+
     private const short FixationMaxStacks = 999;
 
     /* Fixation stack cap */
@@ -25,35 +25,38 @@ public partial class PlayerManager
     // own stack limit (80 with Fixation fully upgraded), separate from the passive whose
     // MaxStacks is set to 999. Raise that limit on the stack modifier itself.
     private const short FixationTargetMaxStacks = 999;
+    private const string FixationModifierNamePrefix = "ability_stacking_damage/";
     private static readonly SchemaAccessor<short> ModifierMaxStackCount =
         new("CBaseModifier"u8, "m_iMaxStackCount"u8);
+
     private static readonly SchemaAccessor<short> ModifierStackCount =
         new("CBaseModifier"u8, "m_iStackCount"u8);
 
-    private void RaiseFixationStackCap(CCitadelPlayerPawn pawn)
-    {
-        var modifiers = pawn.ModifierProp?.Modifiers;
-        if (modifiers == null)
-            return;
+    /* Fixation reset on kill */
 
-        foreach (var modifier in modifiers)
-        {
-            if (!IsFixationModifier(modifier))
-                continue;
+    private static readonly SchemaAccessor<uint> ModifierAbilityHandle =
+        new("CBaseModifier"u8, "m_hAbility"u8);
 
-            short max = ModifierMaxStackCount.Get(modifier.Handle);
-            if (max <= 0 || max >= FixationTargetMaxStacks)
-                continue;
+    // The re-added passive has no link to the ability, so the game client showed it as
+    // a permanent status icon on the HUD. The passive only does work on the server (it
+    // puts the stacks on whoever gets shot; those still show on the target as normal),
+    // so it is no longer sent to clients at all.
+    private static readonly SchemaAccessor<bool> ModifierSuppressSend =
+        new("CBaseModifier"u8, "m_bSuppressSendModifier"u8);
 
-            // Plain write, no network notify: modifiers are not entities, and only
-            // the server's stack logic needs the new limit.
-            nint address = ModifierMaxStackCount.GetAddress(modifier.Handle);
-            if (address - modifier.Handle <= 0x10 || address - modifier.Handle > 0x1000)
-                return;
+    private static bool loggedSuppressSendFailure;
 
-            System.Runtime.InteropServices.Marshal.WriteInt16(address, FixationTargetMaxStacks);
-        }
-    }
+    private readonly List<CBaseModifier> fixationModifierScratch = new();
+
+    // Modifier type (VData pointer) -> is it one of Fixation's own modifiers
+    // ("ability_stacking_damage/..."). Cached so the name is read once per type.
+    private readonly Dictionary<nint, bool> fixationModifierTypes = new();
+
+    // Crash test switch (/hidepassive): whether the Fixation passive is kept off the
+    // clients. Hiding it is one of the few things every Haze on the server (players and
+    // bots alike) has that the original plugin didn't, so it is a suspect for the crash
+    // when someone joins while another Haze is already on the server.
+    public bool HideFixationPassive { get; private set; } = true;
 
     /// <summary>
     /// /fixdebug: lists every modifier on you and your duel opponent that came from a
@@ -63,15 +66,19 @@ public partial class PlayerManager
     {
         var player = caller.Player;
         if (player == null)
+        {
             return;
+        }
 
         var targets = new List<CCitadelPlayerController> { player };
         if (TryGetActiveMatch(player, out var match))
         {
-            foreach (var participant in GetMatchParticipants(match))
+            foreach (var participant in this.GetMatchParticipants(match))
             {
                 if (participant.EntityHandle != player.EntityHandle)
+                {
                     targets.Add(participant);
+                }
             }
         }
 
@@ -80,7 +87,9 @@ public partial class PlayerManager
             var pawn = target.GetHeroPawn();
             var modifiers = pawn?.ModifierProp?.Modifiers;
             if (pawn == null || modifiers == null)
+            {
                 continue;
+            }
 
             string who = GetCachedPlayerName(target);
             int found = 0;
@@ -89,9 +98,11 @@ public partial class PlayerManager
                 uint abilityHandle = ModifierAbilityHandle.Get(modifier.Handle);
                 string name = modifier.SubclassVData?.Name ?? "?";
                 bool fromFixation = abilityHandle != 0 && abilityHandle != 0xFFFFFFFF &&
-                    server.IsFixationAbility(abilityHandle);
+                    this.server.IsFixationAbility(abilityHandle);
                 if (!fromFixation && !name.Contains("stacking", StringComparison.Ordinal))
+                {
                     continue;
+                }
 
                 found++;
                 string line =
@@ -102,14 +113,107 @@ public partial class PlayerManager
             }
 
             if (found == 0)
+            {
                 caller.Reply($"[fixdebug] {who}: no Fixation modifiers.");
+            }
         }
     }
 
-    /* Fixation reset on kill */
+    public void ClearModifierTypeCache() => this.fixationModifierTypes.Clear();
 
-    private static readonly SchemaAccessor<uint> ModifierAbilityHandle =
-        new("CBaseModifier"u8, "m_hAbility"u8);
+    public int MaxFixationForOnlinePlayers()
+    {
+        int updatedPlayers = 0;
+        foreach (var controller in Players.GetAll())
+        {
+            if (!controller.IsValid)
+            {
+                continue;
+            }
+
+            var pawn = controller.GetHeroPawn();
+            if (pawn is { IsValid: true } && ApplyFixation(pawn))
+            {
+                updatedPlayers++;
+            }
+        }
+
+        return updatedPlayers;
+    }
+
+    /// <summary>Turns hiding the Fixation passive on or off and redoes Fixation for everyone.</summary>
+    public int SetHideFixationPassive(bool hide)
+    {
+        this.HideFixationPassive = hide;
+        return this.MaxFixationForOnlinePlayers();
+    }
+
+    public void ResetMatchFixationStacks(DuelMatch match)
+    {
+        foreach (var participant in this.GetMatchParticipants(match))
+        {
+            this.ResetFixationStacks(participant);
+        }
+    }
+
+    private static void HideFromClients(CBaseModifier modifier)
+    {
+        nint handle = modifier.Handle;
+        if (handle == 0)
+        {
+            return;
+        }
+
+        nint address = ModifierSuppressSend.GetAddress(handle);
+
+        // A real field sits past the VData pointer at 0x10; anything else means the
+        // field was not found, so don't write.
+        if (address - handle <= 0x10 || address - handle > 0x1000)
+        {
+            if (!loggedSuppressSendFailure)
+            {
+                loggedSuppressSendFailure = true;
+                Console.WriteLine("[aimLOCK] Could not find m_bSuppressSendModifier; Fixation HUD icon stays.");
+            }
+
+            return;
+        }
+
+        System.Runtime.InteropServices.Marshal.WriteByte(address, 1);
+    }
+
+    private void RaiseFixationStackCap(CCitadelPlayerPawn pawn)
+    {
+        var modifiers = pawn.ModifierProp?.Modifiers;
+        if (modifiers == null)
+        {
+            return;
+        }
+
+        foreach (var modifier in modifiers)
+        {
+            if (!IsFixationModifier(modifier))
+            {
+                continue;
+            }
+
+            short max = ModifierMaxStackCount.Get(modifier.Handle);
+            if (max <= 0 || max >= FixationTargetMaxStacks)
+            {
+                continue;
+            }
+
+            // Plain write, no network notify: modifiers are not entities, and only
+            // the server's stack logic needs the new limit.
+            nint address = ModifierMaxStackCount.GetAddress(modifier.Handle);
+            if (address - modifier.Handle <= 0x10 || address - modifier.Handle > 0x1000)
+            {
+                return;
+            }
+
+            System.Runtime.InteropServices.Marshal.WriteInt16(address, FixationTargetMaxStacks);
+        }
+    }
 
     /// <summary>
     /// Removes every modifier that came from a Fixation ability (the stacks on the
@@ -120,29 +224,28 @@ public partial class PlayerManager
     {
         var modifiers = pawn.ModifierProp?.Modifiers;
         if (modifiers == null || modifiers.Count == 0)
+        {
             return;
+        }
 
         // Collected first, then removed: removing while walking the list could skip
         // the modifier that slides into the removed one's place.
-        fixationModifierScratch.Clear();
+        this.fixationModifierScratch.Clear();
         foreach (var modifier in modifiers)
         {
             if (IsFixationModifier(modifier))
-                fixationModifierScratch.Add(modifier);
+            {
+                this.fixationModifierScratch.Add(modifier);
+            }
         }
 
-        foreach (var modifier in fixationModifierScratch)
+        foreach (var modifier in this.fixationModifierScratch)
+        {
             pawn.RemoveModifier(modifier);
+        }
 
-        fixationModifierScratch.Clear();
+        this.fixationModifierScratch.Clear();
     }
-
-    private readonly List<CBaseModifier> fixationModifierScratch = new();
-
-    // Modifier type (VData pointer) -> is it one of Fixation's own modifiers
-    // ("ability_stacking_damage/..."). Cached so the name is read once per type.
-    private readonly Dictionary<nint, bool> fixationModifierTypes = new();
-    private const string FixationModifierNamePrefix = "ability_stacking_damage/";
 
     /// <summary>
     /// A modifier is Fixation's when it came from a Fixation ability, or when it is one
@@ -155,50 +258,39 @@ public partial class PlayerManager
         if (
             abilityHandle != 0 &&
             abilityHandle != 0xFFFFFFFF &&
-            server.IsFixationAbility(abilityHandle)
-        )
+            this.server.IsFixationAbility(abilityHandle))
+        {
             return true;
+        }
 
         var vdata = modifier.SubclassVData;
         if (vdata == null)
+        {
             return false;
+        }
 
         nint type = vdata.Handle;
-        if (!fixationModifierTypes.TryGetValue(type, out bool isFixation))
+        if (!this.fixationModifierTypes.TryGetValue(type, out bool isFixation))
         {
-            if (fixationModifierTypes.Count > 2048)
-                fixationModifierTypes.Clear();
+            if (this.fixationModifierTypes.Count > 2048)
+            {
+                this.fixationModifierTypes.Clear();
+            }
 
             isFixation =
                 vdata.Name?.StartsWith(FixationModifierNamePrefix, StringComparison.Ordinal) == true;
-            fixationModifierTypes[type] = isFixation;
+            this.fixationModifierTypes[type] = isFixation;
         }
 
         return isFixation;
     }
 
-    public void ClearModifierTypeCache() => fixationModifierTypes.Clear();
-
-    public int MaxFixationForOnlinePlayers()
-    {
-        int updatedPlayers = 0;
-        foreach (var controller in Players.GetAll())
-        {
-            if (!controller.IsValid)
-                continue;
-
-            var pawn = controller.GetHeroPawn();
-            if (pawn is { IsValid: true } && ApplyFixation(pawn))
-                updatedPlayers++;
-        }
-
-        return updatedPlayers;
-    }
-
     private bool ApplyFixation(CCitadelPlayerPawn pawn)
     {
         if (!pawn.IsValid)
+        {
             return false;
+        }
 
         var fixation = pawn.AbilityComponent?.FindAbilityByName(FixationAbilityName);
         var signature3Ability = pawn.GetAbilityBySlot(EAbilitySlot.Signature3);
@@ -206,24 +298,20 @@ public partial class PlayerManager
         {
             if (
                 fixation != null
-                && !pawn.RemoveAbility(fixation)
-            )
+                && !pawn.RemoveAbility(fixation))
             {
                 Console.WriteLine(
-                    $"[aimLOCK] Could not move Fixation to Signature3 for {pawn.Controller?.PlayerName ?? "player"}."
-                );
+                    $"[aimLOCK] Could not move Fixation to Signature3 for {pawn.Controller?.PlayerName ?? "player"}.");
                 return false;
             }
 
             var addedFixation = pawn.AddAbility(
                 FixationAbilityName,
-                (ushort)EAbilitySlot.Signature3
-            );
+                (ushort)EAbilitySlot.Signature3);
             if (addedFixation == null || !addedFixation.IsValid)
             {
                 Console.WriteLine(
-                    $"[aimLOCK] Could not add Fixation to {pawn.Controller?.PlayerName ?? "player"}."
-                );
+                    $"[aimLOCK] Could not add Fixation to {pawn.Controller?.PlayerName ?? "player"}.");
                 return false;
             }
 
@@ -231,20 +319,21 @@ public partial class PlayerManager
             if (fixation == null || !fixation.IsValid)
             {
                 Console.WriteLine(
-                    $"[aimLOCK] Could not find Fixation after adding it to {pawn.Controller?.PlayerName ?? "player"}."
-                );
+                    $"[aimLOCK] Could not find Fixation after adding it to {pawn.Controller?.PlayerName ?? "player"}.");
                 return false;
             }
         }
 
         // Networked field: only write it when it actually changes.
         if (fixation.UpgradeBits != FullyUpgradedAbilityBits)
+        {
             fixation.UpgradeBits = FullyUpgradedAbilityBits;
+        }
+
         if (fixation.UpgradeBits != FullyUpgradedAbilityBits)
         {
             Console.WriteLine(
-                $"[aimLOCK] Could not fully upgrade Fixation for {pawn.Controller?.PlayerName ?? "player"}."
-            );
+                $"[aimLOCK] Could not fully upgrade Fixation for {pawn.Controller?.PlayerName ?? "player"}.");
             return false;
         }
 
@@ -254,13 +343,11 @@ public partial class PlayerManager
             abilityValues: new()
             {
                 ["MaxStacks"] = FixationMaxStacks,
-            }
-        );
+            });
         if (fixationModifier is not { IsValid: true })
         {
             Console.WriteLine(
-                $"[aimLOCK] Could not add the Fixation stack modifier to {pawn.Controller?.PlayerName ?? "player"}."
-            );
+                $"[aimLOCK] Could not add the Fixation stack modifier to {pawn.Controller?.PlayerName ?? "player"}.");
             return false;
         }
 
@@ -269,81 +356,37 @@ public partial class PlayerManager
         if (modifierSchema.m_iMaxStackCount != FixationMaxStacks)
         {
             Console.WriteLine(
-                $"[aimLOCK] Could not set Fixation's runtime stack cap to {FixationMaxStacks} for {pawn.Controller?.PlayerName ?? "player"}."
-            );
+                $"[aimLOCK] Could not set Fixation's runtime stack cap to {FixationMaxStacks} for {pawn.Controller?.PlayerName ?? "player"}.");
             return false;
         }
 
-        if (HideFixationPassive)
-            HideFromClients(fixationModifier);
-        return true;
-    }
-
-    // The re-added passive has no link to the ability, so the game client showed it as
-    // a permanent status icon on the HUD. The passive only does work on the server (it
-    // puts the stacks on whoever gets shot; those still show on the target as normal),
-    // so it is no longer sent to clients at all.
-    private static readonly SchemaAccessor<bool> ModifierSuppressSend =
-        new("CBaseModifier"u8, "m_bSuppressSendModifier"u8);
-    private static bool loggedSuppressSendFailure;
-
-    // Crash test switch (/hidepassive): whether the Fixation passive is kept off the
-    // clients. Hiding it is one of the few things every Haze on the server (players and
-    // bots alike) has that the original plugin didn't, so it is a suspect for the crash
-    // when someone joins while another Haze is already on the server.
-    public bool HideFixationPassive { get; private set; } = true;
-
-    /// <summary>Turns hiding the Fixation passive on or off and redoes Fixation for everyone.</summary>
-    public int SetHideFixationPassive(bool hide)
-    {
-        HideFixationPassive = hide;
-        return MaxFixationForOnlinePlayers();
-    }
-
-    private static void HideFromClients(CBaseModifier modifier)
-    {
-        nint handle = modifier.Handle;
-        if (handle == 0)
-            return;
-
-        nint address = ModifierSuppressSend.GetAddress(handle);
-        // A real field sits past the VData pointer at 0x10; anything else means the
-        // field was not found, so don't write.
-        if (address - handle <= 0x10 || address - handle > 0x1000)
+        if (this.HideFixationPassive)
         {
-            if (!loggedSuppressSendFailure)
-            {
-                loggedSuppressSendFailure = true;
-                Console.WriteLine("[aimLOCK] Could not find m_bSuppressSendModifier; Fixation HUD icon stays.");
-            }
-            return;
+            HideFromClients(fixationModifier);
         }
 
-        System.Runtime.InteropServices.Marshal.WriteByte(address, 1);
-    }
-
-    public void ResetMatchFixationStacks(DuelMatch match)
-    {
-        foreach (var participant in GetMatchParticipants(match))
-            ResetFixationStacks(participant);
+        return true;
     }
 
     private void ResetFixationStacks(CCitadelPlayerController player)
     {
         var pawn = player.GetHeroPawn();
         if (pawn is not { IsValid: true })
+        {
             return;
+        }
 
         // The stacks live on the person who was shot (a modifier from the shooter's
         // Fixation), not on the shooter's passive: remove those too. The player who
         // died gets a fresh passive with the respawn loadout.
         RemoveFixationModifiers(pawn);
         if (!pawn.IsAlive)
+        {
             return;
+        }
 
         var fixation = pawn.AbilityComponent?.FindAbilityByName(
-            FixationAbilityName
-        );
+            FixationAbilityName);
         if (fixation is not { IsValid: true })
         {
             ApplyFixation(pawn);
@@ -356,29 +399,28 @@ public partial class PlayerManager
             abilityValues: new()
             {
                 ["MaxStacks"] = FixationMaxStacks,
-            }
-        );
+            });
         if (fixationModifier is not { IsValid: true })
         {
             Console.WriteLine(
-                $"[aimLOCK] Could not reset Fixation stacks for {player.PlayerName ?? "player"}."
-            );
+                $"[aimLOCK] Could not reset Fixation stacks for {player.PlayerName ?? "player"}.");
             return;
         }
 
-        if (HideFixationPassive)
+        if (this.HideFixationPassive)
+        {
             HideFromClients(fixationModifier);
+        }
+
         var modifierSchema = fixationModifier.AsSchema<Schema.CBaseModifier>();
         modifierSchema.m_iMaxStackCount = FixationMaxStacks;
         modifierSchema.m_iStackCount = 0;
         if (
             modifierSchema.m_iMaxStackCount != FixationMaxStacks ||
-            modifierSchema.m_iStackCount != 0
-        )
+            modifierSchema.m_iStackCount != 0)
         {
             Console.WriteLine(
-                $"[aimLOCK] Could not reset Fixation stacks for {player.PlayerName ?? "player"}."
-            );
+                $"[aimLOCK] Could not reset Fixation stacks for {player.PlayerName ?? "player"}.");
         }
     }
 }

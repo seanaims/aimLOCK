@@ -10,17 +10,17 @@ Twice a second this checks every hero that is flagged as in a shop zone, and cle
 the flag if the hero isn't actually inside any shop trigger. Heroes really standing
 in a shop keep the prompt.
 */
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.Numerics;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public sealed class ShopZoneFixer
 {
     private const double CheckIntervalSeconds = 0.5;
+
     // A little slack so standing right on a trigger's edge doesn't flicker the prompt.
     private const float ZoneMargin = 32f;
 
@@ -39,56 +39,69 @@ public sealed class ShopZoneFixer
     /// <summary>Call after the map has loaded. Shop triggers don't move, so they are read once.</summary>
     public void Start()
     {
-        shopZones.Clear();
+        this.shopZones.Clear();
         foreach (var entity in Entities.All)
         {
             if (!entity.IsValid || entity.DesignerName != "trigger_item_shop")
+            {
                 continue;
+            }
 
             var collision = entity.Collision;
             if (collision == null)
+            {
                 continue;
+            }
 
             var margin = new Vector3(ZoneMargin);
-            shopZones.Add((collision.WorldMins - margin, collision.WorldMaxs + margin));
+            this.shopZones.Add((collision.WorldMins - margin, collision.WorldMaxs + margin));
         }
 
-        Console.WriteLine($"[aimLOCK] Shop zone check: {shopZones.Count} shop zones found.");
-        if (shopZones.Count == 0 || started)
+        Console.WriteLine($"[aimLOCK] Shop zone check: {this.shopZones.Count} shop zones found.");
+        if (this.shopZones.Count == 0 || this.started)
+        {
             return;
+        }
 
-        started = true;
-        server.ScheduleOnce(CheckIntervalSeconds.Seconds(), Check);
+        this.started = true;
+        this.server.ScheduleOnce(CheckIntervalSeconds.Seconds(), Check);
     }
 
     private void Check()
     {
-        server.ScheduleOnce(CheckIntervalSeconds.Seconds(), Check);
+        this.server.ScheduleOnce(CheckIntervalSeconds.Seconds(), Check);
 
         foreach (var player in Players.GetAll())
         {
             if (player.IsBot)
+            {
                 continue;
+            }
 
             var pawn = player.GetHeroPawn();
             if (pawn is not { IsValid: true } || !InItemShopZone.Get(pawn.Handle))
+            {
                 continue;
+            }
 
             if (!IsInsideAnyShop(pawn.Position))
+            {
                 InItemShopZone.Set(pawn.Handle, false);
+            }
         }
     }
 
     private bool IsInsideAnyShop(Vector3 position)
     {
-        foreach (var (min, max) in shopZones)
+        foreach (var (min, max) in this.shopZones)
         {
             if (
                 position.X >= min.X && position.X <= max.X &&
                 position.Y >= min.Y && position.Y <= max.Y &&
-                position.Z >= min.Z && position.Z <= max.Z
-            )
+                position.Z >= min.Z && position.Z <= max.Z)
+            {
                 return true;
+            }
         }
 
         return false;

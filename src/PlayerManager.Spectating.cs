@@ -1,4 +1,6 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -6,32 +8,28 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
-
 using DeadworksManaged.Api;
 using DeadworksManaged.Game;
-
-namespace aimLOCK;
 
 public partial class PlayerManager
 {
     private readonly Dictionary<ulong, DuelMatch> spectatingMatches = new();
 
     public bool IsSpectating(CCitadelPlayerController player) =>
-        spectatingMatches.ContainsKey(player.PlayerSteamId);
+        this.spectatingMatches.ContainsKey(player.PlayerSteamId);
 
     public void SpectateCommand(Caller caller, params string[] arguments)
     {
-        var matches = server.ActiveMatches.Values
+        var matches = this.server.ActiveMatches.Values
             .Distinct()
             .Where(match => !match.Finished)
             .ToArray();
 
         if (
             arguments.Length == 1 &&
-            string.Equals(arguments[0], "list", StringComparison.OrdinalIgnoreCase)
-        )
+            string.Equals(arguments[0], "list", StringComparison.OrdinalIgnoreCase))
         {
-            ListActiveMatches(caller, matches);
+            this.ListActiveMatches(caller, matches);
             return;
         }
 
@@ -55,10 +53,8 @@ public partial class PlayerManager
         }
 
         if (
-            server.RankedQueue.Concat(server.UnrankedQueue).Any(entry =>
-                entry.SteamId == player.PlayerSteamId
-            )
-        )
+            this.server.RankedQueue.Concat(this.server.UnrankedQueue).Any(entry =>
+                entry.SteamId == player.PlayerSteamId))
         {
             caller.Reply("Leave your queue before spectating a match.");
             return;
@@ -71,21 +67,19 @@ public partial class PlayerManager
             return;
         }
 
-        var matchingMatches = FindMatchesByParticipant(matches, targetName);
+        var matchingMatches = this.FindMatchesByParticipant(matches, targetName);
         if (matchingMatches.Length == 0)
         {
             caller.Reply(
                 $"No active match contains a player matching \"{targetName}\". " +
-                "Use /spectate list to see active matches."
-            );
+                "Use /spectate list to see active matches.");
             return;
         }
 
         if (matchingMatches.Length > 1)
         {
             caller.Reply(
-                "That name matches multiple active matches; use a full player name."
-            );
+                "That name matches multiple active matches; use a full player name.");
             return;
         }
 
@@ -103,15 +97,39 @@ public partial class PlayerManager
             return;
         }
 
-        var (position, angles) = GetMatchSpectatorView(matchToSpectate);
+        var (position, angles) = this.GetMatchSpectatorView(matchToSpectate);
         pawn.Teleport(position, angles, null);
-        spectatingMatches[player.PlayerSteamId] = matchToSpectate;
-        botViewerMasksDirty = true;
+        this.spectatingMatches[player.PlayerSteamId] = matchToSpectate;
+        this.botViewerMasksDirty = true;
         pawn.AddModifier("modifier_citadel_disarmed");
         caller.Reply(
-            $"Spectating {GetMatchParticipantDisplayName(matchToSpectate.Player1)} " +
-            $"vs {GetMatchParticipantDisplayName(matchToSpectate.Player2)}."
-        );
+            $"Spectating {this.GetMatchParticipantDisplayName(matchToSpectate.Player1)} " +
+            $"vs {this.GetMatchParticipantDisplayName(matchToSpectate.Player2)}.");
+    }
+
+    public void StopSpectating(CCitadelPlayerController player)
+    {
+        this.spectatingMatches.Remove(player.PlayerSteamId);
+        this.botViewerMasksDirty = true;
+        if (player.GetHeroPawn() is { } disarmedPawn)
+        {
+            RemoveAllDisarms(disarmedPawn);
+        }
+    }
+
+    public void ReturnMatchSpectators(DuelMatch match)
+    {
+        ulong[] spectatorIds = this.spectatingMatches
+            .Where(entry => ReferenceEquals(entry.Value, match))
+            .Select(entry => entry.Key)
+            .ToArray();
+
+        foreach (ulong steamId in spectatorIds)
+        {
+            this.spectatingMatches.Remove(steamId);
+            this.botViewerMasksDirty = true;
+            this.ReturnSpectatorToSpawn(steamId);
+        }
     }
 
     private void ListActiveMatches(Caller caller, DuelMatch[] matches)
@@ -125,13 +143,12 @@ public partial class PlayerManager
         foreach (var match in matches)
         {
             string state = match.ArenaInitialized
-                ? ""
+                ? string.Empty
                 : " | initializing";
             caller.Reply(
-                $"{GetMatchParticipantDisplayName(match.Player1)} vs " +
-                $"{GetMatchParticipantDisplayName(match.Player2)} | " +
-                $"{match.Score1}-{match.Score2}{state}"
-            );
+                $"{this.GetMatchParticipantDisplayName(match.Player1)} vs " +
+                $"{this.GetMatchParticipantDisplayName(match.Player2)} | " +
+                $"{match.Score1}-{match.Score2}{state}");
         }
     }
 
@@ -142,107 +159,83 @@ public partial class PlayerManager
             string.Equals(
                 matchKey,
                 targetName,
-                StringComparison.OrdinalIgnoreCase
-            ) ||
+                StringComparison.OrdinalIgnoreCase) ||
             string.Equals(
-                GetMatchParticipantDisplayName(matchKey),
+                this.GetMatchParticipantDisplayName(matchKey),
                 targetName,
-                StringComparison.OrdinalIgnoreCase
-            );
+                StringComparison.OrdinalIgnoreCase);
         bool StartsWith(string matchKey) =>
             matchKey.StartsWith(
                 targetName,
-                StringComparison.OrdinalIgnoreCase
-            ) ||
-            GetMatchParticipantDisplayName(matchKey).StartsWith(
+                StringComparison.OrdinalIgnoreCase) ||
+            this.GetMatchParticipantDisplayName(matchKey).StartsWith(
                 targetName,
-                StringComparison.OrdinalIgnoreCase
-            );
+                StringComparison.OrdinalIgnoreCase);
 
         var exactMatches = matches
             .Where(match => IsExactly(match.Player1) || IsExactly(match.Player2))
             .ToArray();
         if (exactMatches.Length > 0)
+        {
             return exactMatches;
+        }
 
         return matches
             .Where(match => StartsWith(match.Player1) || StartsWith(match.Player2))
             .ToArray();
     }
 
-    public void StopSpectating(CCitadelPlayerController player)
-    {
-        spectatingMatches.Remove(player.PlayerSteamId);
-        botViewerMasksDirty = true;
-        if (player.GetHeroPawn() is { } disarmedPawn)
-            RemoveAllDisarms(disarmedPawn);
-    }
-
     private string GetMatchParticipantDisplayName(string participantName)
     {
-        var participant = FindMatchParticipant(participantName);
+        var participant = this.FindMatchParticipant(participantName);
         if (participant == null)
-            return GetOfflineParticipantName(participantName);
+        {
+            return this.GetOfflineParticipantName(participantName);
+        }
 
         return GetPracticeBotDisplayName(participant) ??
-            server.GuildManager.FormatPlayerNameWithSelectedTag(participant);
+            this.server.GuildManager.FormatPlayerNameWithSelectedTag(participant);
     }
 
     private (Vector3 Position, Vector3 Angles) GetMatchSpectatorView(
-        DuelMatch match
-    )
+        DuelMatch match)
     {
         Vector3 center = GetDuelArenaSphereCenter(match.ArenaPosition);
         float radius = DuelArenaSphereRadius;
         Vector3 position = center + new Vector3(0f, -radius - 128f, 180f);
         Vector3 direction = center - position;
         float horizontalDistance = MathF.Sqrt(
-            direction.X * direction.X + direction.Y * direction.Y
-        );
+            (direction.X * direction.X) + (direction.Y * direction.Y));
         float pitch = MathF.Atan2(
             -direction.Z,
-            horizontalDistance
-        ) * (180f / MathF.PI);
+            horizontalDistance) * (180f / MathF.PI);
         float yaw = MathF.Atan2(
             direction.Y,
-            direction.X
-        ) * (180f / MathF.PI);
+            direction.X) * (180f / MathF.PI);
 
         return (position, new Vector3(pitch, yaw, 0f));
-    }
-
-    public void ReturnMatchSpectators(DuelMatch match)
-    {
-        ulong[] spectatorIds = spectatingMatches
-            .Where(entry => ReferenceEquals(entry.Value, match))
-            .Select(entry => entry.Key)
-            .ToArray();
-
-        foreach (ulong steamId in spectatorIds)
-        {
-            spectatingMatches.Remove(steamId);
-            botViewerMasksDirty = true;
-            ReturnSpectatorToSpawn(steamId);
-        }
     }
 
     private void ReturnSpectatorToSpawn(
         ulong steamId,
         int retriesRemaining = 20,
-        CCitadelPlayerController? cachedPlayer = null
-    )
+        CCitadelPlayerController? cachedPlayer = null)
     {
         var player = cachedPlayer is { IsValid: true } &&
             cachedPlayer.PlayerSteamId == steamId
                 ? cachedPlayer
                 : Players.GetAll().FirstOrDefault(controller =>
-                    controller.PlayerSteamId == steamId
-                );
+                    controller.PlayerSteamId == steamId);
         if (player is not { IsValid: true })
+        {
             return;
+        }
 
         if (player.GetHeroPawn() is { } disarmedPawn)
+        {
             RemoveAllDisarms(disarmedPawn);
+        }
+
         EnsureTeam(player, 2);
         var pawn = player.GetHeroPawn();
         if (pawn is not { IsValid: true, IsAlive: true })
@@ -250,23 +243,21 @@ public partial class PlayerManager
             if (retriesRemaining <= 0)
             {
                 Console.WriteLine(
-                    $"[aimLOCK] Could not return spectator {player.PlayerName} to spawn."
-                );
+                    $"[aimLOCK] Could not return spectator {player.PlayerName} to spawn.");
                 return;
             }
 
-            server.ScheduleOnce(0.25.Seconds(), () =>
+            this.server.ScheduleOnce(0.25.Seconds(), () =>
                 ReturnSpectatorToSpawn(
                     steamId,
                     retriesRemaining - 1,
-                    player
-                ));
+                    player));
             return;
         }
 
         pawn.Teleport(aimLOCK.MidtownSpawnPosition, null, null);
         PlayMatchTeleportEffect(pawn);
-        server.UIManager.RestoreServerInfoAfterSpawn(player);
+        this.server.UIManager.RestoreServerInfoAfterSpawn(player);
         Chat.PrintToChat(player, "The match ended; you have been returned to spawn.");
     }
 }

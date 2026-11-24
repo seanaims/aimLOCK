@@ -1,40 +1,45 @@
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
-namespace aimLOCK;
-
 public static class JsonStore
 {
-    private static readonly object syncRoot = new();
-    private static readonly HashSet<string> lockedPaths =
+    private static readonly object SyncRoot = new();
+    private static readonly HashSet<string> LockedPaths =
         new(StringComparer.OrdinalIgnoreCase);
 
     public static string DataDirectory { get; } = Path.GetFullPath(
-        Path.Combine(AppContext.BaseDirectory, "aimLOCK")
-    );
+        Path.Combine(AppContext.BaseDirectory, "aimLOCK"));
 
     public static string PathFor(string fileName) =>
         Path.GetFullPath(Path.Combine(DataDirectory, fileName));
 
     public static void ResetLocks()
     {
-        lock (syncRoot)
-            lockedPaths.Clear();
+        lock (SyncRoot)
+        {
+            LockedPaths.Clear();
+        }
     }
 
     public static void MigrateLegacyFile(string fileName, params string[] legacyPaths)
     {
         string target = PathFor(fileName);
         if (File.Exists(target))
+        {
             return;
+        }
 
         foreach (string legacyPath in legacyPaths)
         {
             string source = Path.GetFullPath(legacyPath);
             if (!File.Exists(source))
+            {
                 continue;
+            }
 
             try
             {
@@ -59,11 +64,12 @@ public static class JsonStore
         string path,
         Func<T> createEmpty,
         JsonSerializerOptions? options = null,
-        Func<T, T>? validate = null
-    )
+        Func<T, T>? validate = null)
     {
         if (!File.Exists(path))
+        {
             return createEmpty();
+        }
 
         try
         {
@@ -72,8 +78,7 @@ public static class JsonStore
             {
                 loaded = JsonSerializer.Deserialize<T>(stream, options)
                     ?? throw new InvalidDataException(
-                        $"Data file is empty or invalid: {path}"
-                    );
+                        $"Data file is empty or invalid: {path}");
             }
 
             return validate == null ? loaded : validate(loaded);
@@ -81,14 +86,15 @@ public static class JsonStore
         catch (Exception ex)
         {
             string backupPath = BackUpBadFile(path);
-            lock (syncRoot)
-                lockedPaths.Add(path);
+            lock (SyncRoot)
+            {
+                LockedPaths.Add(path);
+            }
 
             Console.WriteLine(
                 $"Failed to load {path}: {ex}\n" +
                 $"[aimLOCK] Backup saved to {backupPath}. " +
-                "Saving to this file is disabled until it is fixed and the plugin is reloaded."
-            );
+                "Saving to this file is disabled until it is fixed and the plugin is reloaded.");
             return createEmpty();
         }
     }
@@ -97,13 +103,14 @@ public static class JsonStore
         string path,
         T value,
         JsonSerializerOptions? options = null,
-        bool durable = true
-    )
+        bool durable = true)
     {
-        lock (syncRoot)
+        lock (SyncRoot)
         {
-            if (lockedPaths.Contains(path))
+            if (LockedPaths.Contains(path))
+            {
                 throw new DataStoreLockedException(path);
+            }
         }
 
         byte[] contents = JsonSerializer.SerializeToUtf8Bytes(value, options);

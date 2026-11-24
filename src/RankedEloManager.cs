@@ -1,11 +1,11 @@
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
-
-namespace aimLOCK;
 
 public sealed class RankedEloManager
 {
@@ -14,7 +14,7 @@ public sealed class RankedEloManager
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        WriteIndented = true
+        WriteIndented = true,
     };
 
     private readonly object syncRoot = new();
@@ -26,7 +26,7 @@ public sealed class RankedEloManager
         this.dataFilePath = dataFilePath == null
             ? JsonStore.PathFor("ranked-elo.json")
             : Path.GetFullPath(dataFilePath);
-        players = LoadPlayers();
+        this.players = this.LoadPlayers();
     }
 
     public RankedEloStats GetStats(string steamId64, string playerName)
@@ -34,18 +34,19 @@ public sealed class RankedEloManager
         string playerId = ValidateSteamId(steamId64, nameof(steamId64));
         ArgumentException.ThrowIfNullOrWhiteSpace(playerName);
 
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            if (players.TryGetValue(playerId, out var player))
+            if (this.players.TryGetValue(playerId, out var player))
+            {
                 return ToStats(playerId, player);
+            }
 
             return new RankedEloStats(
                 playerName,
                 InitialRating,
                 0,
                 0,
-                ulong.Parse(playerId, CultureInfo.InvariantCulture)
-            );
+                ulong.Parse(playerId, CultureInfo.InvariantCulture));
         }
     }
 
@@ -53,12 +54,11 @@ public sealed class RankedEloManager
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
 
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            return players
+            return this.players
                 .Where(player => player.Key != ulong.MaxValue.ToString(
-                    CultureInfo.InvariantCulture
-                ))
+                    CultureInfo.InvariantCulture))
                 .Select(player => ToStats(player.Key, player.Value))
                 .OrderByDescending(player => player.Rating)
                 .ThenByDescending(player => player.Wins + player.Losses)
@@ -72,19 +72,16 @@ public sealed class RankedEloManager
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(playerName);
 
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            return players
+            return this.players
                 .Where(player =>
                     player.Key != ulong.MaxValue.ToString(
-                        CultureInfo.InvariantCulture
-                    ) &&
+                        CultureInfo.InvariantCulture) &&
                     string.Equals(
                         player.Value.PlayerName,
                         playerName,
-                        StringComparison.OrdinalIgnoreCase
-                    )
-                )
+                        StringComparison.OrdinalIgnoreCase))
                 .Select(player => player.Key)
                 .ToArray();
         }
@@ -94,18 +91,15 @@ public sealed class RankedEloManager
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(namePrefix);
 
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            return players
+            return this.players
                 .Where(player =>
                     player.Key != ulong.MaxValue.ToString(
-                        CultureInfo.InvariantCulture
-                    ) &&
+                        CultureInfo.InvariantCulture) &&
                     player.Value.PlayerName.StartsWith(
                         namePrefix,
-                        StringComparison.OrdinalIgnoreCase
-                    )
-                )
+                        StringComparison.OrdinalIgnoreCase))
                 .Select(player => player.Key)
                 .ToArray();
         }
@@ -118,25 +112,24 @@ public sealed class RankedEloManager
         string playerId = ValidateSteamId(steamId64, nameof(steamId64));
         ArgumentException.ThrowIfNullOrWhiteSpace(playerName);
 
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            players.TryGetValue(playerId, out var existingPlayer);
+            this.players.TryGetValue(playerId, out var existingPlayer);
             var updatedPlayers = new Dictionary<string, StoredPlayer>(
-                players,
-                StringComparer.Ordinal
-            )
+                this.players,
+                StringComparer.Ordinal)
             {
                 [playerId] = new StoredPlayer
                 {
                     PlayerName = playerName,
                     Rating = InitialRating,
                     Wins = 0,
-                    Losses = 0
-                }
+                    Losses = 0,
+                },
             };
 
-            SavePlayers(updatedPlayers);
-            players = updatedPlayers;
+            this.SavePlayers(updatedPlayers);
+            this.players = updatedPlayers;
         }
     }
 
@@ -147,25 +140,24 @@ public sealed class RankedEloManager
         string playerId = ValidateSteamId(steamId64, nameof(steamId64));
         ArgumentException.ThrowIfNullOrWhiteSpace(playerName);
 
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            players.TryGetValue(playerId, out var existingPlayer);
+            this.players.TryGetValue(playerId, out var existingPlayer);
             var updatedPlayers = new Dictionary<string, StoredPlayer>(
-                players,
-                StringComparer.Ordinal
-            )
+                this.players,
+                StringComparer.Ordinal)
             {
                 [playerId] = new StoredPlayer
                 {
                     PlayerName = playerName,
                     Rating = existingPlayer?.Rating ?? InitialRating,
                     Wins = 0,
-                    Losses = 0
-                }
+                    Losses = 0,
+                },
             };
 
-            SavePlayers(updatedPlayers);
-            players = updatedPlayers;
+            this.SavePlayers(updatedPlayers);
+            this.players = updatedPlayers;
         }
     }
 
@@ -178,95 +170,77 @@ public sealed class RankedEloManager
     {
         string player1Id = ValidateSteamId(
             player1SteamId64,
-            nameof(player1SteamId64)
-        );
+            nameof(player1SteamId64));
         string player2Id = ValidateSteamId(
             player2SteamId64,
-            nameof(player2SteamId64)
-        );
+            nameof(player2SteamId64));
         ArgumentException.ThrowIfNullOrWhiteSpace(player1Name);
         ArgumentException.ThrowIfNullOrWhiteSpace(player2Name);
 
         if (StringComparer.Ordinal.Equals(player1Id, player2Id))
-            throw new ArgumentException("A player cannot be matched against themselves.");
-
-        lock (syncRoot)
         {
-            players.TryGetValue(player1Id, out var existingPlayer1);
-            players.TryGetValue(player2Id, out var existingPlayer2);
+            throw new ArgumentException("A player cannot be matched against themselves.");
+        }
+
+        lock (this.syncRoot)
+        {
+            this.players.TryGetValue(player1Id, out var existingPlayer1);
+            this.players.TryGetValue(player2Id, out var existingPlayer2);
 
             int rating1Before = existingPlayer1?.Rating ?? InitialRating;
             int rating2Before = existingPlayer2?.Rating ?? InitialRating;
             double expected1 = 1.0 / (
                 1.0 + Math.Pow(
                     10.0,
-                    ((double)rating2Before - rating1Before) / 400.0
-                )
-            );
+                    ((double)rating2Before - rating1Before) / 400.0));
             double score1 = player1Won ? 1.0 : 0.0;
             int rating1After = Math.Max(
                 0,
                 (int)Math.Round(
-                    rating1Before + KFactor * (score1 - expected1),
-                    MidpointRounding.AwayFromZero
-                )
-            );
+                    rating1Before + (KFactor * (score1 - expected1)),
+                    MidpointRounding.AwayFromZero));
             int rating2After = Math.Max(
                 0,
                 (int)Math.Round(
-                    rating2Before + KFactor * ((1.0 - score1) - (1.0 - expected1)),
-                    MidpointRounding.AwayFromZero
-                )
-            );
+                    rating2Before + (KFactor * ((1.0 - score1) - (1.0 - expected1))),
+                    MidpointRounding.AwayFromZero));
 
             var updatedPlayers = new Dictionary<string, StoredPlayer>(
-                players,
-                StringComparer.Ordinal
-            )
+                this.players,
+                StringComparer.Ordinal)
             {
                 [player1Id] = new StoredPlayer
                 {
                     PlayerName = player1Name,
                     Rating = rating1After,
                     Wins = (existingPlayer1?.Wins ?? 0) + (player1Won ? 1 : 0),
-                    Losses = (existingPlayer1?.Losses ?? 0) + (player1Won ? 0 : 1)
+                    Losses = (existingPlayer1?.Losses ?? 0) + (player1Won ? 0 : 1),
                 },
                 [player2Id] = new StoredPlayer
                 {
                     PlayerName = player2Name,
                     Rating = rating2After,
                     Wins = (existingPlayer2?.Wins ?? 0) + (player1Won ? 0 : 1),
-                    Losses = (existingPlayer2?.Losses ?? 0) + (player1Won ? 1 : 0)
-                }
+                    Losses = (existingPlayer2?.Losses ?? 0) + (player1Won ? 1 : 0),
+                },
             };
 
-            SavePlayers(updatedPlayers);
-            players = updatedPlayers;
+            this.SavePlayers(updatedPlayers);
+            this.players = updatedPlayers;
 
             return new EloMatchResult(
                 rating1Before,
                 rating1After,
                 rating2Before,
-                rating2After
-            );
+                rating2After);
         }
     }
 
-    private Dictionary<string, StoredPlayer> LoadPlayers() =>
-        JsonStore.Load(
-            dataFilePath,
-            () => new Dictionary<string, StoredPlayer>(StringComparer.Ordinal),
-            JsonOptions,
-            ValidatePlayers
-        );
-
     private static Dictionary<string, StoredPlayer> ValidatePlayers(
-        Dictionary<string, StoredPlayer> storedPlayers
-    )
+        Dictionary<string, StoredPlayer> storedPlayers)
     {
         var loadedPlayers = new Dictionary<string, StoredPlayer>(
-            StringComparer.Ordinal
-        );
+            StringComparer.Ordinal);
 
         foreach (var entry in storedPlayers)
         {
@@ -277,12 +251,10 @@ public sealed class RankedEloManager
                 string.IsNullOrWhiteSpace(player.PlayerName) ||
                 player.Rating < 0 ||
                 player.Wins < 0 ||
-                player.Losses < 0
-            )
+                player.Losses < 0)
             {
                 throw new InvalidDataException(
-                    $"Ranked Elo data contains an invalid player record: {playerId}"
-                );
+                    $"Ranked Elo data contains an invalid player record: {playerId}");
             }
 
             loadedPlayers.Add(playerId, player);
@@ -291,9 +263,6 @@ public sealed class RankedEloManager
         return loadedPlayers;
     }
 
-    private void SavePlayers(Dictionary<string, StoredPlayer> updatedPlayers) =>
-        JsonStore.Save(dataFilePath, updatedPlayers, JsonOptions);
-
     private static string ValidateSteamId(string steamId64, string parameterName)
     {
         if (
@@ -301,31 +270,36 @@ public sealed class RankedEloManager
                 steamId64,
                 NumberStyles.None,
                 CultureInfo.InvariantCulture,
-                out ulong parsedId
-            ) ||
-            parsedId == 0
-        )
+                out ulong parsedId) ||
+            parsedId == 0)
         {
             throw new ArgumentException(
                 "A valid, non-zero SteamID64 is required.",
-                parameterName
-            );
+                parameterName);
         }
 
         return parsedId.ToString(CultureInfo.InvariantCulture);
     }
 
+    private Dictionary<string, StoredPlayer> LoadPlayers() =>
+        JsonStore.Load(
+            this.dataFilePath,
+            () => new Dictionary<string, StoredPlayer>(StringComparer.Ordinal),
+            JsonOptions,
+            ValidatePlayers);
+
+    private void SavePlayers(Dictionary<string, StoredPlayer> updatedPlayers) =>
+        JsonStore.Save(this.dataFilePath, updatedPlayers, JsonOptions);
+
     private static RankedEloStats ToStats(
         string playerId,
-        StoredPlayer player
-    ) =>
+        StoredPlayer player) =>
         new(
             player.PlayerName,
             player.Rating,
             player.Wins,
             player.Losses,
-            ulong.Parse(playerId, CultureInfo.InvariantCulture)
-        );
+            ulong.Parse(playerId, CultureInfo.InvariantCulture));
 
     private sealed class StoredPlayer
     {
@@ -341,12 +315,10 @@ public sealed record RankedEloStats(
     int Rating,
     int Wins,
     int Losses,
-    ulong SteamId = 0
-);
+    ulong SteamId = 0);
 
 public sealed record EloMatchResult(
     int Player1RatingBefore,
     int Player1RatingAfter,
     int Player2RatingBefore,
-    int Player2RatingAfter
-);
+    int Player2RatingAfter);

@@ -9,19 +9,20 @@ Callers serialize on the game thread (cheap, and it snapshots the data so there 
 cross-thread access to game state), then hand the bytes here. Writes to the same path are
 coalesced: only the newest pending payload is written.
 */
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace aimLOCK;
-
 public static class BackgroundFileWriter
 {
     private static readonly object SyncRoot = new();
     private static readonly Dictionary<string, byte[]> Pending =
         new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly HashSet<string> Running =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -32,7 +33,9 @@ public static class BackgroundFileWriter
         {
             Pending[fullPath] = contents;
             if (!Running.Add(fullPath))
+            {
                 return; // a writer for this path is active and will pick up the newest payload
+            }
         }
 
         Task.Run(() => DrainPath(fullPath, durable));
@@ -47,7 +50,9 @@ public static class BackgroundFileWriter
             lock (SyncRoot)
             {
                 if (Running.Count == 0)
+                {
                     return;
+                }
             }
 
             Thread.Sleep(10);
@@ -74,15 +79,16 @@ public static class BackgroundFileWriter
             {
                 string? directory = Path.GetDirectoryName(fullPath);
                 if (!string.IsNullOrEmpty(directory))
+                {
                     Directory.CreateDirectory(directory);
+                }
 
                 string temporaryPath = fullPath + ".tmp";
                 using (var stream = new FileStream(
                     temporaryPath,
                     FileMode.Create,
                     FileAccess.Write,
-                    FileShare.None
-                ))
+                    FileShare.None))
                 {
                     stream.Write(contents, 0, contents.Length);
                     stream.Flush(durable);

@@ -1,4 +1,6 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -6,26 +8,21 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
-
 using DeadworksManaged.Api;
 using DeadworksManaged.Game;
-
-namespace aimLOCK;
 
 public partial class PlayerManager
 {
     private const int DuelMaxHealth = 2800;
+
     // true: duels use the hero's own max health (max boons plus the duel items), with
     // no server-only bonus, so the health bar on players' screens matches the real
     // health. The 2800 bonus was a server-only value the game never sent to players,
     // so their bar stayed full until health dropped below the vanilla max.
     private const bool VanillaDuelMaxHealth = true;
-
-    private static bool HasDuelMaxHealth(CCitadelPlayerPawn pawn) =>
-        VanillaDuelMaxHealth || pawn.GetMaxHealth() == DuelMaxHealth;
+    private const double DuelHealthCapCheckIntervalSeconds = 0.05;
 
     private static int lastLoggedDuelMaxHealth;
-    private const double DuelHealthCapCheckIntervalSeconds = 0.05;
 
     /* Duel health ledger */
 
@@ -38,58 +35,57 @@ public partial class PlayerManager
     // same lifesteal on both sides.
     private readonly Dictionary<uint, int> duelHealthLedger = new();
 
-    private void CheckDuelHealthLedger(CCitadelPlayerPawn pawn, DuelMatch match)
+    // The health cap is checked by the shared duel loop (DuelLoopTick) for every
+    // duelist; no per-match timer.
+    public void StartDuelHealthCapMonitor(DuelMatch match) => this.StartDuelLoop();
+
+    public void PrepareDuelMatchHealth(DuelMatch match)
     {
-        uint handle = pawn.EntityHandle;
-        if (!match.CombatActive)
+        if (match.Finished)
         {
-            duelHealthLedger.Remove(handle);
             return;
         }
 
-        int health = pawn.Health;
-        if (!duelHealthLedger.TryGetValue(handle, out int ledger))
+        var pawn1 = this.FindMatchParticipant(match.Player1)?.GetHeroPawn();
+        var pawn2 = this.FindMatchParticipant(match.Player2)?.GetHeroPawn();
+        if (pawn1 is not { IsValid: true } || pawn2 is not { IsValid: true })
         {
-            duelHealthLedger[handle] = health;
+            Console.WriteLine(
+                "[aimLOCK] Could not set duel max health for " +
+                $"{this.GetMatchParticipantDisplayName(match.Player1)} vs " +
+                $"{this.GetMatchParticipantDisplayName(match.Player2)}.");
             return;
         }
 
-        if (health > ledger)
-        {
-            int target = Math.Max(1, ledger);
-            pawn.Health = target;
-            if (lifestealDebugSlots.Count != 0 && GetLifestealDebugStats(pawn) is { } stats)
-                stats.UnexplainedGain += health - target;
-            duelHealthLedger[handle] = target;
-            return;
-        }
-
-        if (health < ledger && lifestealDebugSlots.Count != 0 && GetLifestealDebugStats(pawn) is { } lossStats)
-            lossStats.UnreportedLoss += ledger - health;
-        duelHealthLedger[handle] = health;
+        ApplyDuelMaxHealth(pawn1);
+        ApplyDuelMaxHealth(pawn2);
+        this.ResetDuelCurrentHealth(match);
     }
 
-    private void LedgerAdd(CBaseEntity? pawnEntity, int amount)
+    /// <summary>Sets both duelists to their max health (only writes when not full).</summary>
+    public void FillMatchHealth(DuelMatch match)
     {
-        if (
-            amount != 0 &&
-            pawnEntity != null &&
-            duelHealthLedger.Count != 0 &&
-            duelHealthLedger.TryGetValue(pawnEntity.EntityHandle, out int ledger)
-        )
-            duelHealthLedger[pawnEntity.EntityHandle] = ledger + amount;
+        FillHealth(this.FindMatchParticipant(match.Player1)?.GetHeroPawn());
+        FillHealth(this.FindMatchParticipant(match.Player2)?.GetHeroPawn());
     }
+
+    private static bool HasDuelMaxHealth(CCitadelPlayerPawn pawn) =>
+        VanillaDuelMaxHealth || pawn.GetMaxHealth() == DuelMaxHealth;
 
     private static void ClampHealthToMax(CCitadelPlayerPawn? pawn)
     {
         if (pawn is not { IsValid: true, IsAlive: true })
+        {
             return;
+        }
 
         // Only write when over the cap: every Health write is networked, and the duel
         // monitor calls this 20 times a second per duelist.
         int maxHealth = pawn.GetMaxHealth();
         if (pawn.Health > maxHealth)
+        {
             pawn.Health = maxHealth;
+        }
     }
 
     private static void ApplyDuelMaxHealth(CCitadelPlayerPawn pawn)
@@ -102,6 +98,7 @@ public partial class PlayerManager
                 lastLoggedDuelMaxHealth = vanillaMax;
                 Console.WriteLine($"[aimLOCK] Duel max health: {vanillaMax} (the hero's own value).");
             }
+
             return;
         }
 
@@ -111,12 +108,14 @@ public partial class PlayerManager
         // The duel max health is carried by upgrade_health's modifier (it is no longer
         // in the item stack), so add the item here when the player doesn't own it.
         if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
+        {
             pawn.AddItem("upgrade_health");
+        }
+
         if (pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
         {
             Console.WriteLine(
-                "[aimLOCK] Cannot set duel max health; upgrade_health is missing."
-            );
+                "[aimLOCK] Cannot set duel max health; upgrade_health is missing.");
             return;
         }
 
@@ -125,8 +124,7 @@ public partial class PlayerManager
         if (maxHealthWithoutHealthUpgrade <= 0)
         {
             Console.WriteLine(
-                $"[aimLOCK] Cannot set duel max health; effective max health without upgrade_health is {maxHealthWithoutHealthUpgrade}."
-            );
+                $"[aimLOCK] Cannot set duel max health; effective max health without upgrade_health is {maxHealthWithoutHealthUpgrade}.");
             return;
         }
 
@@ -139,9 +137,9 @@ public partial class PlayerManager
         if (effectiveMaxHealth != DuelMaxHealth)
         {
             Console.WriteLine(
-                $"[aimLOCK] Duel max health is {effectiveMaxHealth}, expected {DuelMaxHealth} after the upgrade_health bonus."
-            );
+                $"[aimLOCK] Duel max health is {effectiveMaxHealth}, expected {DuelMaxHealth} after the upgrade_health bonus.");
         }
+
         ClampHealthToMax(pawn);
     }
 
@@ -152,125 +150,146 @@ public partial class PlayerManager
             : Math.Min(DuelMaxHealth, pawn.GetMaxHealth());
     }
 
-    // The health cap is checked by the shared duel loop (DuelLoopTick) for every
-    // duelist; no per-match timer.
-    public void StartDuelHealthCapMonitor(DuelMatch match) => StartDuelLoop();
-
-    public void PrepareDuelMatchHealth(DuelMatch match)
+    private static void FillHealth(CCitadelPlayerPawn? pawn)
     {
-        if (match.Finished)
-            return;
-
-        var pawn1 = FindMatchParticipant(match.Player1)?.GetHeroPawn();
-        var pawn2 = FindMatchParticipant(match.Player2)?.GetHeroPawn();
-        if (pawn1 is not { IsValid: true } || pawn2 is not { IsValid: true })
+        if (pawn is not { IsValid: true, IsAlive: true })
         {
-            Console.WriteLine(
-                "[aimLOCK] Could not set duel max health for " +
-                $"{GetMatchParticipantDisplayName(match.Player1)} vs " +
-                $"{GetMatchParticipantDisplayName(match.Player2)}."
-            );
             return;
         }
 
-        ApplyDuelMaxHealth(pawn1);
-        ApplyDuelMaxHealth(pawn2);
-        ResetDuelCurrentHealth(match);
+        int maxHealth = pawn.GetMaxHealth();
+        if (maxHealth > 0 && pawn.Health != maxHealth)
+        {
+            pawn.Health = maxHealth;
+        }
+    }
+
+    private void CheckDuelHealthLedger(CCitadelPlayerPawn pawn, DuelMatch match)
+    {
+        uint handle = pawn.EntityHandle;
+        if (!match.CombatActive)
+        {
+            this.duelHealthLedger.Remove(handle);
+            return;
+        }
+
+        int health = pawn.Health;
+        if (!this.duelHealthLedger.TryGetValue(handle, out int ledger))
+        {
+            this.duelHealthLedger[handle] = health;
+            return;
+        }
+
+        if (health > ledger)
+        {
+            int target = Math.Max(1, ledger);
+            pawn.Health = target;
+            if (this.lifestealDebugSlots.Count != 0 && GetLifestealDebugStats(pawn) is { } stats)
+            {
+                stats.UnexplainedGain += health - target;
+            }
+
+            this.duelHealthLedger[handle] = target;
+            return;
+        }
+
+        if (health < ledger && this.lifestealDebugSlots.Count != 0 && GetLifestealDebugStats(pawn) is { } lossStats)
+        {
+            lossStats.UnreportedLoss += ledger - health;
+        }
+
+        this.duelHealthLedger[handle] = health;
+    }
+
+    private void LedgerAdd(CBaseEntity? pawnEntity, int amount)
+    {
+        if (
+            amount != 0 &&
+            pawnEntity != null &&
+            this.duelHealthLedger.Count != 0 &&
+            this.duelHealthLedger.TryGetValue(pawnEntity.EntityHandle, out int ledger))
+        {
+            this.duelHealthLedger[pawnEntity.EntityHandle] = ledger + amount;
+        }
     }
 
     private void RestoreDuelRespawnHealth(
         DuelMatch match,
         string playerName,
         int attemptsRemaining = 12,
-        bool hasStableMaxHealth = false
-    )
+        bool hasStableMaxHealth = false)
     {
         if (match.Finished)
+        {
             return;
+        }
 
-        var pawn = FindMatchParticipant(playerName)?.GetHeroPawn();
+        var pawn = this.FindMatchParticipant(playerName)?.GetHeroPawn();
         if (pawn is not { IsValid: true, IsAlive: true })
         {
             if (attemptsRemaining <= 1)
             {
                 Console.WriteLine(
-                    $"[aimLOCK] Could not restore duel health for {playerName} after respawn."
-                );
+                    $"[aimLOCK] Could not restore duel health for {playerName} after respawn.");
                 return;
             }
 
-            server.ScheduleOnce(0.25.Seconds(), () =>
-                RestoreDuelRespawnHealth(
+            this.server.ScheduleOnce(0.25.Seconds(), () =>
+                this.RestoreDuelRespawnHealth(
                     match,
                     playerName,
-                    attemptsRemaining - 1
-                ));
+                    attemptsRemaining - 1));
             return;
         }
 
         if (
             !VanillaDuelMaxHealth &&
-            pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null
-        )
+            pawn.AbilityComponent?.FindAbilityByName("upgrade_health") == null)
+        {
             pawn.AddItem("upgrade_health");
+        }
+
         if (!HasDuelMaxHealth(pawn))
+        {
             ApplyDuelMaxHealth(pawn);
+        }
+
         if (HasDuelMaxHealth(pawn))
         {
             if (hasStableMaxHealth)
             {
                 SetDuelStartingHealth(pawn);
-                server.Queue.StartCountdown(match);
+                this.server.Queue.StartCountdown(match);
                 return;
             }
 
-            server.ScheduleOnce(0.25.Seconds(), () =>
-                RestoreDuelRespawnHealth(
+            this.server.ScheduleOnce(0.25.Seconds(), () =>
+                this.RestoreDuelRespawnHealth(
                     match,
                     playerName,
                     attemptsRemaining - 1,
-                    hasStableMaxHealth: true
-                ));
+                    hasStableMaxHealth: true));
             return;
         }
 
         if (attemptsRemaining <= 1)
         {
             Console.WriteLine(
-                $"[aimLOCK] Duel max health remained {pawn.GetMaxHealth()} instead of {DuelMaxHealth} after respawning {playerName}."
-            );
-            server.Queue.StartCountdown(match);
+                $"[aimLOCK] Duel max health remained {pawn.GetMaxHealth()} instead of {DuelMaxHealth} after respawning {playerName}.");
+            this.server.Queue.StartCountdown(match);
             return;
         }
 
-        server.ScheduleOnce(0.25.Seconds(), () =>
-            RestoreDuelRespawnHealth(
+        this.server.ScheduleOnce(0.25.Seconds(), () =>
+            this.RestoreDuelRespawnHealth(
                 match,
                 playerName,
-                attemptsRemaining - 1
-            ));
-    }
-
-    /// <summary>Sets both duelists to their max health (only writes when not full).</summary>
-    public void FillMatchHealth(DuelMatch match)
-    {
-        FillHealth(FindMatchParticipant(match.Player1)?.GetHeroPawn());
-        FillHealth(FindMatchParticipant(match.Player2)?.GetHeroPawn());
-    }
-
-    private static void FillHealth(CCitadelPlayerPawn? pawn)
-    {
-        if (pawn is not { IsValid: true, IsAlive: true })
-            return;
-
-        int maxHealth = pawn.GetMaxHealth();
-        if (maxHealth > 0 && pawn.Health != maxHealth)
-            pawn.Health = maxHealth;
+                attemptsRemaining - 1));
     }
 
     private void ResetDuelCurrentHealth(DuelMatch match)
     {
-        foreach (var player in GetMatchParticipants(match))
+        foreach (var player in this.GetMatchParticipants(match))
         {
             var pawn = player.GetHeroPawn();
             if (pawn is { IsValid: true, IsAlive: true })

@@ -15,13 +15,12 @@ The hit group ID of the bad box isn't known ahead of time, so:
 If the box shares an ID with a real body part, this filter can't separate them and the
 model edit is the only fix.
 */
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.Numerics;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public sealed class HazeHitboxFilter
 {
@@ -30,60 +29,73 @@ public sealed class HazeHitboxFilter
 
     private static readonly SchemaAccessor<Vector3> DamagePosition =
         new("CTakeDamageInfo"u8, "m_vecDamagePosition"u8);
+
     private static readonly SchemaAccessor<int> HitGroupId =
         new("CTakeDamageInfo"u8, "m_iHitGroupId"u8);
 
     private readonly HashSet<int> blockedHitGroups = new(DefaultBlockedHitGroups);
     private readonly HashSet<int> debugSlots = new();
 
-    public IReadOnlyCollection<int> BlockedHitGroups => blockedHitGroups;
+    public IReadOnlyCollection<int> BlockedHitGroups => this.blockedHitGroups;
 
     /// <summary>Returns true when this hit should be ignored.</summary>
     public bool ShouldBlock(TakeDamageEvent args)
     {
-        if (blockedHitGroups.Count == 0 && debugSlots.Count == 0)
+        if (this.blockedHitGroups.Count == 0 && this.debugSlots.Count == 0)
+        {
             return false;
+        }
 
         var info = args.Info;
         if (info.CitadelDamageType != ECitadelDamageType.Bullet)
+        {
             return false;
+        }
 
         var victim = args.Entity.As<CCitadelPlayerPawn>();
         if (victim is not { IsValid: true } || victim.HeroID != Heroes.Haze)
+        {
             return false;
+        }
 
         int hitGroup = HitGroupId.Get(info.Handle);
-        bool block = blockedHitGroups.Contains(hitGroup);
+        bool block = this.blockedHitGroups.Contains(hitGroup);
 
-        if (debugSlots.Count > 0)
+        if (this.debugSlots.Count > 0)
+        {
             PrintDebug(victim, info, hitGroup, block);
+        }
 
         return block;
     }
 
     public bool ToggleDebug(CCitadelPlayerController player)
     {
-        if (debugSlots.Remove(player.Slot))
+        if (this.debugSlots.Remove(player.Slot))
+        {
             return false;
+        }
 
-        debugSlots.Add(player.Slot);
+        this.debugSlots.Add(player.Slot);
         return true;
     }
 
     public void RemoveDebugSubscriber(CCitadelPlayerController player) =>
-        debugSlots.Remove(player.Slot);
+        this.debugSlots.Remove(player.Slot);
 
     /// <summary>Toggles a hit group on or off. Returns true if it is now blocked.</summary>
     public bool ToggleBlockedHitGroup(int hitGroup)
     {
-        if (blockedHitGroups.Remove(hitGroup))
+        if (this.blockedHitGroups.Remove(hitGroup))
+        {
             return false;
+        }
 
-        blockedHitGroups.Add(hitGroup);
+        this.blockedHitGroups.Add(hitGroup);
         return true;
     }
 
-    public void ClearBlockedHitGroups() => blockedHitGroups.Clear();
+    public void ClearBlockedHitGroups() => this.blockedHitGroups.Clear();
 
     private void PrintDebug(
         CCitadelPlayerPawn victim,
@@ -98,17 +110,19 @@ public sealed class HazeHitboxFilter
         float yaw = victim.Rotation.Y * MathF.PI / 180f;
         float cos = MathF.Cos(yaw);
         float sin = MathF.Sin(yaw);
-        float forward = offset.X * cos + offset.Y * sin;
-        float left = -offset.X * sin + offset.Y * cos;
+        float forward = (offset.X * cos) + (offset.Y * sin);
+        float left = (-offset.X * sin) + (offset.Y * cos);
 
         string message =
             $"[HITDEBUG] Haze hit group {hitGroup} at fwd {forward:0}, left {left:0}, up {offset.Z:0}" +
-            (blocked ? " - BLOCKED" : "");
+            (blocked ? " - BLOCKED" : string.Empty);
 
         foreach (var player in Players.GetAll())
         {
-            if (debugSlots.Contains(player.Slot))
+            if (this.debugSlots.Contains(player.Slot))
+            {
                 Chat.PrintToChat(player, message);
+            }
         }
     }
 }
