@@ -17,19 +17,22 @@ Minions and summoned NPCs (anything with a summoner) are kept, same as before.
 Use /dumpents (aimlock.debug) to write every designer name on the map to
 aimlock_entities.txt if something still shows up and needs adding to the rules below.
 */
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public sealed class MapCleaner
 {
     private const int RemovalsPerTick = 48;
+
+    // "npc_" covers troopers, guardians (tier1), walkers (tier2), patrons/shrines
+    // (tier3, barrack boss), sentries, neutrals, mid boss and NPC makers.
+    private const string NpcPrefix = "npc_";
 
     // Spawn systems to switch off. Missing convars are skipped with one log line.
     private static readonly string[] SpawnConVarsToDisable =
@@ -41,7 +44,7 @@ public sealed class MapCleaner
         "citadel_powerup_spawn_enabled",      // powerup camps
         "citadel_pickup_spawner_enabled",     // healing snacks
         "citadel_koth_enabled",               // urn / king-of-the-hill objective
-        "citadel_breakable_prop_breakable_enabled" // breakable boxes / statues
+        "citadel_breakable_prop_breakable_enabled", // breakable boxes / statues
     };
 
     // Exact designer names that don't fit the prefix rules.
@@ -50,7 +53,7 @@ public sealed class MapCleaner
         "citadel_trigger_idol_return",
         "citadel_point_talker_idol",
         "citadel_invis_volume",     // map smoke zones that make players invisible
-        "citadel_herotest_orbspawner" // sandbox spawners that keep creating soul orbs
+        "citadel_herotest_orbspawner", // sandbox spawners that keep creating soul orbs
     };
 
     // Non-NPC prefixes: removed outright.
@@ -60,17 +63,13 @@ public sealed class MapCleaner
         "citadel_item_pickup",      // urn, rejuv, dropped pickups
         "citadel_pickup",           // healing snacks, gold/ability pickups, spawners
         "citadel_item_powerup_spawner",
-        "citadel_item_koth_spawner"
+        "citadel_item_koth_spawner",
     };
-
-    // "npc_" covers troopers, guardians (tier1), walkers (tier2), patrons/shrines
-    // (tier3, barrack boss), sentries, neutrals, mid boss and NPC makers.
-    private const string NpcPrefix = "npc_";
 
     // Never remove these even if they match a rule.
     private static readonly HashSet<string> NamesToKeep = new(StringComparer.Ordinal)
     {
-        "npc_player_bot_brain"
+        "npc_player_bot_brain",
     };
 
     private readonly HashSet<string> missingConVarsLogged = new(StringComparer.Ordinal);
@@ -85,48 +84,64 @@ public sealed class MapCleaner
         this.server = server;
     }
 
+    /// <summary>Full test: candidate by name, and not a minion or summoned NPC.</summary>
+    public static bool ShouldRemove(CBaseEntity entity)
+    {
+        if (!entity.IsValid)
+        {
+            return false;
+        }
+
+        string designerName = entity.DesignerName;
+        if (!IsCandidate(designerName))
+        {
+            return false;
+        }
+
+        if (!designerName.StartsWith(NpcPrefix, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var citadelNpc = entity.As<CAI_CitadelNPC>();
+        return citadelNpc == null || (!citadelNpc.IsMinion && citadelNpc.Summoner == null);
+    }
+
     /// <summary>Cheap name-only test, safe to call for every spawned entity.</summary>
     private static bool IsCandidate(string designerName)
     {
         if (designerName.Length == 0 || NamesToKeep.Contains(designerName))
+        {
             return false;
+        }
 
         // Almost every entity spawned during play (particles, projectiles, world text,
         // abilities) is rejected by this first-character check.
         char first = designerName[0];
         if (first != 'n' && first != 'c')
+        {
             return false;
+        }
 
         if (designerName.StartsWith(NpcPrefix, StringComparison.Ordinal))
+        {
             return true;
+        }
 
         if (ExactNamesToRemove.Contains(designerName))
+        {
             return true;
+        }
 
         foreach (string prefix in PropPrefixesToRemove)
         {
             if (designerName.StartsWith(prefix, StringComparison.Ordinal))
+            {
                 return true;
+            }
         }
 
         return false;
-    }
-
-    /// <summary>Full test: candidate by name, and not a minion or summoned NPC.</summary>
-    public static bool ShouldRemove(CBaseEntity entity)
-    {
-        if (!entity.IsValid)
-            return false;
-
-        string designerName = entity.DesignerName;
-        if (!IsCandidate(designerName))
-            return false;
-
-        if (!designerName.StartsWith(NpcPrefix, StringComparison.Ordinal))
-            return true;
-
-        var citadelNpc = entity.As<CAI_CitadelNPC>();
-        return citadelNpc == null || (!citadelNpc.IsMinion && citadelNpc.Summoner == null);
     }
 
     public void DisableSpawnConVars()
@@ -136,8 +151,11 @@ public sealed class MapCleaner
             var conVar = ConVar.Find(name);
             if (conVar == null)
             {
-                if (missingConVarsLogged.Add(name))
+                if (this.missingConVarsLogged.Add(name))
+                {
                     Console.WriteLine($"[aimLOCK] Could not find {name}; skipped.");
+                }
+
                 continue;
             }
 
@@ -152,66 +170,46 @@ public sealed class MapCleaner
     public void OnEntitySpawned(CBaseEntity entity)
     {
         if (!entity.IsValid || !IsCandidate(entity.DesignerName))
-            return;
-
-        spawnedCandidates.Add(entity.EntityHandle);
-        if (spawnCheckScheduled)
-            return;
-
-        spawnCheckScheduled = true;
-        server.ScheduleNextTick(CheckSpawnedCandidates);
-    }
-
-    private void CheckSpawnedCandidates()
-    {
-        spawnCheckScheduled = false;
-        foreach (uint handle in spawnedCandidates)
         {
-            var entity = CBaseEntity.FromHandle(handle);
-            if (entity != null && ShouldRemove(entity))
-                entity.Remove();
+            return;
         }
 
-        spawnedCandidates.Clear();
+        this.spawnedCandidates.Add(entity.EntityHandle);
+        if (this.spawnCheckScheduled)
+        {
+            return;
+        }
+
+        this.spawnCheckScheduled = true;
+        this.server.ScheduleNextTick(this.CheckSpawnedCandidates);
     }
 
     /// <summary>One-time sweep for entities that existed before the plugin was listening.</summary>
     public void StartSweep()
     {
-        if (sweepRunning)
+        if (this.sweepRunning)
+        {
             return;
+        }
 
         int queued = 0;
         foreach (var entity in Entities.All)
         {
             if (entity.IsValid && IsCandidate(entity.DesignerName))
             {
-                pendingRemovals.Enqueue(entity.EntityHandle);
+                this.pendingRemovals.Enqueue(entity.EntityHandle);
                 queued++;
             }
         }
 
         Console.WriteLine($"[aimLOCK] Map cleanup: {queued} NPCs/objectives/breakables queued for removal.");
-        if (pendingRemovals.Count == 0)
-            return;
-
-        sweepRunning = true;
-        server.ScheduleNextTick(RemoveBatch);
-    }
-
-    private void RemoveBatch()
-    {
-        for (int i = 0; i < RemovalsPerTick && pendingRemovals.TryDequeue(out uint handle); i++)
+        if (this.pendingRemovals.Count == 0)
         {
-            var entity = CBaseEntity.FromHandle(handle);
-            if (entity != null && ShouldRemove(entity))
-                entity.Remove();
+            return;
         }
 
-        if (pendingRemovals.Count > 0)
-            server.ScheduleNextTick(RemoveBatch);
-        else
-            sweepRunning = false;
+        this.sweepRunning = true;
+        this.server.ScheduleNextTick(this.RemoveBatch);
     }
 
     /// <summary>Writes every designer name on the map with its count, most common first.</summary>
@@ -221,7 +219,9 @@ public sealed class MapCleaner
         foreach (var entity in Entities.All)
         {
             if (!entity.IsValid)
+            {
                 continue;
+            }
 
             string name = entity.DesignerName;
             counts[name] = counts.TryGetValue(name, out int count) ? count + 1 : 1;
@@ -233,11 +233,47 @@ public sealed class MapCleaner
             builder.Append(pair.Value.ToString().PadLeft(6))
                 .Append("  ")
                 .Append(pair.Key)
-                .Append(IsCandidate(pair.Key) ? "   [removed by aimLOCK]" : "")
+                .Append(IsCandidate(pair.Key) ? "   [removed by aimLOCK]" : string.Empty)
                 .AppendLine();
         }
 
         File.WriteAllText(path, builder.ToString());
         return Path.GetFullPath(path);
+    }
+
+    private void CheckSpawnedCandidates()
+    {
+        this.spawnCheckScheduled = false;
+        foreach (uint handle in this.spawnedCandidates)
+        {
+            var entity = CBaseEntity.FromHandle(handle);
+            if (entity != null && ShouldRemove(entity))
+            {
+                entity.Remove();
+            }
+        }
+
+        this.spawnedCandidates.Clear();
+    }
+
+    private void RemoveBatch()
+    {
+        for (int i = 0; i < RemovalsPerTick && this.pendingRemovals.TryDequeue(out uint handle); i++)
+        {
+            var entity = CBaseEntity.FromHandle(handle);
+            if (entity != null && ShouldRemove(entity))
+            {
+                entity.Remove();
+            }
+        }
+
+        if (this.pendingRemovals.Count > 0)
+        {
+            this.server.ScheduleNextTick(this.RemoveBatch);
+        }
+        else
+        {
+            this.sweepRunning = false;
+        }
     }
 }

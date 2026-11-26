@@ -1,13 +1,12 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public enum PlayerTag
 {
@@ -17,11 +16,18 @@ public enum PlayerTag
     Staff,
     Aimlock,
     Supporter,
-    GuildTag
+    GuildTag,
 }
 
 public sealed class PlayerTagManager
 {
+    public const string TagsFileName = "player-tags.json";
+    public const string StableTagsFileName = "player-tags-by-id.json";
+    public const string GrantedTagsFileName = "player-tag-grants.json";
+    public const string VisibilityFileName = "player-tag-visibility.json";
+    public const string StableVisibilityFileName = "player-tag-visibility-by-id.json";
+    public const string ClearedTagsFileName = "player-tag-cleared-by-id.json";
+
     private const int PawnRetries = 8;
     private const float TagHeight = 100f;
     private const float FontSize = 64f;
@@ -30,28 +36,15 @@ public sealed class PlayerTagManager
     private const int TagBackgroundRows = 1;
     private const byte TagBackgroundAlpha = 160;
     private const char TagBackgroundGlyph = '\u2588';
+
     // Stands the text upright; billboard mode then only turns it around the up axis.
     private static readonly Vector3 UprightTextAngles = new(180f, 90f, 270f);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        WriteIndented = true
+        WriteIndented = true,
     };
 
-    private readonly aimLOCK server;
-    public const string TagsFileName = "player-tags.json";
-    public const string StableTagsFileName = "player-tags-by-id.json";
-    public const string GrantedTagsFileName = "player-tag-grants.json";
-    public const string VisibilityFileName = "player-tag-visibility.json";
-    public const string StableVisibilityFileName = "player-tag-visibility-by-id.json";
-    private readonly string tagsFilePath = JsonStore.PathFor(TagsFileName);
-    private readonly string stableTagsFilePath = JsonStore.PathFor(StableTagsFileName);
-    private readonly string grantedTagsFilePath = JsonStore.PathFor(GrantedTagsFileName);
-    private readonly string visibilityFilePath = JsonStore.PathFor(VisibilityFileName);
-    private readonly string stableVisibilityFilePath =
-        JsonStore.PathFor(StableVisibilityFileName);
-    public const string ClearedTagsFileName = "player-tag-cleared-by-id.json";
-    private readonly string clearedTagsFilePath = JsonStore.PathFor(ClearedTagsFileName);
     // Best first: the tag a player gets automatically when they have not chosen one.
     private static readonly PlayerTag[] TagPriority =
     {
@@ -63,8 +56,19 @@ public sealed class PlayerTagManager
         PlayerTag.Supporter,
         PlayerTag.GuildTag,
     };
+
+    private readonly aimLOCK server;
+    private readonly string tagsFilePath = JsonStore.PathFor(TagsFileName);
+    private readonly string stableTagsFilePath = JsonStore.PathFor(StableTagsFileName);
+    private readonly string grantedTagsFilePath = JsonStore.PathFor(GrantedTagsFileName);
+    private readonly string visibilityFilePath = JsonStore.PathFor(VisibilityFileName);
+    private readonly string stableVisibilityFilePath =
+        JsonStore.PathFor(StableVisibilityFileName);
+    private readonly string clearedTagsFilePath = JsonStore.PathFor(ClearedTagsFileName);
+
     private readonly Dictionary<string, PlayerTag> tags =
         new(StringComparer.OrdinalIgnoreCase);
+
     private readonly Dictionary<ulong, PlayerTag> stableTags = new();
     private readonly Dictionary<ulong, HashSet<PlayerTag>> grantedTags = new();
     private readonly Dictionary<ulong, CPointWorldText> activeTags = new();
@@ -74,67 +78,101 @@ public sealed class PlayerTagManager
     private readonly Dictionary<ulong, int> refreshVersions = new();
     private readonly HashSet<string> hiddenTags =
         new(StringComparer.OrdinalIgnoreCase);
+
     private readonly HashSet<ulong> hiddenSteamIds = new();
+
     // Players who removed their tag on purpose; they are not given one automatically.
     private readonly HashSet<ulong> clearedSteamIds = new();
 
     public PlayerTagManager(aimLOCK server)
     {
         this.server = server;
-        LoadTags();
-        LoadHiddenTags();
-        LoadStableTags();
-        LoadGrantedTags();
-        LoadHiddenSteamIds();
-        LoadClearedSteamIds();
+        this.LoadTags();
+        this.LoadHiddenTags();
+        this.LoadStableTags();
+        this.LoadGrantedTags();
+        this.LoadHiddenSteamIds();
+        this.LoadClearedSteamIds();
     }
+
+    public static bool TryParseTag(string tagName, out PlayerTag tag)
+    {
+        tag = tagName.Trim().ToUpperInvariant() switch
+        {
+            "YT" => PlayerTag.YouTube,
+            "TTV" => PlayerTag.Twitch,
+            "OWNER" => PlayerTag.Owner,
+            "STAFF" => PlayerTag.Staff,
+            "AIMLOCK" => PlayerTag.Aimlock,
+            "SUPPORTER" => PlayerTag.Supporter,
+            "GUILD" or "GUILDTAG" => PlayerTag.GuildTag,
+            _ => (PlayerTag)(-1),
+        };
+        return Enum.IsDefined(typeof(PlayerTag), tag);
+    }
+
+    public static string GetTagToken(PlayerTag tag) =>
+        tag switch
+        {
+            PlayerTag.YouTube => "YT",
+            PlayerTag.Twitch => "TTV",
+            PlayerTag.Owner => "OWNER",
+            PlayerTag.Staff => "STAFF",
+            PlayerTag.Aimlock => "AIMLOCK",
+            PlayerTag.Supporter => "SUPPORTER",
+            PlayerTag.GuildTag => "GUILDTAG",
+            _ => throw new ArgumentOutOfRangeException(nameof(tag)),
+        };
 
     public void Initialize()
     {
-        MigrateNameKeyedTags();
+        this.MigrateNameKeyedTags();
 
         foreach (var player in Players.GetAll())
+        {
             RefreshPlayerTag(player);
+        }
     }
 
     public void SetTag(ulong steamId, PlayerTag tag)
     {
-        var updatedStableTags = new Dictionary<ulong, PlayerTag>(stableTags)
+        var updatedStableTags = new Dictionary<ulong, PlayerTag>(this.stableTags)
         {
-            [steamId] = tag
+            [steamId] = tag,
         };
 
-        SaveStableTags(updatedStableTags);
-        ReplaceStableTags(updatedStableTags);
-        SetTagCleared(steamId, false);
-        RefreshOnlinePlayer(steamId);
+        this.SaveStableTags(updatedStableTags);
+        this.ReplaceStableTags(updatedStableTags);
+        this.SetTagCleared(steamId, false);
+        this.RefreshOnlinePlayer(steamId);
     }
 
     /* A deliberate removal: the player is not given a tag automatically afterwards */
     public void ClearTag(ulong steamId)
     {
-        RemoveTag(steamId);
-        SetTagCleared(steamId, true);
+        this.RemoveTag(steamId);
+        this.SetTagCleared(steamId, true);
     }
 
     public bool RemoveTag(ulong steamId)
     {
-        var updatedStableTags = new Dictionary<ulong, PlayerTag>(stableTags);
+        var updatedStableTags = new Dictionary<ulong, PlayerTag>(this.stableTags);
         if (!updatedStableTags.Remove(steamId))
+        {
             return false;
+        }
 
-        SaveStableTags(updatedStableTags);
-        ReplaceStableTags(updatedStableTags);
-        RefreshOnlinePlayer(steamId);
+        this.SaveStableTags(updatedStableTags);
+        this.ReplaceStableTags(updatedStableTags);
+        this.RefreshOnlinePlayer(steamId);
         return true;
     }
 
     public void GrantTag(ulong steamId, PlayerTag tag)
     {
-        var updatedGrants = grantedTags.ToDictionary(
+        var updatedGrants = this.grantedTags.ToDictionary(
             entry => entry.Key,
-            entry => new HashSet<PlayerTag>(entry.Value)
-        );
+            entry => new HashSet<PlayerTag>(entry.Value));
         if (!updatedGrants.TryGetValue(steamId, out var playerTags))
         {
             playerTags = new HashSet<PlayerTag>();
@@ -142,37 +180,36 @@ public sealed class PlayerTagManager
         }
 
         playerTags.Add(tag);
-        SaveGrantedTags(updatedGrants);
-        ReplaceGrantedTags(updatedGrants);
+        this.SaveGrantedTags(updatedGrants);
+        this.ReplaceGrantedTags(updatedGrants);
     }
 
     public bool RevokeTag(ulong steamId, PlayerTag tag)
     {
-        var updatedGrants = grantedTags.ToDictionary(
+        var updatedGrants = this.grantedTags.ToDictionary(
             entry => entry.Key,
-            entry => new HashSet<PlayerTag>(entry.Value)
-        );
+            entry => new HashSet<PlayerTag>(entry.Value));
         if (
             !updatedGrants.TryGetValue(steamId, out var playerTags) ||
-            !playerTags.Remove(tag)
-        )
+            !playerTags.Remove(tag))
         {
             return false;
         }
 
         if (playerTags.Count == 0)
+        {
             updatedGrants.Remove(steamId);
+        }
 
-        SaveGrantedTags(updatedGrants);
-        ReplaceGrantedTags(updatedGrants);
+        this.SaveGrantedTags(updatedGrants);
+        this.ReplaceGrantedTags(updatedGrants);
 
         if (
-            stableTags.TryGetValue(steamId, out PlayerTag equippedTag) &&
-            equippedTag == tag
-        )
+            this.stableTags.TryGetValue(steamId, out PlayerTag equippedTag) &&
+            equippedTag == tag)
         {
-            RemoveTag(steamId);
-            TryAutoEquipBestTag(steamId);
+            this.RemoveTag(steamId);
+            this.TryAutoEquipBestTag(steamId);
         }
 
         return true;
@@ -181,30 +218,33 @@ public sealed class PlayerTagManager
     /* Tags the player may wear, best first */
     public PlayerTag[] GetUsableTags(ulong steamId)
     {
-        bool inGuild = server.GuildManager.GetMemberTag(steamId) != null;
+        bool inGuild = this.server.GuildManager.GetMemberTag(steamId) != null;
         return TagPriority
             .Where(tag =>
-                tag == PlayerTag.GuildTag ? inGuild : CanUseTag(steamId, tag)
-            )
+                tag == PlayerTag.GuildTag ? inGuild : this.CanUseTag(steamId, tag))
             .ToArray();
     }
 
     public bool IsWearing(ulong steamId, PlayerTag tag) =>
-        stableTags.TryGetValue(steamId, out PlayerTag equippedTag) && equippedTag == tag;
+        this.stableTags.TryGetValue(steamId, out PlayerTag equippedTag) && equippedTag == tag;
 
     /* Gives the best usable tag to a player who has none and never removed theirs */
     public bool TryAutoEquipBestTag(ulong steamId)
     {
-        if (stableTags.ContainsKey(steamId) || clearedSteamIds.Contains(steamId))
+        if (this.stableTags.ContainsKey(steamId) || this.clearedSteamIds.Contains(steamId))
+        {
             return false;
+        }
 
-        PlayerTag[] usableTags = GetUsableTags(steamId);
+        PlayerTag[] usableTags = this.GetUsableTags(steamId);
         if (usableTags.Length == 0)
+        {
             return false;
+        }
 
         try
         {
-            SetTag(steamId, usableTags[0]);
+            this.SetTag(steamId, usableTags[0]);
             return true;
         }
         catch (IOException ex)
@@ -223,45 +263,49 @@ public sealed class PlayerTagManager
     public string? GetTagHint(ulong steamId)
     {
         if (
-            hiddenSteamIds.Contains(steamId) ||
-            !stableTags.TryGetValue(steamId, out PlayerTag equippedTag)
-        )
+            this.hiddenSteamIds.Contains(steamId) ||
+            !this.stableTags.TryGetValue(steamId, out PlayerTag equippedTag))
         {
             return null;
         }
 
-        string[] otherTags = GetUsableTags(steamId)
+        string[] otherTags = this.GetUsableTags(steamId)
             .Where(tag => tag != equippedTag)
             .Select(GetTagToken)
             .ToArray();
         if (otherTags.Length == 0)
+        {
             return null;
+        }
 
         return
             $"[aimLOCK] Your overhead tag is {GetTagToken(equippedTag)}. " +
             $"You also have: {string.Join(", ", otherTags)}. Change it with /tag <name>.";
     }
 
-
     // Guild members can always wear their own guild's tag; every other tag is granted.
     public bool CanUseTag(ulong steamId, PlayerTag tag) =>
         (tag == PlayerTag.GuildTag &&
-            server.GuildManager.GetMemberTag(steamId) != null) ||
-        (grantedTags.TryGetValue(steamId, out var playerTags) &&
+            this.server.GuildManager.GetMemberTag(steamId) != null) ||
+        (this.grantedTags.TryGetValue(steamId, out var playerTags) &&
             playerTags.Contains(tag));
 
     public string FormatPlayerNameWithSelectedTag(
         ulong steamId,
         string playerName,
-        string? guildTag
-    )
+        string? guildTag)
     {
-        if (!stableTags.TryGetValue(steamId, out PlayerTag tag))
+        if (!this.stableTags.TryGetValue(steamId, out PlayerTag tag))
+        {
             return playerName;
+        }
+
         if (tag == PlayerTag.GuildTag)
+        {
             return string.IsNullOrWhiteSpace(guildTag)
                 ? playerName
                 : $"[{guildTag}] {playerName}";
+        }
 
         string overheadTag = tag switch
         {
@@ -271,23 +315,29 @@ public sealed class PlayerTagManager
             PlayerTag.Staff => "[STAFF]",
             PlayerTag.Aimlock => "[aimlock.xyz]",
             PlayerTag.Supporter => "[♥]",
-            _ => throw new ArgumentOutOfRangeException(nameof(tag))
+            _ => throw new ArgumentOutOfRangeException(nameof(tag)),
         };
         return $"{overheadTag} {playerName}";
     }
 
     public string GetGrantedTagList(ulong steamId)
     {
-        var usableTags = grantedTags.TryGetValue(steamId, out var playerTags)
+        var usableTags = this.grantedTags.TryGetValue(steamId, out var playerTags)
             ? new HashSet<PlayerTag>(playerTags)
             : new HashSet<PlayerTag>();
-        if (server.GuildManager.GetMemberTag(steamId) != null)
+        if (this.server.GuildManager.GetMemberTag(steamId) != null)
+        {
             usableTags.Add(PlayerTag.GuildTag);
+        }
         else
+        {
             usableTags.Remove(PlayerTag.GuildTag);
+        }
 
         if (usableTags.Count == 0)
+        {
             return "No overhead tags have been granted to you yet.";
+        }
 
         string[] names = usableTags
             .Select(GetTagToken)
@@ -302,7 +352,10 @@ public sealed class PlayerTagManager
         {
             // A player with no tag who just joined a guild gets the guild tag.
             if (!player.IsBot)
+            {
                 TryAutoEquipBestTag(player.PlayerSteamId);
+            }
+
             RefreshPlayerTag(player);
         }
     }
@@ -310,151 +363,50 @@ public sealed class PlayerTagManager
     public void RefreshPlayerTag(CCitadelPlayerController player)
     {
         ulong steamId = player.PlayerSteamId;
-        int version = refreshVersions.TryGetValue(steamId, out int currentVersion)
+        int version = this.refreshVersions.TryGetValue(steamId, out int currentVersion)
             ? currentVersion + 1
             : 1;
-        refreshVersions[steamId] = version;
-        RefreshPlayerTag(player, version, PawnRetries);
+        this.refreshVersions[steamId] = version;
+        this.RefreshPlayerTag(player, version, PawnRetries);
     }
 
     public void SetTagVisibility(CCitadelPlayerController player, bool visible)
     {
-        var updatedHiddenSteamIds = new HashSet<ulong>(hiddenSteamIds);
+        var updatedHiddenSteamIds = new HashSet<ulong>(this.hiddenSteamIds);
 
         if (visible)
+        {
             updatedHiddenSteamIds.Remove(player.PlayerSteamId);
+        }
         else
+        {
             updatedHiddenSteamIds.Add(player.PlayerSteamId);
+        }
 
-        SaveHiddenSteamIds(updatedHiddenSteamIds);
-        hiddenSteamIds.Clear();
+        this.SaveHiddenSteamIds(updatedHiddenSteamIds);
+        this.hiddenSteamIds.Clear();
         foreach (ulong hiddenSteamId in updatedHiddenSteamIds)
-            hiddenSteamIds.Add(hiddenSteamId);
-        RefreshPlayerTag(player);
+        {
+            this.hiddenSteamIds.Add(hiddenSteamId);
+        }
+
+        this.RefreshPlayerTag(player);
     }
 
-    private void RefreshPlayerTag(
-        CCitadelPlayerController player,
-        int version,
-        int retriesRemaining)
+    /* On unload: a reloaded plugin starts without knowing these entities */
+    public void RemoveAllTagEntities()
     {
-        if (!player.IsValid)
-            return;
-
-        ulong steamId = player.PlayerSteamId;
-
-        if (
-            hiddenSteamIds.Contains(steamId) ||
-            !stableTags.TryGetValue(steamId, out PlayerTag tag) ||
-            GetTagStyle(tag, steamId) is not { } style
-        )
+        foreach (ulong steamId in this.activeTags.Keys.Concat(this.activeTagBackgrounds.Keys).ToArray())
         {
-            RemoveTagEntity(steamId);
-            return;
+            this.RemoveTagEntity(steamId);
         }
-
-        var pawn = player.GetHeroPawn();
-        if (pawn == null || !pawn.IsValid)
-        {
-            RemoveTagEntity(steamId);
-            if (retriesRemaining > 0)
-                ScheduleTagRetry(player, steamId, version, retriesRemaining - 1);
-            return;
-        }
-
-        if (HasCurrentTagEntities(steamId, tag, pawn))
-            return;
-
-        RemoveTagEntity(steamId);
-        CreateTagEntities(steamId, player.PlayerName, pawn, tag, style);
-    }
-
-    /* The hero pawn is not ready yet: try again unless a newer refresh started */
-    private void ScheduleTagRetry(
-        CCitadelPlayerController player,
-        ulong steamId,
-        int version,
-        int retriesRemaining
-    )
-    {
-        server.ScheduleOnce(0.5.Seconds(), () =>
-        {
-            if (
-                refreshVersions.TryGetValue(steamId, out int activeVersion) &&
-                activeVersion == version
-            )
-            {
-                RefreshPlayerTag(player, version, retriesRemaining);
-            }
-        });
-    }
-
-    /* The same tag on the same pawn keeps its entities; guild tags are always rebuilt */
-    private bool HasCurrentTagEntities(
-        ulong steamId,
-        PlayerTag tag,
-        CCitadelPlayerPawn pawn
-    ) =>
-        tag != PlayerTag.GuildTag &&
-        activeTagValues.TryGetValue(steamId, out PlayerTag activeTag) &&
-        activeTag == tag &&
-        activeTagPawnHandles.TryGetValue(steamId, out uint activePawnHandle) &&
-        activePawnHandle == pawn.EntityHandle &&
-        activeTagBackgrounds.TryGetValue(steamId, out var background) &&
-        background.IsValid &&
-        activeTags.TryGetValue(steamId, out var text) &&
-        text.IsValid;
-
-    private void CreateTagEntities(
-        ulong steamId,
-        string playerName,
-        CCitadelPlayerPawn pawn,
-        PlayerTag tag,
-        TagStyle style
-    )
-    {
-        var background = CreateOverheadText(
-            pawn,
-            BuildBackgroundRow(style.Text),
-            (uint)TagBackgroundAlpha << 24
-        );
-        if (background == null)
-        {
-            Console.WriteLine(
-                $"[aimLOCK] Failed to create the background for {playerName}'s overhead tag."
-            );
-            return;
-        }
-
-        background.Fullbright = true;
-        background.DepthOffset = -1f;
-
-        var text = CreateOverheadText(
-            pawn,
-            style.Text,
-            style.Color
-        );
-        if (text == null)
-        {
-            background.Remove();
-            Console.WriteLine(
-                $"[aimLOCK] Failed to create the overhead tag for {playerName}."
-            );
-            return;
-        }
-
-        activeTags[steamId] = text;
-        activeTagBackgrounds[steamId] = background;
-        activeTagValues[steamId] = tag;
-        activeTagPawnHandles[steamId] = pawn.EntityHandle;
     }
 
     /* Text above the pawn's head: it follows the pawn and turns to face every viewer */
     private static CPointWorldText? CreateOverheadText(
         CCitadelPlayerPawn pawn,
         string text,
-        uint color
-    )
+        uint color)
     {
         Vector3 headPosition = pawn.Position + new Vector3(0f, 0f, TagHeight);
         var entity = CPointWorldText.Create(
@@ -463,18 +415,18 @@ public sealed class PlayerTagManager
             fontSize: FontSize,
             worldUnitsPerPx: WorldUnitsPerPx,
             fontName: "RetailDemo-Bold",
-            reorientMode: 1
-        );
+            reorientMode: 1);
         if (entity == null)
+        {
             return null;
+        }
 
         entity.ColorABGR = color;
         entity.JustifyHorizontal = HorizontalJustify.Center;
         entity.SetParent(pawn);
         entity.Teleport(
             position: headPosition,
-            angles: UprightTextAngles
-        );
+            angles: UprightTextAngles);
         return entity;
     }
 
@@ -486,46 +438,153 @@ public sealed class PlayerTagManager
         float glyphWidth = FontSize * WorldUnitsPerPx;
         int glyphCount = Math.Max(
             1,
-            (int)Math.Ceiling((textWidth + TagBackgroundPadding * 2f) / glyphWidth)
-        );
+            (int)Math.Ceiling((textWidth + (TagBackgroundPadding * 2f)) / glyphWidth));
         string row = new(TagBackgroundGlyph, glyphCount);
         return string.Join("\n", Enumerable.Repeat(row, TagBackgroundRows));
     }
 
-    public static bool TryParseTag(string tagName, out PlayerTag tag)
+    private static void BackUpLegacyFile(string path)
     {
-        tag = tagName.Trim().ToUpperInvariant() switch
+        if (!File.Exists(path))
         {
-            "YT" => PlayerTag.YouTube,
-            "TTV" => PlayerTag.Twitch,
-            "OWNER" => PlayerTag.Owner,
-            "STAFF" => PlayerTag.Staff,
-            "AIMLOCK" => PlayerTag.Aimlock,
-            "SUPPORTER" => PlayerTag.Supporter,
-            "GUILD" or "GUILDTAG" => PlayerTag.GuildTag,
-            _ => (PlayerTag)(-1)
-        };
-        return Enum.IsDefined(typeof(PlayerTag), tag);
+            return;
+        }
+
+        File.Copy(
+            path,
+            $"{path}.migrated-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
+            overwrite: false);
     }
 
-    public static string GetTagToken(PlayerTag tag) =>
-        tag switch
+    private static string NormalizePlayerName(string playerName)
+    {
+        if (string.IsNullOrWhiteSpace(playerName))
         {
-            PlayerTag.YouTube => "YT",
-            PlayerTag.Twitch => "TTV",
-            PlayerTag.Owner => "OWNER",
-            PlayerTag.Staff => "STAFF",
-            PlayerTag.Aimlock => "AIMLOCK",
-            PlayerTag.Supporter => "SUPPORTER",
-            PlayerTag.GuildTag => "GUILDTAG",
-            _ => throw new ArgumentOutOfRangeException(nameof(tag))
-        };
+            throw new ArgumentException("A player name is required.", nameof(playerName));
+        }
+
+        return playerName.Trim();
+    }
+
+    private void RefreshPlayerTag(
+        CCitadelPlayerController player,
+        int version,
+        int retriesRemaining)
+    {
+        if (!player.IsValid)
+        {
+            return;
+        }
+
+        ulong steamId = player.PlayerSteamId;
+
+        if (
+            this.hiddenSteamIds.Contains(steamId) ||
+            !this.stableTags.TryGetValue(steamId, out PlayerTag tag) ||
+            this.GetTagStyle(tag, steamId) is not { } style)
+        {
+            this.RemoveTagEntity(steamId);
+            return;
+        }
+
+        var pawn = player.GetHeroPawn();
+        if (pawn == null || !pawn.IsValid)
+        {
+            this.RemoveTagEntity(steamId);
+            if (retriesRemaining > 0)
+            {
+                this.ScheduleTagRetry(player, steamId, version, retriesRemaining - 1);
+            }
+
+            return;
+        }
+
+        if (HasCurrentTagEntities(steamId, tag, pawn))
+        {
+            return;
+        }
+
+        this.RemoveTagEntity(steamId);
+        CreateTagEntities(steamId, player.PlayerName, pawn, tag, style);
+    }
+
+    /* The hero pawn is not ready yet: try again unless a newer refresh started */
+    private void ScheduleTagRetry(
+        CCitadelPlayerController player,
+        ulong steamId,
+        int version,
+        int retriesRemaining)
+    {
+        this.server.ScheduleOnce(0.5.Seconds(), () =>
+        {
+            if (
+                this.refreshVersions.TryGetValue(steamId, out int activeVersion) &&
+                activeVersion == version)
+            {
+                this.RefreshPlayerTag(player, version, retriesRemaining);
+            }
+        });
+    }
+
+    /* The same tag on the same pawn keeps its entities; guild tags are always rebuilt */
+    private bool HasCurrentTagEntities(
+        ulong steamId,
+        PlayerTag tag,
+        CCitadelPlayerPawn pawn) =>
+        tag != PlayerTag.GuildTag &&
+        this.activeTagValues.TryGetValue(steamId, out PlayerTag activeTag) &&
+        activeTag == tag &&
+        this.activeTagPawnHandles.TryGetValue(steamId, out uint activePawnHandle) &&
+        activePawnHandle == pawn.EntityHandle &&
+        this.activeTagBackgrounds.TryGetValue(steamId, out var background) &&
+        background.IsValid &&
+        this.activeTags.TryGetValue(steamId, out var text) &&
+        text.IsValid;
+
+    private void CreateTagEntities(
+        ulong steamId,
+        string playerName,
+        CCitadelPlayerPawn pawn,
+        PlayerTag tag,
+        TagStyle style)
+    {
+        var background = CreateOverheadText(
+            pawn,
+            BuildBackgroundRow(style.Text),
+            (uint)TagBackgroundAlpha << 24);
+        if (background == null)
+        {
+            Console.WriteLine(
+                $"[aimLOCK] Failed to create the background for {playerName}'s overhead tag.");
+            return;
+        }
+
+        background.Fullbright = true;
+        background.DepthOffset = -1f;
+
+        var text = CreateOverheadText(
+            pawn,
+            style.Text,
+            style.Color);
+        if (text == null)
+        {
+            background.Remove();
+            Console.WriteLine(
+                $"[aimLOCK] Failed to create the overhead tag for {playerName}.");
+            return;
+        }
+
+        this.activeTags[steamId] = text;
+        this.activeTagBackgrounds[steamId] = background;
+        this.activeTagValues[steamId] = tag;
+        this.activeTagPawnHandles[steamId] = pawn.EntityHandle;
+    }
 
     private TagStyle? GetTagStyle(PlayerTag tag, ulong steamId)
     {
         if (tag == PlayerTag.GuildTag)
         {
-            string? guildTag = server.GuildManager.GetMemberTag(steamId);
+            string? guildTag = this.server.GuildManager.GetMemberTag(steamId);
             return string.IsNullOrWhiteSpace(guildTag)
                 ? null
                 : new TagStyle($"[{guildTag}]", 0xFFFFFFFF);
@@ -540,7 +599,7 @@ public sealed class PlayerTagManager
             PlayerTag.Staff => new TagStyle("[STAFF]", 0xFF00FFFF),
             PlayerTag.Aimlock => new TagStyle("[aimlock.xyz]", 0xFFFFFFFF),
             PlayerTag.Supporter => new TagStyle("[♥]", 0xFFB469FF),
-            _ => throw new ArgumentOutOfRangeException(nameof(tag))
+            _ => throw new ArgumentOutOfRangeException(nameof(tag)),
         };
     }
 
@@ -549,30 +608,28 @@ public sealed class PlayerTagManager
         foreach (var player in Players.GetAll())
         {
             if (player.PlayerSteamId == steamId)
+            {
                 RefreshPlayerTag(player);
+            }
         }
     }
 
     private ulong[] ResolveLegacyName(
         string playerName,
-        IEnumerable<CCitadelPlayerController> onlinePlayers
-    ) =>
+        IEnumerable<CCitadelPlayerController> onlinePlayers) =>
         onlinePlayers
             .Where(player => !player.IsBot && string.Equals(
                 player.PlayerName?.Trim(),
                 playerName,
-                StringComparison.OrdinalIgnoreCase
-            ))
+                StringComparison.OrdinalIgnoreCase))
             .Select(player => player.PlayerSteamId)
-            .Concat(server.PlayerRecords.Values
+            .Concat(this.server.PlayerRecords.Values
                 .Where(record =>
                     !string.IsNullOrWhiteSpace(record.LastKnownName) &&
                     string.Equals(
                         record.LastKnownName.Trim(),
                         playerName,
-                        StringComparison.OrdinalIgnoreCase
-                    )
-                )
+                        StringComparison.OrdinalIgnoreCase))
                 .Select(record => record.SteamId))
             .Where(steamId => steamId != 0)
             .Distinct()
@@ -582,43 +639,46 @@ public sealed class PlayerTagManager
 
     private void MigrateNameKeyedTags()
     {
-        if (tags.Count == 0 && hiddenTags.Count == 0)
+        if (this.tags.Count == 0 && this.hiddenTags.Count == 0)
+        {
             return;
+        }
 
         var onlinePlayers = Players.GetAll().ToArray();
-        var updatedStableTags = new Dictionary<ulong, PlayerTag>(stableTags);
-        var updatedHiddenSteamIds = new HashSet<ulong>(hiddenSteamIds);
+        var updatedStableTags = new Dictionary<ulong, PlayerTag>(this.stableTags);
+        var updatedHiddenSteamIds = new HashSet<ulong>(this.hiddenSteamIds);
 
-        foreach (var entry in tags)
+        foreach (var entry in this.tags)
         {
             ulong[] steamIds = ResolveLegacyName(entry.Key, onlinePlayers);
             if (steamIds.Length != 1)
             {
                 Console.WriteLine(
                     $"Failed to migrate the {GetTagToken(entry.Value)} tag for \"{entry.Key}\": " +
-                    $"{steamIds.Length} players match that name. Set it again with /tag."
-                );
+                    $"{steamIds.Length} players match that name. Set it again with /tag.");
                 continue;
             }
 
             updatedStableTags.TryAdd(steamIds[0], entry.Value);
         }
 
-        foreach (string playerName in hiddenTags)
+        foreach (string playerName in this.hiddenTags)
         {
             ulong[] steamIds = ResolveLegacyName(playerName, onlinePlayers);
             if (steamIds.Length == 1)
+            {
                 updatedHiddenSteamIds.Add(steamIds[0]);
+            }
         }
 
         try
         {
-            BackUpLegacyFile(tagsFilePath);
-            BackUpLegacyFile(visibilityFilePath);
-            SaveStableTags(updatedStableTags);
-            SaveHiddenSteamIds(updatedHiddenSteamIds);
-            SaveTags(new Dictionary<string, PlayerTag>());
-            SaveHiddenTags(new HashSet<string>());
+            BackUpLegacyFile(this.tagsFilePath);
+            BackUpLegacyFile(this.visibilityFilePath);
+            this.SaveStableTags(updatedStableTags);
+            this.SaveHiddenSteamIds(updatedHiddenSteamIds);
+            this.SaveTags(new Dictionary<string, PlayerTag>());
+            this.SaveHiddenTags(new HashSet<string>());
         }
         catch (IOException ex)
         {
@@ -631,234 +691,224 @@ public sealed class PlayerTagManager
             return;
         }
 
-        ReplaceStableTags(updatedStableTags);
-        hiddenSteamIds.Clear();
+        this.ReplaceStableTags(updatedStableTags);
+        this.hiddenSteamIds.Clear();
         foreach (ulong steamId in updatedHiddenSteamIds)
-            hiddenSteamIds.Add(steamId);
-        tags.Clear();
-        hiddenTags.Clear();
+        {
+            this.hiddenSteamIds.Add(steamId);
+        }
+
+        this.tags.Clear();
+        this.hiddenTags.Clear();
 
         Console.WriteLine("[aimLOCK] Overhead tags are now saved by SteamID. Current holders:");
-        foreach (var entry in stableTags)
+        foreach (var entry in this.stableTags)
         {
-            string name = server.PlayerRecords.TryGetValue(entry.Key, out var record)
+            string name = this.server.PlayerRecords.TryGetValue(entry.Key, out var record)
                 ? record.LastKnownName
                 : "unknown";
             Console.WriteLine(
-                $"[aimLOCK]   {entry.Key} ({name}): {GetTagToken(entry.Value)}"
-            );
+                $"[aimLOCK]   {entry.Key} ({name}): {GetTagToken(entry.Value)}");
         }
-    }
-
-    private static void BackUpLegacyFile(string path)
-    {
-        if (!File.Exists(path))
-            return;
-
-        File.Copy(
-            path,
-            $"{path}.migrated-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
-            overwrite: false
-        );
     }
 
     private void RemoveTagEntity(ulong steamId)
     {
         if (
-            activeTagBackgrounds.Remove(steamId, out var backgroundText) &&
-            backgroundText.IsValid
-        )
+            this.activeTagBackgrounds.Remove(steamId, out var backgroundText) &&
+            backgroundText.IsValid)
         {
             backgroundText.Remove();
         }
 
-        if (activeTags.Remove(steamId, out var text) && text.IsValid)
+        if (this.activeTags.Remove(steamId, out var text) && text.IsValid)
+        {
             text.Remove();
+        }
 
-        activeTagValues.Remove(steamId);
-        activeTagPawnHandles.Remove(steamId);
+        this.activeTagValues.Remove(steamId);
+        this.activeTagPawnHandles.Remove(steamId);
     }
-
-    /* On unload: a reloaded plugin starts without knowing these entities */
-    public void RemoveAllTagEntities()
-    {
-        foreach (ulong steamId in activeTags.Keys.Concat(activeTagBackgrounds.Keys).ToArray())
-            RemoveTagEntity(steamId);
-    }
-
-    private readonly record struct TagStyle(string Text, uint Color);
 
     private void ReplaceStableTags(Dictionary<ulong, PlayerTag> updatedTags)
     {
-        stableTags.Clear();
+        this.stableTags.Clear();
         foreach (var entry in updatedTags)
-            stableTags[entry.Key] = entry.Value;
+        {
+            this.stableTags[entry.Key] = entry.Value;
+        }
     }
 
     private void ReplaceGrantedTags(
-        Dictionary<ulong, HashSet<PlayerTag>> updatedGrants
-    )
+        Dictionary<ulong, HashSet<PlayerTag>> updatedGrants)
     {
-        grantedTags.Clear();
+        this.grantedTags.Clear();
         foreach (var entry in updatedGrants)
-            grantedTags[entry.Key] = entry.Value;
-    }
-
-    private static string NormalizePlayerName(string playerName)
-    {
-        if (string.IsNullOrWhiteSpace(playerName))
-            throw new ArgumentException("A player name is required.", nameof(playerName));
-
-        return playerName.Trim();
+        {
+            this.grantedTags[entry.Key] = entry.Value;
+        }
     }
 
     private void LoadTags()
     {
         var loaded = JsonStore.Load(
-            tagsFilePath,
+            this.tagsFilePath,
             () => new Dictionary<string, PlayerTag>(),
-            JsonOptions
-        );
+            JsonOptions);
         foreach (var entry in loaded)
         {
             if (Enum.IsDefined(typeof(PlayerTag), entry.Value))
-                tags[NormalizePlayerName(entry.Key)] = entry.Value;
+            {
+                this.tags[NormalizePlayerName(entry.Key)] = entry.Value;
+            }
         }
     }
 
     private void LoadHiddenTags()
     {
         var loaded = JsonStore.Load(
-            visibilityFilePath,
+            this.visibilityFilePath,
             () => new HashSet<string>(),
-            JsonOptions
-        );
+            JsonOptions);
         foreach (string playerName in loaded)
         {
             if (!string.IsNullOrWhiteSpace(playerName))
-                hiddenTags.Add(NormalizePlayerName(playerName));
+            {
+                this.hiddenTags.Add(NormalizePlayerName(playerName));
+            }
         }
     }
 
     private void LoadStableTags()
     {
         var loaded = JsonStore.Load(
-            stableTagsFilePath,
+            this.stableTagsFilePath,
             () => new Dictionary<ulong, PlayerTag>(),
-            JsonOptions
-        );
+            JsonOptions);
         foreach (var entry in loaded)
         {
             if (Enum.IsDefined(typeof(PlayerTag), entry.Value))
-                stableTags[entry.Key] = entry.Value;
+            {
+                this.stableTags[entry.Key] = entry.Value;
+            }
         }
     }
 
     private void LoadGrantedTags()
     {
         var loaded = JsonStore.Load(
-            grantedTagsFilePath,
+            this.grantedTagsFilePath,
             () => new Dictionary<ulong, HashSet<PlayerTag>>(),
-            JsonOptions
-        );
+            JsonOptions);
         foreach (var entry in loaded)
         {
             if (entry.Key == 0 || entry.Key == ulong.MaxValue || entry.Value == null)
+            {
                 continue;
+            }
 
             PlayerTag[] validTags = entry.Value
                 .Where(tag => Enum.IsDefined(typeof(PlayerTag), tag))
                 .Distinct()
                 .ToArray();
             if (validTags.Length > 0)
-                grantedTags[entry.Key] = new HashSet<PlayerTag>(validTags);
+            {
+                this.grantedTags[entry.Key] = new HashSet<PlayerTag>(validTags);
+            }
         }
     }
 
     private void LoadHiddenSteamIds()
     {
         var loaded = JsonStore.Load(
-            stableVisibilityFilePath,
+            this.stableVisibilityFilePath,
             () => new HashSet<ulong>(),
-            JsonOptions
-        );
+            JsonOptions);
         foreach (ulong steamId in loaded)
-            hiddenSteamIds.Add(steamId);
+        {
+            this.hiddenSteamIds.Add(steamId);
+        }
     }
 
     private void LoadClearedSteamIds()
     {
         var loaded = JsonStore.Load(
-            clearedTagsFilePath,
+            this.clearedTagsFilePath,
             () => new HashSet<ulong>(),
-            JsonOptions
-        );
+            JsonOptions);
         foreach (ulong steamId in loaded)
-            clearedSteamIds.Add(steamId);
+        {
+            this.clearedSteamIds.Add(steamId);
+        }
     }
 
     private void SetTagCleared(ulong steamId, bool cleared)
     {
-        if (clearedSteamIds.Contains(steamId) == cleared)
+        if (this.clearedSteamIds.Contains(steamId) == cleared)
+        {
             return;
+        }
 
-        var updatedClearedSteamIds = new HashSet<ulong>(clearedSteamIds);
+        var updatedClearedSteamIds = new HashSet<ulong>(this.clearedSteamIds);
         if (cleared)
+        {
             updatedClearedSteamIds.Add(steamId);
+        }
         else
+        {
             updatedClearedSteamIds.Remove(steamId);
+        }
 
         JsonStore.Save(
-            clearedTagsFilePath,
+            this.clearedTagsFilePath,
             updatedClearedSteamIds,
             JsonOptions,
-            durable: false
-        );
+            durable: false);
         if (cleared)
-            clearedSteamIds.Add(steamId);
+        {
+            this.clearedSteamIds.Add(steamId);
+        }
         else
-            clearedSteamIds.Remove(steamId);
+        {
+            this.clearedSteamIds.Remove(steamId);
+        }
     }
 
     private void SaveHiddenTags(HashSet<string> hiddenTagsToSave) =>
         JsonStore.Save(
-            visibilityFilePath,
+            this.visibilityFilePath,
             hiddenTagsToSave,
             JsonOptions,
-            durable: false
-        );
+            durable: false);
 
     private void SaveHiddenSteamIds(HashSet<ulong> hiddenSteamIdsToSave) =>
         JsonStore.Save(
-            stableVisibilityFilePath,
+            this.stableVisibilityFilePath,
             hiddenSteamIdsToSave,
             JsonOptions,
-            durable: false
-        );
+            durable: false);
 
     private void SaveTags(Dictionary<string, PlayerTag> tagsToSave) =>
         JsonStore.Save(
-            tagsFilePath,
+            this.tagsFilePath,
             tagsToSave,
             JsonOptions,
-            durable: false
-        );
+            durable: false);
 
     private void SaveStableTags(Dictionary<ulong, PlayerTag> tagsToSave) =>
         JsonStore.Save(
-            stableTagsFilePath,
+            this.stableTagsFilePath,
             tagsToSave,
             JsonOptions,
-            durable: false
-        );
+            durable: false);
 
     private void SaveGrantedTags(
-        Dictionary<ulong, HashSet<PlayerTag>> grantsToSave
-    ) =>
+        Dictionary<ulong, HashSet<PlayerTag>> grantsToSave) =>
         JsonStore.Save(
-            grantedTagsFilePath,
+            this.grantedTagsFilePath,
             grantsToSave,
             JsonOptions,
-            durable: false
-        );
+            durable: false);
+
+    private readonly record struct TagStyle(string Text, uint Color);
 }

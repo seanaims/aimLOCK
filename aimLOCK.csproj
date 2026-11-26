@@ -18,16 +18,18 @@
   </Reference>
 </ItemGroup>
 
+<ItemGroup>
+  <PackageReference Include="StyleCop.Analyzers" Version="1.3.180">
+    <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    <PrivateAssets>all</PrivateAssets>
+  </PackageReference>
+</ItemGroup>
+
 <Target Name="DeployToGame" AfterTargets="Build">
   <ItemGroup>
     <DeployFiles Include="$(OutputPath)aimLOCK.dll;$(OutputPath)aimLOCK.pdb" />
   </ItemGroup>
-  <Copy
-    SourceFiles="@(DeployFiles)"
-    DestinationFolder="D:\SteamLibrary\steamapps\common\Deadlock\game\bin\win64\managed\plugins"
-    SkipUnchangedFiles="false"
-    Retries="0"
-    ContinueOnError="WarnAndContinue" />
+  <Copy SourceFiles="@(DeployFiles)" DestinationFolder="D:\SteamLibrary\steamapps\common\Deadlock\game\bin\win64\managed\plugins" SkipUnchangedFiles="false" Retries="0" ContinueOnError="WarnAndContinue" />
 </Target>
 </Project>
 

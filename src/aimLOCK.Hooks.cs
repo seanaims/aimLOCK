@@ -1,13 +1,12 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public partial class aimLOCK
 {
@@ -25,10 +24,14 @@ public partial class aimLOCK
     // Cleared on map start.
     private readonly Dictionary<nint, byte> modifierSlowKinds = new();
 
+    // Ability handle -> is it Fixation. Handles include a serial number, so a reused
+    // entity slot gets a new handle and never reads a stale answer.
+    private readonly Dictionary<uint, bool> fixationAbilityHandles = new();
+
     public override HookResult OnAddModifier(AddModifierEvent args)
     {
         nint vdata = args.ModifierVData.Handle;
-        if (!modifierSlowKinds.TryGetValue(vdata, out byte slowKind))
+        if (!this.modifierSlowKinds.TryGetValue(vdata, out byte slowKind))
         {
             string name = args.ModifierVData.Name;
             slowKind = name == FixationSlowModifierName
@@ -36,61 +39,75 @@ public partial class aimLOCK
                 : name == BurstFireBuffModifierName
                     ? (byte)3
                     : name.Contains("slow", StringComparison.Ordinal) ? (byte)1 : (byte)0;
-            modifierSlowKinds[vdata] = slowKind;
+            this.modifierSlowKinds[vdata] = slowKind;
         }
 
         if (slowKind == 0)
+        {
             return HookResult.Continue;
+        }
 
         if (slowKind == 3)
+        {
             return HookResult.Continue;
+        }
 
         if (slowKind == 2)
+        {
             return HookResult.Stop;
+        }
 
         // Some other slow: block it only if it comes from Fixation. Cached per ability
         // handle so the ability's name isn't read again on every slow it applies.
         uint abilityHandle = args.AbilityHandle;
         if (abilityHandle == 0xFFFFFFFF)
+        {
             return HookResult.Continue;
+        }
 
-        return IsFixationAbility(abilityHandle) ? HookResult.Stop : HookResult.Continue;
+        return this.IsFixationAbility(abilityHandle) ? HookResult.Stop : HookResult.Continue;
     }
 
     /// <summary>Whether an ability handle is a Fixation ability. Cached per handle.</summary>
     public bool IsFixationAbility(uint abilityHandle)
     {
-        if (fixationAbilityHandles.TryGetValue(abilityHandle, out bool isFixation))
+        if (this.fixationAbilityHandles.TryGetValue(abilityHandle, out bool isFixation))
+        {
             return isFixation;
+        }
 
-        if (fixationAbilityHandles.Count > 512)
-            fixationAbilityHandles.Clear();
+        if (this.fixationAbilityHandles.Count > 512)
+        {
+            this.fixationAbilityHandles.Clear();
+        }
 
         isFixation =
             CBaseEntity.FromHandle(abilityHandle)?.As<CCitadelBaseAbility>()?.AbilityName ==
             "ability_stacking_damage";
-        fixationAbilityHandles[abilityHandle] = isFixation;
+        this.fixationAbilityHandles[abilityHandle] = isFixation;
         return isFixation;
     }
 
-    // Ability handle -> is it Fixation. Handles include a serial number, so a reused
-    // entity slot gets a new handle and never reads a stale answer.
-    private readonly Dictionary<uint, bool> fixationAbilityHandles = new();
-
     public override void OnEntitySpawned(EntitySpawnedEvent args)
     {
-        MapCleaner.OnEntitySpawned(args.Entity);
+        this.MapCleaner.OnEntitySpawned(args.Entity);
     }
 
     public override void OnModifierEvent(ModifierEvent args)
     {
         // Fires for every modifier event on the server; bail out before touching anything else.
         if (args.Event == EModifierEvent.DamageTaken)
-            PlayerManager.ApplyServerLifesteal(args);
-        else if (args.Event == EModifierEvent.HealthTaken && ActiveMatches.Count != 0)
-            PlayerManager.BlockOtherDuelHealing(args);
+        {
+            this.PlayerManager.ApplyServerLifesteal(args);
+        }
+        else if (args.Event == EModifierEvent.HealthTaken && this.ActiveMatches.Count != 0)
+        {
+            this.PlayerManager.BlockOtherDuelHealing(args);
+        }
         else if (args.Event == EModifierEvent.GunFired)
-            PlayerManager.OnGunFired(args);
+        {
+            this.PlayerManager.OnGunFired(args);
+        }
     }
 
     public override void OnPawnHeroInitialized(CCitadelPlayerPawn pawn)
@@ -101,7 +118,7 @@ public partial class aimLOCK
         if (pawn.IsValid && pawn.HeroID == Heroes.Haze && pawn.Controller is not { IsBot: false })
         {
             pawn.SetModel(PlayerManager.HazeModel);
-            PlayerManager.OnPracticeBotHeroInitialized(pawn);
+            this.PlayerManager.OnPracticeBotHeroInitialized(pawn);
         }
 
         // Abilities were just (re)populated (spawn, respawn, hero reset): re-apply the loadout
@@ -110,14 +127,16 @@ public partial class aimLOCK
         Timer.NextTick(() =>
         {
             var currentPawn = CBaseEntity.FromHandle<CCitadelPlayerPawn>(pawnHandle);
+
             // Skip the temporary hero used during the connect swap; only Haze gets
             // the loadout here (the other call sites cover Haze regardless).
             if (
                 currentPawn is { IsValid: true } &&
                 currentPawn.HeroID == Heroes.Haze &&
-                currentPawn.Controller is { IsBot: false }
-            )
-                PlayerManager.ApplyHazeLoadout(currentPawn, force: true);
+                currentPawn.Controller is { IsBot: false })
+            {
+                this.PlayerManager.ApplyHazeLoadout(currentPawn, force: true);
+            }
         });
     }
 
@@ -128,135 +147,66 @@ public partial class aimLOCK
         // The practice bot is spawned as Haze directly. It needs none of the player
         // connect work (hero swap, HUD panels, overhead tag, guild name update).
         if (args.Controller is { IsBot: true })
+        {
             return;
+        }
 
-        ApplyServerConVars(logChanges: true);
-        PlayerManager.OnPlayerConnect(args);
+        this.ApplyServerConVars(logChanges: true);
+        this.PlayerManager.OnPlayerConnect(args);
 
         if (args.Controller is { } connectedPlayer)
         {
             try
             {
-                GuildManager.UpdatePlayerName(connectedPlayer);
+                this.GuildManager.UpdatePlayerName(connectedPlayer);
             }
             catch (IOException ex)
             {
                 Console.WriteLine(
-                    $"Failed to update guild member name for {connectedPlayer.PlayerName}: {ex}"
-                );
+                    $"Failed to update guild member name for {connectedPlayer.PlayerName}: {ex}");
             }
             catch (UnauthorizedAccessException ex)
             {
                 Console.WriteLine(
-                    $"Access denied updating guild member name for {connectedPlayer.PlayerName}: {ex}"
-                );
+                    $"Access denied updating guild member name for {connectedPlayer.PlayerName}: {ex}");
             }
 
             ScheduleOnce(2.Seconds(), () =>
             {
                 if (!connectedPlayer.IsValid)
+                {
                     return;
+                }
 
                 foreach (string message in WelcomeMessages)
+                {
                     Chat.PrintToChat(connectedPlayer, message);
+                }
+
                 if (connectedPlayer.IsBot)
+                {
                     return;
+                }
 
                 ulong steamId = connectedPlayer.PlayerSteamId;
-                PlayerTagManager.TryAutoEquipBestTag(steamId);
-                if (PlayerTagManager.GetTagHint(steamId) is { } tagHint)
+                this.PlayerTagManager.TryAutoEquipBestTag(steamId);
+                if (this.PlayerTagManager.GetTagHint(steamId) is { } tagHint)
+                {
                     Chat.PrintToChat(connectedPlayer, tagHint);
+                }
             });
         }
 
-        if (_rutgerForceFieldCastScheduled
-            || _rutgerForceFieldCastAttempted
+        if (this.rutgerForceFieldCastScheduled
+            || this.rutgerForceFieldCastAttempted
             || args.Controller is not { } controller)
         {
             return;
         }
 
-        _rutgerForceFieldCastScheduled = true;
+        this.rutgerForceFieldCastScheduled = true;
         ScheduleOnce(2.Seconds(), () =>
             TryCastRutgerForceField(controller, 5));
-    }
-
-    private void TryCastRutgerForceField(
-        CCitadelPlayerController controller,
-        int retriesRemaining)
-    {
-        if (_rutgerForceFieldCastAttempted)
-            return;
-
-        if (!controller.IsValid)
-        {
-            _rutgerForceFieldCastScheduled = false;
-            return;
-        }
-
-        var pawn = controller.GetHeroPawn();
-        if (pawn == null || !pawn.IsValid)
-        {
-            if (retriesRemaining > 0)
-            {
-                ScheduleOnce(1.Seconds(), () =>
-                    TryCastRutgerForceField(controller, retriesRemaining - 1));
-            }
-            else
-            {
-                Console.WriteLine(
-                    "[aimLOCK] Could not cast Rutger's Force Field: " +
-                    "the first player's hero pawn was unavailable."
-                );
-                _rutgerForceFieldCastScheduled = false;
-            }
-
-            return;
-        }
-
-        _rutgerForceFieldCastAttempted = true;
-        _rutgerForceFieldCastScheduled = false;
-
-        var ability = pawn.AddAbility(
-            "rutger_force_field",
-            (ushort)EAbilitySlot.None
-        );
-        if (ability == null || !ability.IsValid)
-        {
-            Console.WriteLine(
-                "[aimLOCK] Could not add rutger_force_field to the first player's pawn."
-            );
-            return;
-        }
-
-        try
-        {
-            ability.SetField(
-                "CAbility_Rutger_ForceField"u8,
-                "m_vSpawnPos"u8,
-                RutgerForceFieldPosition
-            );
-
-            int result = pawn.ExecuteAbility(ability);
-            if (result != 0)
-            {
-                pawn.RemoveAbility("rutger_force_field");
-                Console.WriteLine(
-                    $"[aimLOCK] Rutger Force Field execution failed with result {result}."
-                );
-                return;
-            }
-
-            Console.WriteLine(
-                "[aimLOCK] Submitted a Rutger Force Field cast at " +
-                $"{RutgerForceFieldPosition} using {controller.PlayerName} as the caster."
-            );
-        }
-        catch (Exception ex)
-        {
-            pawn.RemoveAbility("rutger_force_field");
-            Console.WriteLine($"[aimLOCK] Rutger Force Field cast failed: {ex}");
-        }
     }
 
     /* Hero Swap Prevention */
@@ -267,13 +217,10 @@ public partial class aimLOCK
             e.Controller is CCitadelPlayerController chatPlayer &&
             (
                 string.Equals(e.Command, "say", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(e.Command, "say_team", StringComparison.OrdinalIgnoreCase)
-            ) &&
+                string.Equals(e.Command, "say_team", StringComparison.OrdinalIgnoreCase)) &&
             Penalties.GetActive(
                 PenaltyType.Gag,
-                chatPlayer.PlayerSteamId
-            ) is { } activeGag
-        )
+                chatPlayer.PlayerSteamId) is { } activeGag)
         {
             Chat.PrintToChat(chatPlayer, BuildMuteNotice(activeGag));
             return HookResult.Stop;
@@ -283,9 +230,10 @@ public partial class aimLOCK
             e.Command == "selecthero" &&
             e.Controller is CCitadelPlayerController controller &&
             controller.GetHeroPawn() is { IsValid: true }
-            && !PlayerManager.IsInitialHeroSelectionPending(controller)
-        )
+            && !this.PlayerManager.IsInitialHeroSelectionPending(controller))
+        {
             return HookResult.Stop;
+        }
 
         return HookResult.Continue;
     }
@@ -296,53 +244,63 @@ public partial class aimLOCK
         // anything (a bot that already exists when a player joins crashes that player).
         if (!args.IsBot)
         {
-            PlayerManager.RemoveOrphanPracticeBots();
-            PlayerManager.RemoveUntrackedBots();
+            this.PlayerManager.RemoveOrphanPracticeBots();
+            this.PlayerManager.RemoveUntrackedBots();
         }
 
         if (args.Controller is { } controller)
-            PlayerManager.OnPlayerPutInServer(controller);
+        {
+            this.PlayerManager.OnPlayerPutInServer(controller);
+        }
     }
 
     public override void OnClientDisconnect(ClientDisconnectedEvent args)
     {
         if (args.IsMapChange)
+        {
             return;
+        }
 
         if (args.Controller is not CCitadelPlayerController controller)
+        {
             return;
+        }
 
-        Queue.OnPlayerDisconnect(controller);
-        PlayerManager.OnPlayerDisconnect(controller);
-        HazeHitboxFilter.RemoveDebugSubscriber(controller);
+        this.Queue.OnPlayerDisconnect(controller);
+        this.PlayerManager.OnPlayerDisconnect(controller);
+        this.HazeHitboxFilter.RemoveDebugSubscriber(controller);
         controller.RemoveWithPawns();
     }
 
     public override HookResult OnTakeDamage(TakeDamageEvent args)
     {
-        if (PlayerManager.BlockPracticeBotDamage(args) || HazeHitboxFilter.ShouldBlock(args))
+        if (this.PlayerManager.BlockPracticeBotDamage(args) || this.HazeHitboxFilter.ShouldBlock(args))
+        {
             return HookResult.Stop;
+        }
 
-        PlayerManager.ApplyDuelBulletDamage(args);
+        this.PlayerManager.ApplyDuelBulletDamage(args);
         return HookResult.Continue;
     }
 
     public override HookResult OnModifyCurrency(ModifyCurrencyEvent args)
     {
         if (args.CurrencyType == ECurrencyType.EGold)
-            return PlayerManager.OnSoulsChanged(args);
+        {
+            return this.PlayerManager.OnSoulsChanged(args);
+        }
 
         return HookResult.Continue;
     }
 
     public override void OnCheckTransmit(CheckTransmitEvent args)
     {
-        PlayerManager.HideOtherPlayersBots(args);
+        this.PlayerManager.HideOtherPlayersBots(args);
     }
 
     public override void OnProcessUsercmds(ProcessUsercmdsEvent args)
     {
-        PlayerManager.ProcessUsercmds(args);
+        this.PlayerManager.ProcessUsercmds(args);
     }
 
     /* Debug Hero Change */
@@ -359,7 +317,7 @@ public partial class aimLOCK
     [GameEventHandler("player_respawned")]
     public HookResult OnPlayerRespawned(PlayerRespawnedEvent args)
     {
-        return PlayerManager.OnPlayerRespawned(args);
+        return this.PlayerManager.OnPlayerRespawned(args);
     }
 
     /* Player Death / Score Tracking */
@@ -367,7 +325,7 @@ public partial class aimLOCK
     [GameEventHandler("player_death")]
     public HookResult OnPlayerDeath(PlayerDeathEvent args)
     {
-        return PlayerManager.OnPlayerDeath(args);
+        return this.PlayerManager.OnPlayerDeath(args);
     }
 
     private static string GetPenaltyTimeLeft(Penalty penalty)
@@ -386,5 +344,79 @@ public partial class aimLOCK
         return
             $"You are muted. Reason: {reason}. " +
             $"Time left: {GetPenaltyTimeLeft(penalty)}.";
+    }
+
+    private void TryCastRutgerForceField(
+        CCitadelPlayerController controller,
+        int retriesRemaining)
+    {
+        if (this.rutgerForceFieldCastAttempted)
+        {
+            return;
+        }
+
+        if (!controller.IsValid)
+        {
+            this.rutgerForceFieldCastScheduled = false;
+            return;
+        }
+
+        var pawn = controller.GetHeroPawn();
+        if (pawn == null || !pawn.IsValid)
+        {
+            if (retriesRemaining > 0)
+            {
+                ScheduleOnce(1.Seconds(), () =>
+                    this.TryCastRutgerForceField(controller, retriesRemaining - 1));
+            }
+            else
+            {
+                Console.WriteLine(
+                    "[aimLOCK] Could not cast Rutger's Force Field: " +
+                    "the first player's hero pawn was unavailable.");
+                this.rutgerForceFieldCastScheduled = false;
+            }
+
+            return;
+        }
+
+        this.rutgerForceFieldCastAttempted = true;
+        this.rutgerForceFieldCastScheduled = false;
+
+        var ability = pawn.AddAbility(
+            "rutger_force_field",
+            (ushort)EAbilitySlot.None);
+        if (ability == null || !ability.IsValid)
+        {
+            Console.WriteLine(
+                "[aimLOCK] Could not add rutger_force_field to the first player's pawn.");
+            return;
+        }
+
+        try
+        {
+            ability.SetField(
+                "CAbility_Rutger_ForceField"u8,
+                "m_vSpawnPos"u8,
+                RutgerForceFieldPosition);
+
+            int result = pawn.ExecuteAbility(ability);
+            if (result != 0)
+            {
+                pawn.RemoveAbility("rutger_force_field");
+                Console.WriteLine(
+                    $"[aimLOCK] Rutger Force Field execution failed with result {result}.");
+                return;
+            }
+
+            Console.WriteLine(
+                "[aimLOCK] Submitted a Rutger Force Field cast at " +
+                $"{RutgerForceFieldPosition} using {controller.PlayerName} as the caster.");
+        }
+        catch (Exception ex)
+        {
+            pawn.RemoveAbility("rutger_force_field");
+            Console.WriteLine($"[aimLOCK] Rutger Force Field cast failed: {ex}");
+        }
     }
 }

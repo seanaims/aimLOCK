@@ -1,24 +1,35 @@
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public sealed class GuildManager
 {
+    public const string DataFileName = "guilds.json";
     private const int MaxGuildNameCharacters = 15;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        WriteIndented = true
+        WriteIndented = true,
+    };
+
+    private static readonly string[] ReservedTags =
+    {
+        "OWNER",
+        "STAFF",
+        "ADMIN",
+        "MOD",
+        "DEV",
+        "YT",
+        "TTV",
+        "AIMLOCK",
     };
 
     private readonly object syncRoot = new();
-    public const string DataFileName = "guilds.json";
     private readonly string dataFilePath = JsonStore.PathFor(DataFileName);
     private readonly RankedEloManager rankedElo;
     private readonly PlayerTagManager playerTagManager;
@@ -27,13 +38,12 @@ public sealed class GuildManager
 
     public GuildManager(
         RankedEloManager rankedElo,
-        PlayerTagManager playerTagManager
-    )
+        PlayerTagManager playerTagManager)
     {
         this.rankedElo = rankedElo;
         this.playerTagManager = playerTagManager;
-        guilds = LoadGuilds();
-        RebuildMemberIndex();
+        this.guilds = this.LoadGuilds();
+        this.RebuildMemberIndex();
     }
 
     public string FormatPlayerName(CCitadelPlayerController player) =>
@@ -41,581 +51,101 @@ public sealed class GuildManager
 
     public string FormatPlayerName(ulong steamId, string playerName)
     {
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            return memberIndex.TryGetValue(steamId, out GuildData? guild)
+            return this.memberIndex.TryGetValue(steamId, out GuildData? guild)
                 ? $"[{guild.Tag}] {playerName}"
                 : playerName;
         }
     }
 
     public string FormatPlayerNameWithSelectedTag(CCitadelPlayerController player) =>
-        playerTagManager.FormatPlayerNameWithSelectedTag(
+        this.playerTagManager.FormatPlayerNameWithSelectedTag(
             player.PlayerSteamId,
             player.PlayerName,
-            GetMemberTag(player.PlayerSteamId)
-        );
+            GetMemberTag(player.PlayerSteamId));
 
     public string? GetMemberTag(ulong steamId)
     {
-        lock (syncRoot)
-            return memberIndex.TryGetValue(steamId, out GuildData? guild)
+        lock (this.syncRoot)
+        {
+            return this.memberIndex.TryGetValue(steamId, out GuildData? guild)
                 ? guild.Tag
                 : null;
+        }
     }
 
     public IReadOnlyList<GuildLeaderboardEntry> GetLeaderboardEntries()
     {
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            return guilds.Select(guild => new GuildLeaderboardEntry(
+            return this.guilds.Select(guild => new GuildLeaderboardEntry(
                 guild.Tag,
                 guild.Name,
-                guild.Members.Select(member => member.SteamId).ToArray()
-            )).ToArray();
+                guild.Members.Select(member => member.SteamId).ToArray())).ToArray();
         }
     }
 
     public void UpdatePlayerName(CCitadelPlayerController player)
     {
-        lock (syncRoot)
+        lock (this.syncRoot)
         {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
             GuildMember? member = guild?.Members.FirstOrDefault(
-                candidate => candidate.SteamId == player.PlayerSteamId
-            );
+                candidate => candidate.SteamId == player.PlayerSteamId);
             if (
                 member == null ||
                 string.Equals(
                     member.LastKnownName,
                     player.PlayerName,
-                    StringComparison.Ordinal
-                )
-            )
+                    StringComparison.Ordinal))
+            {
                 return;
+            }
 
-            var updatedGuilds = CloneGuilds(guilds);
+            var updatedGuilds = this.CloneGuilds(this.guilds);
             GuildMember updatedMember = FindGuildByTag(
                 updatedGuilds,
-                guild!.Tag
-            )!.Members.First(candidate =>
+                guild!.Tag)!.Members.First(candidate =>
                 candidate.SteamId == player.PlayerSteamId);
             updatedMember.LastKnownName = player.PlayerName;
-            Commit(updatedGuilds);
+            this.Commit(updatedGuilds);
         }
     }
 
     public string ExecuteCommand(
         CCitadelPlayerController player,
-        string[] arguments
-    )
+        string[] arguments)
     {
         if (arguments.Length == 0)
+        {
             return GetShortHelp();
+        }
 
         string action = arguments[0].Trim().ToLowerInvariant();
         string target = string.Join(" ", arguments.Skip(1)).Trim();
 
         return action switch
         {
-            "create" => Create(player, arguments.Skip(1).ToArray()),
-            "join" => Join(player, target),
-            "invite" => Invite(player, target),
-            "accept" => AcceptInvite(player, target),
-            "decline" => DeclineInvite(player, target),
-            "leave" => Leave(player),
-            "disband" => Disband(player, target),
-            "mode" or "access" => SetAccessMode(player, target),
-            "newtag" => RenameTag(player, target),
-            "rename" => RenameGuild(player, target),
-            "kick" => Kick(player, target),
-            "transfer" => TransferOwnership(player, target),
-            "lookup" or "info" => GetGuildInfo(player, target),
-            "members" => GetGuildInfo(player, target, membersOnly: true),
-            "invites" => GetInvites(player),
-            "list" => ListGuilds(),
+            "create" => this.Create(player, arguments.Skip(1).ToArray()),
+            "join" => this.Join(player, target),
+            "invite" => this.Invite(player, target),
+            "accept" => this.AcceptInvite(player, target),
+            "decline" => this.DeclineInvite(player, target),
+            "leave" => this.Leave(player),
+            "disband" => this.Disband(player, target),
+            "mode" or "access" => this.SetAccessMode(player, target),
+            "newtag" => this.RenameTag(player, target),
+            "rename" => this.RenameGuild(player, target),
+            "kick" => this.Kick(player, target),
+            "transfer" => this.TransferOwnership(player, target),
+            "lookup" or "info" => this.GetGuildInfo(player, target),
+            "members" => this.GetGuildInfo(player, target, membersOnly: true),
+            "invites" => this.GetInvites(player),
+            "list" => this.ListGuilds(),
             "help" => GetHelp(),
-            _ => GetShortHelp()
+            _ => GetShortHelp(),
         };
-    }
-
-    private string Create(CCitadelPlayerController player, string[] arguments)
-    {
-        if (arguments.Length == 0)
-            return "Usage: /guild create <tag>.";
-
-        string tag = string.Join(" ", arguments).Trim();
-        string? validationError = GetGuildTagValidationError(tag);
-        if (validationError != null)
-            return validationError;
-
-        lock (syncRoot)
-        {
-            if (FindGuildForMember(guilds, player.PlayerSteamId) != null)
-                return "You are already in a guild. Leave it before creating another.";
-            if (guilds.Any(guild =>
-                string.Equals(guild.Tag, tag, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(guild.Name, tag, StringComparison.OrdinalIgnoreCase)))
-                return $"The guild tag [{tag}] is already in use.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            updatedGuilds.Add(new GuildData
-            {
-                Name = tag,
-                Tag = tag,
-                OwnerSteamId = player.PlayerSteamId,
-                IsOpen = false,
-                Members = new List<GuildMember>
-                {
-                    new()
-                    {
-                        SteamId = player.PlayerSteamId,
-                        LastKnownName = player.PlayerName
-                    }
-                }
-            });
-            Commit(updatedGuilds);
-        }
-
-        return $"Created [{tag}]. Access is invite-only; use /guild mode open to allow anyone to join.";
-    }
-
-    private string Join(CCitadelPlayerController player, string guildQuery)
-    {
-        if (string.IsNullOrWhiteSpace(guildQuery))
-            return "Usage: /guild join <tag>.";
-
-        lock (syncRoot)
-        {
-            if (FindGuildForMember(guilds, player.PlayerSteamId) != null)
-                return "You are already in a guild. Leave it before joining another.";
-
-            GuildData? guild = FindGuild(guilds, guildQuery, out string error);
-            if (guild == null)
-                return error;
-            if (!guild.IsOpen)
-                return $"[{guild.Tag}] is invite-only. Ask its owner for an invite, then use /guild accept.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            GuildData updatedGuild = FindGuildByTag(updatedGuilds, guild.Tag)!;
-            updatedGuild.Members.Add(new GuildMember
-            {
-                SteamId = player.PlayerSteamId,
-                LastKnownName = player.PlayerName
-            });
-            RemoveInvites(updatedGuilds, player.PlayerSteamId);
-            Commit(updatedGuilds);
-            return $"You joined [{guild.Tag}].";
-        }
-    }
-
-    private string Invite(CCitadelPlayerController player, string playerQuery)
-    {
-        if (string.IsNullOrWhiteSpace(playerQuery))
-            return "Usage: /guild invite <online player name>.";
-
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId != player.PlayerSteamId)
-                return "Only the guild owner can invite players.";
-
-            CCitadelPlayerController? target = FindOnlinePlayer(playerQuery, out string error);
-            if (target == null)
-                return error;
-            if (FindGuildForMember(guilds, target.PlayerSteamId) != null)
-                return $"{target.PlayerName} is already in a guild.";
-            if (guild.Invites.Any(invite => invite.SteamId == target.PlayerSteamId))
-                return $"{target.PlayerName} already has a pending invite to [{guild.Tag}].";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            FindGuildByTag(updatedGuilds, guild.Tag)!.Invites.Add(new GuildInvite
-            {
-                SteamId = target.PlayerSteamId,
-                LastKnownName = target.PlayerName
-            });
-            Commit(updatedGuilds);
-            return $"Invited {target.PlayerName} to [{guild.Tag}]. They can use /guild accept.";
-        }
-    }
-
-    private string AcceptInvite(
-        CCitadelPlayerController player,
-        string guildQuery
-    )
-    {
-        lock (syncRoot)
-        {
-            if (FindGuildForMember(guilds, player.PlayerSteamId) != null)
-                return "You are already in a guild. Leave it before accepting another invite.";
-
-            GuildData[] invitedGuilds = guilds
-                .Where(guild => guild.Invites.Any(invite =>
-                    invite.SteamId == player.PlayerSteamId))
-                .ToArray();
-            if (!string.IsNullOrWhiteSpace(guildQuery))
-            {
-                GuildData? requestedGuild = FindGuild(
-                    invitedGuilds,
-                    guildQuery,
-                    out string error
-                );
-                if (requestedGuild == null)
-                    return error;
-                invitedGuilds = new[] { requestedGuild };
-            }
-
-            if (invitedGuilds.Length == 0)
-                return "You have no pending guild invites.";
-            if (invitedGuilds.Length > 1)
-            {
-                string choices = string.Join(
-                    ", ",
-                    invitedGuilds.Select(guild => $"[{guild.Tag}]")
-                );
-                return $"Choose an invite to accept: {choices}. Use /guild accept <tag>.";
-            }
-
-            GuildData guild = invitedGuilds[0];
-            var updatedGuilds = CloneGuilds(guilds);
-            GuildData updatedGuild = FindGuildByTag(updatedGuilds, guild.Tag)!;
-            updatedGuild.Members.Add(new GuildMember
-            {
-                SteamId = player.PlayerSteamId,
-                LastKnownName = player.PlayerName
-            });
-            RemoveInvites(updatedGuilds, player.PlayerSteamId);
-            Commit(updatedGuilds);
-            return $"You joined [{guild.Tag}].";
-        }
-    }
-
-    private string DeclineInvite(
-        CCitadelPlayerController player,
-        string guildQuery
-    )
-    {
-        lock (syncRoot)
-        {
-            GuildData[] invitedGuilds = guilds
-                .Where(guild => guild.Invites.Any(invite =>
-                    invite.SteamId == player.PlayerSteamId))
-                .ToArray();
-            if (!string.IsNullOrWhiteSpace(guildQuery))
-            {
-                GuildData? requestedGuild = FindGuild(
-                    invitedGuilds,
-                    guildQuery,
-                    out string error
-                );
-                if (requestedGuild == null)
-                    return error;
-                invitedGuilds = new[] { requestedGuild };
-            }
-
-            if (invitedGuilds.Length == 0)
-                return "You have no pending guild invites.";
-            if (invitedGuilds.Length > 1)
-                return "You have multiple invites. Use /guild decline <tag>.";
-
-            GuildData guild = invitedGuilds[0];
-            var updatedGuilds = CloneGuilds(guilds);
-            FindGuildByTag(updatedGuilds, guild.Tag)!.Invites.RemoveAll(
-                invite => invite.SteamId == player.PlayerSteamId
-            );
-            Commit(updatedGuilds);
-            return $"Declined the invite to [{guild.Tag}].";
-        }
-    }
-
-    private string Leave(CCitadelPlayerController player)
-    {
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId == player.PlayerSteamId)
-                return "Guild owners must transfer ownership or use /guild disband.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            FindGuildByTag(updatedGuilds, guild.Tag)!.Members.RemoveAll(
-                member => member.SteamId == player.PlayerSteamId
-            );
-            Commit(updatedGuilds);
-            return $"You left [{guild.Tag}].";
-        }
-    }
-
-    private string Disband(CCitadelPlayerController player, string confirmation)
-    {
-        if (!string.Equals(confirmation, "confirm", StringComparison.OrdinalIgnoreCase))
-            return "Disbanding is permanent. Run /guild disband confirm to confirm.";
-
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId != player.PlayerSteamId)
-                return "Only the guild owner can disband the guild.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            updatedGuilds.RemoveAll(candidate =>
-                string.Equals(candidate.Tag, guild.Tag, StringComparison.OrdinalIgnoreCase));
-            Commit(updatedGuilds);
-            return $"Disbanded [{guild.Tag}].";
-        }
-    }
-
-    private string SetAccessMode(
-        CCitadelPlayerController player,
-        string requestedMode
-    )
-    {
-        bool isOpen;
-        if (string.Equals(requestedMode, "open", StringComparison.OrdinalIgnoreCase))
-            isOpen = true;
-        else if (
-            string.Equals(requestedMode, "invite", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(requestedMode, "invite-only", StringComparison.OrdinalIgnoreCase)
-        )
-            isOpen = false;
-        else
-            return "Usage: /guild mode <open|invite>.";
-
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId != player.PlayerSteamId)
-                return "Only the guild owner can change guild access.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            FindGuildByTag(updatedGuilds, guild.Tag)!.IsOpen = isOpen;
-            Commit(updatedGuilds);
-            return $"[{guild.Tag}] is now {(isOpen ? "open to joining" : "invite-only")}.";
-        }
-    }
-
-    private string RenameTag(
-        CCitadelPlayerController player,
-        string requestedTag
-    )
-    {
-        string newTag = requestedTag.Trim();
-        string? validationError = GetGuildTagValidationError(newTag);
-        if (validationError != null)
-            return validationError;
-
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId != player.PlayerSteamId)
-                return "Only the guild owner can rename the guild tag.";
-            if (string.Equals(guild.Tag, newTag, StringComparison.Ordinal))
-                return $"Your guild tag is already [{newTag}].";
-            if (guilds.Any(candidate =>
-                candidate != guild &&
-                (
-                    string.Equals(candidate.Tag, newTag, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(candidate.Name, newTag, StringComparison.OrdinalIgnoreCase)
-                )))
-                return $"The guild tag [{newTag}] is already in use.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            GuildData updatedGuild = FindGuildByTag(updatedGuilds, guild.Tag)!;
-            if (string.Equals(
-                updatedGuild.Name,
-                updatedGuild.Tag,
-                StringComparison.OrdinalIgnoreCase
-            ))
-                updatedGuild.Name = newTag;
-            updatedGuild.Tag = newTag;
-            Commit(updatedGuilds);
-            return $"Your guild tag is now [{newTag}].";
-        }
-    }
-
-    private string RenameGuild(
-        CCitadelPlayerController player,
-        string requestedName
-    )
-    {
-        string newName = requestedName.Trim();
-        int characterCount = StringInfo.ParseCombiningCharacters(newName).Length;
-        if (characterCount is < 2 or > MaxGuildNameCharacters)
-            return $"Guild names must be 2-{MaxGuildNameCharacters} characters.";
-
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId != player.PlayerSteamId)
-                return "Only the guild owner can rename the guild.";
-            if (string.Equals(guild.Name, newName, StringComparison.Ordinal))
-                return $"Your guild is already named {newName}.";
-            if (guilds.Any(candidate =>
-                candidate != guild &&
-                (
-                    string.Equals(candidate.Name, newName, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(candidate.Tag, newName, StringComparison.OrdinalIgnoreCase)
-                )))
-                return $"A guild named {newName} is already in use.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            FindGuildByTag(updatedGuilds, guild.Tag)!.Name = newName;
-            Commit(updatedGuilds);
-            return $"Your guild is now named {newName}.";
-        }
-    }
-
-    private string Kick(CCitadelPlayerController player, string memberQuery)
-    {
-        if (string.IsNullOrWhiteSpace(memberQuery))
-            return "Usage: /guild kick <member name>.";
-
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId != player.PlayerSteamId)
-                return "Only the guild owner can remove members.";
-
-            GuildMember? member = FindMember(guild, memberQuery, out string error);
-            if (member == null)
-                return error;
-            if (member.SteamId == player.PlayerSteamId)
-                return "You cannot kick yourself. Use /guild transfer or /guild disband.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            FindGuildByTag(updatedGuilds, guild.Tag)!.Members.RemoveAll(
-                candidate => candidate.SteamId == member.SteamId
-            );
-            Commit(updatedGuilds);
-            return $"Removed {GetCurrentPlayerName(member)} from [{guild.Tag}].";
-        }
-    }
-
-    private string TransferOwnership(
-        CCitadelPlayerController player,
-        string memberQuery
-    )
-    {
-        if (string.IsNullOrWhiteSpace(memberQuery))
-            return "Usage: /guild transfer <member name>.";
-
-        lock (syncRoot)
-        {
-            GuildData? guild = FindGuildForMember(guilds, player.PlayerSteamId);
-            if (guild == null)
-                return "You are not in a guild.";
-            if (guild.OwnerSteamId != player.PlayerSteamId)
-                return "Only the guild owner can transfer ownership.";
-
-            GuildMember? member = FindMember(guild, memberQuery, out string error);
-            if (member == null)
-                return error;
-            if (member.SteamId == player.PlayerSteamId)
-                return "You are already the guild owner.";
-
-            var updatedGuilds = CloneGuilds(guilds);
-            FindGuildByTag(updatedGuilds, guild.Tag)!.OwnerSteamId = member.SteamId;
-            Commit(updatedGuilds);
-            return $"Transferred [{guild.Tag}] ownership to {GetCurrentPlayerName(member)}.";
-        }
-    }
-
-    private string GetGuildInfo(
-        CCitadelPlayerController player,
-        string guildQuery,
-        bool membersOnly = false
-    )
-    {
-        lock (syncRoot)
-        {
-            GuildData? guild;
-            if (string.IsNullOrWhiteSpace(guildQuery))
-            {
-                guild = FindGuildForMember(guilds, player.PlayerSteamId);
-                if (guild == null)
-                    return "You are not in a guild. Use /guild lookup <tag>.";
-            }
-            else
-            {
-                guild = FindGuild(guilds, guildQuery, out string error);
-                if (guild == null)
-                    return error;
-            }
-
-            string[] members = guild.Members
-                .Select(member =>
-                    $"{(member.SteamId == guild.OwnerSteamId ? "[Owner] " : "")}" +
-                    playerTagManager.FormatPlayerNameWithSelectedTag(
-                        member.SteamId,
-                        GetCurrentPlayerName(member),
-                        guild.Tag
-                    ))
-                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            if (membersOnly)
-                return $"[{guild.Tag}] {guild.Name} members ({members.Length}): " +
-                    string.Join(", ", members);
-
-            string access = guild.IsOpen ? "Open" : "Invite-only";
-            int averageElo = (int)Math.Round(
-                guild.Members.Average(member =>
-                    (double)rankedElo.GetStats(
-                        member.SteamId.ToString(CultureInfo.InvariantCulture),
-                        member.LastKnownName
-                    ).Rating),
-                MidpointRounding.AwayFromZero
-            );
-            return $"[{guild.Tag}] {guild.Name}\n" +
-                $"Access: {access} | Members: {members.Length}\n" +
-                $"Guild ELO: {averageElo}\n" +
-                $"Members: {string.Join(", ", members)}";
-        }
-    }
-
-    private string GetInvites(CCitadelPlayerController player)
-    {
-        lock (syncRoot)
-        {
-            string[] invites = guilds
-                .Where(guild => guild.Invites.Any(invite =>
-                    invite.SteamId == player.PlayerSteamId))
-                .Select(guild => $"[{guild.Tag}] {guild.Name}")
-                .ToArray();
-            return invites.Length == 0
-                ? "You have no pending guild invites."
-                : "Pending guild invites: " + string.Join(", ", invites) +
-                    ". Use /guild accept <tag>.";
-        }
-    }
-
-    private string ListGuilds()
-    {
-        lock (syncRoot)
-        {
-            if (guilds.Count == 0)
-                return "There are no guilds yet.";
-
-            string[] entries = guilds
-                .OrderBy(guild => guild.Tag, StringComparer.OrdinalIgnoreCase)
-                .Select(guild =>
-                    $"[{guild.Tag}] {guild.Name} ({guild.Members.Count} members, " +
-                    $"{(guild.IsOpen ? "open" : "invite-only")})")
-                .ToArray();
-            return "Guilds: " + string.Join("; ", entries);
-        }
     }
 
     // One chat message per line: a single long message is shrunk until it is unreadable.
@@ -623,8 +153,7 @@ public sealed class GuildManager
         string.Join(
             "\n",
             "/guild create <tag> | join <tag|name> | leave | members | list",
-            "All guild commands: /guild help"
-        );
+            "All guild commands: /guild help");
 
     private static string GetHelp() =>
         string.Join(
@@ -632,13 +161,11 @@ public sealed class GuildManager
             "/guild create <tag> | join <tag|name> | leave | disband confirm | list",
             "invite <player> | invites | accept [tag|name] | decline [tag|name]",
             "lookup [tag|name] | members [tag|name] | mode <open|invite>",
-            "newtag <tag> | rename <name> | kick <member> | transfer <member>"
-        );
+            "newtag <tag> | rename <name> | kick <member> | transfer <member>");
 
     private static CCitadelPlayerController? FindOnlinePlayer(
         string query,
-        out string error
-    )
+        out string error)
     {
         var onlinePlayers = Players.GetAll()
             .Where(player => !player.IsBot && !string.IsNullOrWhiteSpace(player.PlayerName))
@@ -647,16 +174,14 @@ public sealed class GuildManager
             .Where(player => string.Equals(
                 player.PlayerName,
                 query,
-                StringComparison.OrdinalIgnoreCase
-            ))
+                StringComparison.OrdinalIgnoreCase))
             .ToArray();
         if (matches.Length == 0)
         {
             matches = onlinePlayers
                 .Where(player => player.PlayerName.StartsWith(
                     query,
-                    StringComparison.OrdinalIgnoreCase
-                ))
+                    StringComparison.OrdinalIgnoreCase))
                 .ToArray();
         }
 
@@ -675,15 +200,13 @@ public sealed class GuildManager
     private static GuildMember? FindMember(
         GuildData guild,
         string query,
-        out string error
-    )
+        out string error)
     {
         var onlinePlayerNames = Players.GetAll()
             .GroupBy(player => player.PlayerSteamId)
             .ToDictionary(
                 group => group.Key,
-                group => group.First().PlayerName
-            );
+                group => group.First().PlayerName);
         string CurrentName(GuildMember member) =>
             onlinePlayerNames.TryGetValue(member.SteamId, out var playerName)
                 ? playerName ?? member.LastKnownName
@@ -694,13 +217,11 @@ public sealed class GuildManager
                 string.Equals(
                     CurrentName(member),
                     query,
-                    StringComparison.OrdinalIgnoreCase
-                ) ||
+                    StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(
                     member.LastKnownName,
                     query,
-                    StringComparison.OrdinalIgnoreCase
-                ))
+                    StringComparison.OrdinalIgnoreCase))
             .ToArray();
         if (matches.Length == 0)
         {
@@ -708,12 +229,10 @@ public sealed class GuildManager
                 .Where(member =>
                     CurrentName(member).StartsWith(
                         query,
-                        StringComparison.OrdinalIgnoreCase
-                    ) ||
+                        StringComparison.OrdinalIgnoreCase) ||
                     member.LastKnownName.StartsWith(
                         query,
-                        StringComparison.OrdinalIgnoreCase
-                    ))
+                        StringComparison.OrdinalIgnoreCase))
                 .ToArray();
         }
 
@@ -737,16 +256,14 @@ public sealed class GuildManager
 
     private static GuildData? FindGuildForMember(
         IEnumerable<GuildData> source,
-        ulong steamId
-    ) =>
+        ulong steamId) =>
         source.FirstOrDefault(guild =>
             guild.Members.Any(member => member.SteamId == steamId));
 
     private static GuildData? FindGuild(
         IEnumerable<GuildData> source,
         string query,
-        out string error
-    )
+        out string error)
     {
         GuildData[] matches = source
             .Where(guild =>
@@ -776,22 +293,9 @@ public sealed class GuildManager
 
     private static GuildData? FindGuildByTag(
         IEnumerable<GuildData> source,
-        string tag
-    ) =>
+        string tag) =>
         source.FirstOrDefault(guild =>
             string.Equals(guild.Tag, tag, StringComparison.OrdinalIgnoreCase));
-
-    private static readonly string[] ReservedTags =
-    {
-        "OWNER",
-        "STAFF",
-        "ADMIN",
-        "MOD",
-        "DEV",
-        "YT",
-        "TTV",
-        "AIMLOCK"
-    };
 
     private static bool IsValidTag(string tag, int maxLength)
     {
@@ -804,71 +308,34 @@ public sealed class GuildManager
     private static string? GetGuildTagValidationError(string tag)
     {
         if (!IsValidTag(tag, 5))
+        {
             return "Guild tags must be 1-5 characters.";
+        }
+
         if (!tag.All(char.IsAsciiLetterOrDigit))
+        {
             return "Guild tags can only use letters A-Z and numbers.";
+        }
+
         if (
             ReservedTags.Contains(tag, StringComparer.OrdinalIgnoreCase) ||
-            PlayerTagManager.TryParseTag(tag, out _)
-        )
+            PlayerTagManager.TryParseTag(tag, out _))
+        {
             return $"The guild tag [{tag}] is reserved for built-in player tags.";
+        }
+
         return null;
     }
 
     private static void RemoveInvites(
         IEnumerable<GuildData> source,
-        ulong steamId
-    )
+        ulong steamId)
     {
         foreach (GuildData guild in source)
+        {
             guild.Invites.RemoveAll(invite => invite.SteamId == steamId);
-    }
-
-    private List<GuildData> CloneGuilds(IEnumerable<GuildData> source) =>
-        source.Select(guild => new GuildData
-        {
-            Name = guild.Name,
-            Tag = guild.Tag,
-            OwnerSteamId = guild.OwnerSteamId,
-            IsOpen = guild.IsOpen,
-            Members = guild.Members.Select(member => new GuildMember
-            {
-                SteamId = member.SteamId,
-                LastKnownName = member.LastKnownName
-            }).ToList(),
-            Invites = guild.Invites.Select(invite => new GuildInvite
-            {
-                SteamId = invite.SteamId,
-                LastKnownName = invite.LastKnownName
-            }).ToList()
-        }).ToList();
-
-    private void Commit(List<GuildData> updatedGuilds)
-    {
-        SaveGuilds(updatedGuilds);
-        guilds = updatedGuilds;
-        RebuildMemberIndex();
-    }
-
-    private void RebuildMemberIndex()
-    {
-        var index = new Dictionary<ulong, GuildData>();
-        foreach (GuildData guild in guilds)
-        {
-            foreach (GuildMember member in guild.Members)
-                index[member.SteamId] = guild;
         }
-
-        memberIndex = index;
     }
-
-    private List<GuildData> LoadGuilds() =>
-        JsonStore.Load(
-            dataFilePath,
-            () => new List<GuildData>(),
-            JsonOptions,
-            ValidateGuilds
-        );
 
     private static List<GuildData> ValidateGuilds(List<GuildData> loadedGuilds)
     {
@@ -878,13 +345,16 @@ public sealed class GuildManager
             .ToHashSet();
         int staleInvites = 0;
         foreach (GuildData guild in loadedGuilds)
+        {
             staleInvites += guild.Invites.RemoveAll(
-                invite => allMemberIds.Contains(invite.SteamId)
-            );
+                invite => allMemberIds.Contains(invite.SteamId));
+        }
+
         if (staleInvites > 0)
+        {
             Console.WriteLine(
-                $"[aimLOCK] Dropped {staleInvites} stale guild invite(s) for players already in a guild."
-            );
+                $"[aimLOCK] Dropped {staleInvites} stale guild invite(s) for players already in a guild.");
+        }
 
         var identifiers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var memberIds = new HashSet<ulong>();
@@ -898,29 +368,26 @@ public sealed class GuildManager
                     !string.Equals(
                         guild.Name,
                         guild.Tag,
-                        StringComparison.OrdinalIgnoreCase
-                    ) &&
-                    !identifiers.Add(guild.Name)
-                ) ||
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !identifiers.Add(guild.Name)) ||
                 guild.Members.Count == 0 ||
-                !guild.Members.Any(member => member.SteamId == guild.OwnerSteamId)
-            )
+                !guild.Members.Any(member => member.SteamId == guild.OwnerSteamId))
+            {
                 throw new InvalidDataException(
-                    $"Guild data contains an invalid guild: {guild.Name}"
-                );
+                        $"Guild data contains an invalid guild: {guild.Name}");
+            }
 
             foreach (GuildMember member in guild.Members)
             {
                 if (
                     member.SteamId == 0 ||
                     string.IsNullOrWhiteSpace(member.LastKnownName) ||
-                    !memberIds.Add(member.SteamId)
-                )
+                    !memberIds.Add(member.SteamId))
+                {
                     throw new InvalidDataException(
-                        $"Guild data contains an invalid or duplicate member in {guild.Name}."
-                    );
+                            $"Guild data contains an invalid or duplicate member in {guild.Name}.");
+                }
             }
-
         }
 
         foreach (GuildData guild in loadedGuilds)
@@ -932,19 +399,658 @@ public sealed class GuildManager
                     invite.SteamId == 0 ||
                     string.IsNullOrWhiteSpace(invite.LastKnownName) ||
                     !invitedIds.Add(invite.SteamId) ||
-                    memberIds.Contains(invite.SteamId)
-                )
+                    memberIds.Contains(invite.SteamId))
+                {
                     throw new InvalidDataException(
-                        $"Guild data contains an invalid invite in {guild.Name}."
-                    );
+                            $"Guild data contains an invalid invite in {guild.Name}.");
+                }
             }
         }
 
         return loadedGuilds;
     }
 
+    private string Create(CCitadelPlayerController player, string[] arguments)
+    {
+        if (arguments.Length == 0)
+        {
+            return "Usage: /guild create <tag>.";
+        }
+
+        string tag = string.Join(" ", arguments).Trim();
+        string? validationError = GetGuildTagValidationError(tag);
+        if (validationError != null)
+        {
+            return validationError;
+        }
+
+        lock (this.syncRoot)
+        {
+            if (FindGuildForMember(this.guilds, player.PlayerSteamId) != null)
+            {
+                return "You are already in a guild. Leave it before creating another.";
+            }
+
+            if (this.guilds.Any(guild =>
+                string.Equals(guild.Tag, tag, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(guild.Name, tag, StringComparison.OrdinalIgnoreCase)))
+            {
+                return $"The guild tag [{tag}] is already in use.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            updatedGuilds.Add(new GuildData
+            {
+                Name = tag,
+                Tag = tag,
+                OwnerSteamId = player.PlayerSteamId,
+                IsOpen = false,
+                Members = new List<GuildMember>
+                {
+                    new()
+                    {
+                        SteamId = player.PlayerSteamId,
+                        LastKnownName = player.PlayerName,
+                    },
+                },
+            });
+            this.Commit(updatedGuilds);
+        }
+
+        return $"Created [{tag}]. Access is invite-only; use /guild mode open to allow anyone to join.";
+    }
+
+    private string Join(CCitadelPlayerController player, string guildQuery)
+    {
+        if (string.IsNullOrWhiteSpace(guildQuery))
+        {
+            return "Usage: /guild join <tag>.";
+        }
+
+        lock (this.syncRoot)
+        {
+            if (FindGuildForMember(this.guilds, player.PlayerSteamId) != null)
+            {
+                return "You are already in a guild. Leave it before joining another.";
+            }
+
+            GuildData? guild = FindGuild(this.guilds, guildQuery, out string error);
+            if (guild == null)
+            {
+                return error;
+            }
+
+            if (!guild.IsOpen)
+            {
+                return $"[{guild.Tag}] is invite-only. Ask its owner for an invite, then use /guild accept.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            GuildData updatedGuild = FindGuildByTag(updatedGuilds, guild.Tag)!;
+            updatedGuild.Members.Add(new GuildMember
+            {
+                SteamId = player.PlayerSteamId,
+                LastKnownName = player.PlayerName,
+            });
+            RemoveInvites(updatedGuilds, player.PlayerSteamId);
+            this.Commit(updatedGuilds);
+            return $"You joined [{guild.Tag}].";
+        }
+    }
+
+    private string Invite(CCitadelPlayerController player, string playerQuery)
+    {
+        if (string.IsNullOrWhiteSpace(playerQuery))
+        {
+            return "Usage: /guild invite <online player name>.";
+        }
+
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId != player.PlayerSteamId)
+            {
+                return "Only the guild owner can invite players.";
+            }
+
+            CCitadelPlayerController? target = FindOnlinePlayer(playerQuery, out string error);
+            if (target == null)
+            {
+                return error;
+            }
+
+            if (FindGuildForMember(this.guilds, target.PlayerSteamId) != null)
+            {
+                return $"{target.PlayerName} is already in a guild.";
+            }
+
+            if (guild.Invites.Any(invite => invite.SteamId == target.PlayerSteamId))
+            {
+                return $"{target.PlayerName} already has a pending invite to [{guild.Tag}].";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            FindGuildByTag(updatedGuilds, guild.Tag)!.Invites.Add(new GuildInvite
+            {
+                SteamId = target.PlayerSteamId,
+                LastKnownName = target.PlayerName,
+            });
+            this.Commit(updatedGuilds);
+            return $"Invited {target.PlayerName} to [{guild.Tag}]. They can use /guild accept.";
+        }
+    }
+
+    private string AcceptInvite(
+        CCitadelPlayerController player,
+        string guildQuery)
+    {
+        lock (this.syncRoot)
+        {
+            if (FindGuildForMember(this.guilds, player.PlayerSteamId) != null)
+            {
+                return "You are already in a guild. Leave it before accepting another invite.";
+            }
+
+            GuildData[] invitedGuilds = this.guilds
+                .Where(guild => guild.Invites.Any(invite =>
+                    invite.SteamId == player.PlayerSteamId))
+                .ToArray();
+            if (!string.IsNullOrWhiteSpace(guildQuery))
+            {
+                GuildData? requestedGuild = FindGuild(
+                    invitedGuilds,
+                    guildQuery,
+                    out string error);
+                if (requestedGuild == null)
+                {
+                    return error;
+                }
+
+                invitedGuilds = new[] { requestedGuild };
+            }
+
+            if (invitedGuilds.Length == 0)
+            {
+                return "You have no pending guild invites.";
+            }
+
+            if (invitedGuilds.Length > 1)
+            {
+                string choices = string.Join(
+                    ", ",
+                    invitedGuilds.Select(guild => $"[{guild.Tag}]"));
+                return $"Choose an invite to accept: {choices}. Use /guild accept <tag>.";
+            }
+
+            GuildData guild = invitedGuilds[0];
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            GuildData updatedGuild = FindGuildByTag(updatedGuilds, guild.Tag)!;
+            updatedGuild.Members.Add(new GuildMember
+            {
+                SteamId = player.PlayerSteamId,
+                LastKnownName = player.PlayerName,
+            });
+            RemoveInvites(updatedGuilds, player.PlayerSteamId);
+            this.Commit(updatedGuilds);
+            return $"You joined [{guild.Tag}].";
+        }
+    }
+
+    private string DeclineInvite(
+        CCitadelPlayerController player,
+        string guildQuery)
+    {
+        lock (this.syncRoot)
+        {
+            GuildData[] invitedGuilds = this.guilds
+                .Where(guild => guild.Invites.Any(invite =>
+                    invite.SteamId == player.PlayerSteamId))
+                .ToArray();
+            if (!string.IsNullOrWhiteSpace(guildQuery))
+            {
+                GuildData? requestedGuild = FindGuild(
+                    invitedGuilds,
+                    guildQuery,
+                    out string error);
+                if (requestedGuild == null)
+                {
+                    return error;
+                }
+
+                invitedGuilds = new[] { requestedGuild };
+            }
+
+            if (invitedGuilds.Length == 0)
+            {
+                return "You have no pending guild invites.";
+            }
+
+            if (invitedGuilds.Length > 1)
+            {
+                return "You have multiple invites. Use /guild decline <tag>.";
+            }
+
+            GuildData guild = invitedGuilds[0];
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            FindGuildByTag(updatedGuilds, guild.Tag)!.Invites.RemoveAll(
+                invite => invite.SteamId == player.PlayerSteamId);
+            this.Commit(updatedGuilds);
+            return $"Declined the invite to [{guild.Tag}].";
+        }
+    }
+
+    private string Leave(CCitadelPlayerController player)
+    {
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId == player.PlayerSteamId)
+            {
+                return "Guild owners must transfer ownership or use /guild disband.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            FindGuildByTag(updatedGuilds, guild.Tag)!.Members.RemoveAll(
+                member => member.SteamId == player.PlayerSteamId);
+            this.Commit(updatedGuilds);
+            return $"You left [{guild.Tag}].";
+        }
+    }
+
+    private string Disband(CCitadelPlayerController player, string confirmation)
+    {
+        if (!string.Equals(confirmation, "confirm", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Disbanding is permanent. Run /guild disband confirm to confirm.";
+        }
+
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId != player.PlayerSteamId)
+            {
+                return "Only the guild owner can disband the guild.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            updatedGuilds.RemoveAll(candidate =>
+                string.Equals(candidate.Tag, guild.Tag, StringComparison.OrdinalIgnoreCase));
+            this.Commit(updatedGuilds);
+            return $"Disbanded [{guild.Tag}].";
+        }
+    }
+
+    private string SetAccessMode(
+        CCitadelPlayerController player,
+        string requestedMode)
+    {
+        bool isOpen;
+        if (string.Equals(requestedMode, "open", StringComparison.OrdinalIgnoreCase))
+        {
+            isOpen = true;
+        }
+        else if (
+            string.Equals(requestedMode, "invite", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(requestedMode, "invite-only", StringComparison.OrdinalIgnoreCase))
+        {
+            isOpen = false;
+        }
+        else
+        {
+            return "Usage: /guild mode <open|invite>.";
+        }
+
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId != player.PlayerSteamId)
+            {
+                return "Only the guild owner can change guild access.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            FindGuildByTag(updatedGuilds, guild.Tag)!.IsOpen = isOpen;
+            this.Commit(updatedGuilds);
+            return $"[{guild.Tag}] is now {(isOpen ? "open to joining" : "invite-only")}.";
+        }
+    }
+
+    private string RenameTag(
+        CCitadelPlayerController player,
+        string requestedTag)
+    {
+        string newTag = requestedTag.Trim();
+        string? validationError = GetGuildTagValidationError(newTag);
+        if (validationError != null)
+        {
+            return validationError;
+        }
+
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId != player.PlayerSteamId)
+            {
+                return "Only the guild owner can rename the guild tag.";
+            }
+
+            if (string.Equals(guild.Tag, newTag, StringComparison.Ordinal))
+            {
+                return $"Your guild tag is already [{newTag}].";
+            }
+
+            if (this.guilds.Any(candidate =>
+                candidate != guild &&
+                (
+                    string.Equals(candidate.Tag, newTag, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate.Name, newTag, StringComparison.OrdinalIgnoreCase))))
+            {
+                return $"The guild tag [{newTag}] is already in use.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            GuildData updatedGuild = FindGuildByTag(updatedGuilds, guild.Tag)!;
+            if (string.Equals(
+                updatedGuild.Name,
+                updatedGuild.Tag,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                updatedGuild.Name = newTag;
+            }
+
+            updatedGuild.Tag = newTag;
+            this.Commit(updatedGuilds);
+            return $"Your guild tag is now [{newTag}].";
+        }
+    }
+
+    private string RenameGuild(
+        CCitadelPlayerController player,
+        string requestedName)
+    {
+        string newName = requestedName.Trim();
+        int characterCount = StringInfo.ParseCombiningCharacters(newName).Length;
+        if (characterCount is < 2 or > MaxGuildNameCharacters)
+        {
+            return $"Guild names must be 2-{MaxGuildNameCharacters} characters.";
+        }
+
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId != player.PlayerSteamId)
+            {
+                return "Only the guild owner can rename the guild.";
+            }
+
+            if (string.Equals(guild.Name, newName, StringComparison.Ordinal))
+            {
+                return $"Your guild is already named {newName}.";
+            }
+
+            if (this.guilds.Any(candidate =>
+                candidate != guild &&
+                (
+                    string.Equals(candidate.Name, newName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(candidate.Tag, newName, StringComparison.OrdinalIgnoreCase))))
+            {
+                return $"A guild named {newName} is already in use.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            FindGuildByTag(updatedGuilds, guild.Tag)!.Name = newName;
+            this.Commit(updatedGuilds);
+            return $"Your guild is now named {newName}.";
+        }
+    }
+
+    private string Kick(CCitadelPlayerController player, string memberQuery)
+    {
+        if (string.IsNullOrWhiteSpace(memberQuery))
+        {
+            return "Usage: /guild kick <member name>.";
+        }
+
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId != player.PlayerSteamId)
+            {
+                return "Only the guild owner can remove members.";
+            }
+
+            GuildMember? member = FindMember(guild, memberQuery, out string error);
+            if (member == null)
+            {
+                return error;
+            }
+
+            if (member.SteamId == player.PlayerSteamId)
+            {
+                return "You cannot kick yourself. Use /guild transfer or /guild disband.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            FindGuildByTag(updatedGuilds, guild.Tag)!.Members.RemoveAll(
+                candidate => candidate.SteamId == member.SteamId);
+            this.Commit(updatedGuilds);
+            return $"Removed {GetCurrentPlayerName(member)} from [{guild.Tag}].";
+        }
+    }
+
+    private string TransferOwnership(
+        CCitadelPlayerController player,
+        string memberQuery)
+    {
+        if (string.IsNullOrWhiteSpace(memberQuery))
+        {
+            return "Usage: /guild transfer <member name>.";
+        }
+
+        lock (this.syncRoot)
+        {
+            GuildData? guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+            if (guild == null)
+            {
+                return "You are not in a guild.";
+            }
+
+            if (guild.OwnerSteamId != player.PlayerSteamId)
+            {
+                return "Only the guild owner can transfer ownership.";
+            }
+
+            GuildMember? member = FindMember(guild, memberQuery, out string error);
+            if (member == null)
+            {
+                return error;
+            }
+
+            if (member.SteamId == player.PlayerSteamId)
+            {
+                return "You are already the guild owner.";
+            }
+
+            var updatedGuilds = this.CloneGuilds(this.guilds);
+            FindGuildByTag(updatedGuilds, guild.Tag)!.OwnerSteamId = member.SteamId;
+            this.Commit(updatedGuilds);
+            return $"Transferred [{guild.Tag}] ownership to {GetCurrentPlayerName(member)}.";
+        }
+    }
+
+    private string GetGuildInfo(
+        CCitadelPlayerController player,
+        string guildQuery,
+        bool membersOnly = false)
+    {
+        lock (this.syncRoot)
+        {
+            GuildData? guild;
+            if (string.IsNullOrWhiteSpace(guildQuery))
+            {
+                guild = FindGuildForMember(this.guilds, player.PlayerSteamId);
+                if (guild == null)
+                {
+                    return "You are not in a guild. Use /guild lookup <tag>.";
+                }
+            }
+            else
+            {
+                guild = FindGuild(this.guilds, guildQuery, out string error);
+                if (guild == null)
+                {
+                    return error;
+                }
+            }
+
+            string[] members = guild.Members
+                .Select(member =>
+                    $"{(member.SteamId == guild.OwnerSteamId ? "[Owner] " : string.Empty)}" +
+                    this.playerTagManager.FormatPlayerNameWithSelectedTag(
+                        member.SteamId,
+                        GetCurrentPlayerName(member),
+                        guild.Tag))
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (membersOnly)
+            {
+                return $"[{guild.Tag}] {guild.Name} members ({members.Length}): " +
+                    string.Join(", ", members);
+            }
+
+            string access = guild.IsOpen ? "Open" : "Invite-only";
+            int averageElo = (int)Math.Round(
+                guild.Members.Average(member =>
+                    (double)this.rankedElo.GetStats(
+                        member.SteamId.ToString(CultureInfo.InvariantCulture),
+                        member.LastKnownName).Rating),
+                MidpointRounding.AwayFromZero);
+            return $"[{guild.Tag}] {guild.Name}\n" +
+                $"Access: {access} | Members: {members.Length}\n" +
+                $"Guild ELO: {averageElo}\n" +
+                $"Members: {string.Join(", ", members)}";
+        }
+    }
+
+    private string GetInvites(CCitadelPlayerController player)
+    {
+        lock (this.syncRoot)
+        {
+            string[] invites = this.guilds
+                .Where(guild => guild.Invites.Any(invite =>
+                    invite.SteamId == player.PlayerSteamId))
+                .Select(guild => $"[{guild.Tag}] {guild.Name}")
+                .ToArray();
+            return invites.Length == 0
+                ? "You have no pending guild invites."
+                : "Pending guild invites: " + string.Join(", ", invites) +
+                    ". Use /guild accept <tag>.";
+        }
+    }
+
+    private string ListGuilds()
+    {
+        lock (this.syncRoot)
+        {
+            if (this.guilds.Count == 0)
+            {
+                return "There are no guilds yet.";
+            }
+
+            string[] entries = this.guilds
+                .OrderBy(guild => guild.Tag, StringComparer.OrdinalIgnoreCase)
+                .Select(guild =>
+                    $"[{guild.Tag}] {guild.Name} ({guild.Members.Count} members, " +
+                    $"{(guild.IsOpen ? "open" : "invite-only")})")
+                .ToArray();
+            return "Guilds: " + string.Join("; ", entries);
+        }
+    }
+
+    private List<GuildData> CloneGuilds(IEnumerable<GuildData> source) =>
+        source.Select(guild => new GuildData
+        {
+            Name = guild.Name,
+            Tag = guild.Tag,
+            OwnerSteamId = guild.OwnerSteamId,
+            IsOpen = guild.IsOpen,
+            Members = guild.Members.Select(member => new GuildMember
+            {
+                SteamId = member.SteamId,
+                LastKnownName = member.LastKnownName,
+            }).ToList(),
+            Invites = guild.Invites.Select(invite => new GuildInvite
+            {
+                SteamId = invite.SteamId,
+                LastKnownName = invite.LastKnownName,
+            }).ToList(),
+        }).ToList();
+
+    private void Commit(List<GuildData> updatedGuilds)
+    {
+        this.SaveGuilds(updatedGuilds);
+        this.guilds = updatedGuilds;
+        this.RebuildMemberIndex();
+    }
+
+    private void RebuildMemberIndex()
+    {
+        var index = new Dictionary<ulong, GuildData>();
+        foreach (GuildData guild in this.guilds)
+        {
+            foreach (GuildMember member in guild.Members)
+            {
+                index[member.SteamId] = guild;
+            }
+        }
+
+        this.memberIndex = index;
+    }
+
+    private List<GuildData> LoadGuilds() =>
+        JsonStore.Load(
+            this.dataFilePath,
+            () => new List<GuildData>(),
+            JsonOptions,
+            ValidateGuilds);
+
     private void SaveGuilds(List<GuildData> updatedGuilds) =>
-        JsonStore.Save(dataFilePath, updatedGuilds, JsonOptions);
+        JsonStore.Save(this.dataFilePath, updatedGuilds, JsonOptions);
 
     public sealed class GuildData
     {
@@ -971,6 +1077,5 @@ public sealed class GuildManager
     public sealed record GuildLeaderboardEntry(
         string Tag,
         string Name,
-        ulong[] MemberSteamIds
-    );
+        ulong[] MemberSteamIds);
 }

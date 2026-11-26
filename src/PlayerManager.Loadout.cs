@@ -1,4 +1,6 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -6,22 +8,25 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
-
 using DeadworksManaged.Api;
 using DeadworksManaged.Game;
-
-namespace aimLOCK;
 
 public partial class PlayerManager
 {
     private const int FullyUpgradedAbilityBits = 0xF;
+
     // Max boons. The boon cap is 35; the level that grants it is 36 (the value the
     // Deadworks deathmatch example writes for a fully levelled hero).
     private const int MaxBoonLevel = 36;
     private const string BurstFireItemName = "upgrade_burst_fire";
     private const string BurstFireBuffName = "upgrade_burst_fire/modifier_burst_fire_buff";
+
     // Long enough to outlast any match; it is removed when the match ends.
     private const float PermanentModifierDuration = 36000f;
+
+    private const long LoadoutReapplyWindowMs = 1000;
+    private const int InitialAbilityCurrencyGrant = 30;
+
     // Haze abilities that are disabled: Sleep Dagger, Smoke Bomb (invisibility) and
     // Bullet Dance (ultimate). Fixation is the only ability left.
     private static readonly string[] DisabledHazeAbilities =
@@ -30,15 +35,15 @@ public partial class PlayerManager
         "ability_smoke_bomb",
         "ability_bullet_flurry",
     };
-    private const long LoadoutReapplyWindowMs = 1000;
     private readonly Dictionary<uint, long> loadoutAppliedAt = new();
-    private const int InitialAbilityCurrencyGrant = 30;
 
     private const float DefaultBulletLifestealPercent = 28f;
     private const float DefaultBlitzBulletsFireRatePercent = 22f;
 
     private const float DuelBlitzBulletsFireRatePercent =
         DefaultBlitzBulletsFireRatePercent / 2f;
+
+    private const float DuelHighVelocityRoundsBulletSpeedPercent = 100f;
 
     private static readonly string[] DuelItemStack =
     {
@@ -50,7 +55,6 @@ public partial class PlayerManager
         "upgrade_cardio_calibrator",
         "upgrade_burst_fire",
     };
-    private const float DuelHighVelocityRoundsBulletSpeedPercent = 100f;
     private static readonly string[] DuelHealthRegenerationProperties =
     {
         "BonusHealthRegen",
@@ -61,6 +65,7 @@ public partial class PlayerManager
         "TotalHealthRegen",
         "HealLifePercentOutOfCombat",
     };
+
     // Built once instead of with LINQ for every item on every respawn. AddModifier only
     // reads it.
     private static readonly Dictionary<string, float> ZeroHealthRegenValues =
@@ -79,6 +84,7 @@ public partial class PlayerManager
         "upgrade_burst_fire",
         "upgrade_health",
     };
+
     // Removed after the match unless the player owned them before it.
     private static readonly string[] GrantedDuelItems =
     {
@@ -96,67 +102,66 @@ public partial class PlayerManager
         foreach (string itemName in TrackedDuelItems)
         {
             if (pawn?.AbilityComponent?.FindAbilityByName(itemName) != null)
+            {
                 ownedItems.Add(itemName);
+            }
         }
 
         return ownedItems;
     }
 
-    private void RestorePawnAfterDuel(
-        CCitadelPlayerPawn? pawn,
-        HashSet<string> itemsBeforeMatch
-    )
-    {
-        if (pawn == null)
-            return;
-
-        RestoreDuelBulletLifesteal(
-            pawn,
-            itemsBeforeMatch.Contains("upgrade_vampire")
-        );
-        RestoreDuelBlitzBullets(
-            pawn,
-            itemsBeforeMatch.Contains("upgrade_blitz_bullets")
-        );
-        RestoreDuelHighVelocityRounds(
-            pawn,
-            itemsBeforeMatch.Contains("upgrade_high_velocity_mag")
-        );
-        foreach (string itemName in GrantedDuelItems)
-        {
-            RemoveDuelItemIfGranted(
-                pawn,
-                itemName,
-                itemsBeforeMatch.Contains(itemName)
-            );
-        }
-        RestoreDuelItemHealthRegen(
-            pawn,
-            "upgrade_health",
-            itemsBeforeMatch.Contains("upgrade_health")
-        );
-
-        ClampHealthToMax(pawn);
-        pawn.RemoveModifier("modifier_speed_boost");
-        RemovePermanentBurstFire(pawn);
-    }
-
     public void RestoreDuelBulletLifesteal(
         CCitadelPlayerPawn pawn,
-        bool hadItemBeforeMatch
-    )
+        bool hadItemBeforeMatch)
     {
         pawn.RemoveModifier("upgrade_vampire/modifier_intrinsic_base");
         if (!hadItemBeforeMatch)
+        {
             return;
+        }
 
         pawn.AddModifier(
             "upgrade_vampire/modifier_intrinsic_base",
             abilityValues: new()
             {
                 ["BulletLifestealPercent"] = DefaultBulletLifestealPercent,
-            }
-        );
+            });
+    }
+
+    private void RestorePawnAfterDuel(
+        CCitadelPlayerPawn? pawn,
+        HashSet<string> itemsBeforeMatch)
+    {
+        if (pawn == null)
+        {
+            return;
+        }
+
+        RestoreDuelBulletLifesteal(
+            pawn,
+            itemsBeforeMatch.Contains("upgrade_vampire"));
+        RestoreDuelBlitzBullets(
+            pawn,
+            itemsBeforeMatch.Contains("upgrade_blitz_bullets"));
+        RestoreDuelHighVelocityRounds(
+            pawn,
+            itemsBeforeMatch.Contains("upgrade_high_velocity_mag"));
+        foreach (string itemName in GrantedDuelItems)
+        {
+            RemoveDuelItemIfGranted(
+                pawn,
+                itemName,
+                itemsBeforeMatch.Contains(itemName));
+        }
+
+        RestoreDuelItemHealthRegen(
+            pawn,
+            "upgrade_health",
+            itemsBeforeMatch.Contains("upgrade_health"));
+
+        ClampHealthToMax(pawn);
+        pawn.RemoveModifier("modifier_speed_boost");
+        RemovePermanentBurstFire(pawn);
     }
 
     // Swift Striker at its normal value (20% fire rate) in duels: a changed value only
@@ -166,8 +171,7 @@ public partial class PlayerManager
     {
         if (
             pawn.AbilityComponent?.FindAbilityByName("upgrade_blitz_bullets")
-            == null
-        )
+            == null)
         {
             pawn.AddItem("upgrade_blitz_bullets");
         }
@@ -175,18 +179,18 @@ public partial class PlayerManager
 
     public void RestoreDuelBlitzBullets(
         CCitadelPlayerPawn pawn,
-        bool hadItemBeforeMatch
-    )
+        bool hadItemBeforeMatch)
     {
         if (!hadItemBeforeMatch)
+        {
             pawn.RemoveItem("upgrade_blitz_bullets");
+        }
     }
 
     public void RemoveDuelItemIfGranted(
         CCitadelPlayerPawn pawn,
         string itemName,
-        bool hadItemBeforeMatch
-    )
+        bool hadItemBeforeMatch)
     {
         if (!hadItemBeforeMatch)
         {
@@ -199,12 +203,30 @@ public partial class PlayerManager
         foreach (string itemName in DuelItemStack)
         {
             if (pawn.AbilityComponent?.FindAbilityByName(itemName) == null)
+            {
                 pawn.AddItem(itemName);
+            }
         }
 
         ApplyDuelHighVelocityRounds(pawn);
-        ApplyDuelBlitzBullets(pawn);
-        ApplyPermanentBurstFire(pawn);
+        this.ApplyDuelBlitzBullets(pawn);
+        this.ApplyPermanentBurstFire(pawn);
+    }
+
+    public void RestoreDuelHighVelocityRounds(
+        CCitadelPlayerPawn pawn,
+        bool hadItemBeforeMatch)
+    {
+        const string itemName = "upgrade_high_velocity_mag";
+        pawn.RemoveModifier($"{itemName}/modifier_intrinsic_base");
+        if (hadItemBeforeMatch)
+        {
+            pawn.AddModifier($"{itemName}/modifier_intrinsic_base");
+        }
+        else
+        {
+            pawn.RemoveItem(itemName);
+        }
     }
 
     private static void ApplyDuelHighVelocityRounds(CCitadelPlayerPawn pawn)
@@ -214,8 +236,7 @@ public partial class PlayerManager
         if (pawn.AbilityComponent?.FindAbilityByName(itemName) == null)
         {
             Console.WriteLine(
-                "[aimLOCK] Cannot set duel bullet speed; High-Velocity Mag is missing."
-            );
+                "[aimLOCK] Cannot set duel bullet speed; High-Velocity Mag is missing.");
             return;
         }
 
@@ -225,21 +246,7 @@ public partial class PlayerManager
             abilityValues: new()
             {
                 ["BonusBulletSpeedPercent"] = DuelHighVelocityRoundsBulletSpeedPercent,
-            }
-        );
-    }
-
-    public void RestoreDuelHighVelocityRounds(
-        CCitadelPlayerPawn pawn,
-        bool hadItemBeforeMatch
-    )
-    {
-        const string itemName = "upgrade_high_velocity_mag";
-        pawn.RemoveModifier($"{itemName}/modifier_intrinsic_base");
-        if (hadItemBeforeMatch)
-            pawn.AddModifier($"{itemName}/modifier_intrinsic_base");
-        else
-            pawn.RemoveItem(itemName);
+            });
     }
 
     /// <summary>
@@ -251,7 +258,9 @@ public partial class PlayerManager
     {
         var burstFire = pawn.AbilityComponent?.FindAbilityByName(BurstFireItemName);
         if (burstFire == null)
+        {
             return;
+        }
 
         for (int i = 0; i < 4 && pawn.RemoveModifier(BurstFireBuffName); i++)
         {
@@ -269,23 +278,25 @@ public partial class PlayerManager
         }
     }
 
+    public void ApplyDuelMatchModifiers(CCitadelPlayerPawn pawn)
+    {
+        this.ApplyHazeLoadout(pawn);
+
+        // Not skipped by the loadout's once-per-burst check; does nothing at max level.
+        ApplyMaxBoons(pawn);
+    }
+
     private static void RestoreDuelItemHealthRegen(
         CCitadelPlayerPawn pawn,
         string itemName,
-        bool hadItemBeforeMatch
-    )
+        bool hadItemBeforeMatch)
     {
         string modifierName = $"{itemName}/modifier_intrinsic_base";
         pawn.RemoveModifier(modifierName);
         if (hadItemBeforeMatch)
+        {
             pawn.AddModifier(modifierName);
-    }
-
-    public void ApplyDuelMatchModifiers(CCitadelPlayerPawn pawn)
-    {
-        ApplyHazeLoadout(pawn);
-        // Not skipped by the loadout's once-per-burst check; does nothing at max level.
-        ApplyMaxBoons(pawn);
+        }
     }
 
     /// <summary>
@@ -295,36 +306,42 @@ public partial class PlayerManager
     public void ApplyHazeLoadout(CCitadelPlayerPawn pawn, bool force = false)
     {
         if (!pawn.IsValid)
+        {
             return;
+        }
 
         // Several events ask for the loadout around the same moment (hero initialized,
         // respawn, spawn completed, match start). Apply it once per pawn per burst; the
         // hero-initialized hook passes force because abilities were just rebuilt.
         uint pawnHandle = pawn.EntityHandle;
         long now = Environment.TickCount64;
-        if (loadoutAppliedAt.Count > 256)
-            loadoutAppliedAt.Clear();
+        if (this.loadoutAppliedAt.Count > 256)
+        {
+            this.loadoutAppliedAt.Clear();
+        }
+
         if (
             !force &&
-            loadoutAppliedAt.TryGetValue(pawnHandle, out long appliedAt) &&
-            now - appliedAt < LoadoutReapplyWindowMs
-        )
+            this.loadoutAppliedAt.TryGetValue(pawnHandle, out long appliedAt) &&
+            now - appliedAt < LoadoutReapplyWindowMs)
+        {
             return;
+        }
 
-        loadoutAppliedAt[pawnHandle] = now;
+        this.loadoutAppliedAt[pawnHandle] = now;
 
         // The practice bot never casts abilities (its inputs are only movement and
         // shooting), but it gets the same max boons as players so its health matches.
         if (pawn.Controller is { IsBot: true })
         {
             ApplyMaxBoons(pawn);
-            ApplyFixation(pawn);
+            this.ApplyFixation(pawn);
             return;
         }
 
         ApplyMaxBoons(pawn);
         RemoveDisabledAbilities(pawn);
-        ApplyFixation(pawn);
+        this.ApplyFixation(pawn);
     }
 
     /// <summary>
@@ -335,15 +352,16 @@ public partial class PlayerManager
     private static void ApplyMaxBoons(CCitadelPlayerPawn pawn)
     {
         if (pawn.Level >= MaxBoonLevel)
+        {
             return;
+        }
 
         pawn.Level = MaxBoonLevel;
         pawn.ModifyCurrency(
             ECurrencyType.EGold,
             0,
             ECurrencySource.ECheats,
-            silent: true
-        );
+            silent: true);
     }
 
     private static void RemoveDisabledAbilities(CCitadelPlayerPawn pawn)
@@ -351,22 +369,24 @@ public partial class PlayerManager
         foreach (string abilityName in DisabledHazeAbilities)
         {
             if (pawn.AbilityComponent?.FindAbilityByName(abilityName) != null)
+            {
                 pawn.RemoveAbility(abilityName);
+            }
         }
     }
 
     private void GrantInitialAbilityCurrencies(
         CCitadelPlayerController controller,
-        CCitadelPlayerPawn pawn
-    )
+        CCitadelPlayerPawn pawn)
     {
         uint controllerHandle = controller.EntityHandle;
         if (
             !controller.IsValid ||
             !pawn.IsValid ||
-            initialAbilityCurrenciesGranted.Contains(controllerHandle)
-        )
+            this.initialAbilityCurrenciesGranted.Contains(controllerHandle))
+        {
             return;
+        }
 
         int abilityPoints = pawn.GetCurrency(ECurrencyType.EAbilityPoints);
         int abilityUnlocks = pawn.GetCurrency(ECurrencyType.EAbilityUnlocks);
@@ -374,14 +394,12 @@ public partial class PlayerManager
             ECurrencyType.EAbilityPoints,
             abilityPoints > int.MaxValue - InitialAbilityCurrencyGrant
                 ? int.MaxValue
-                : abilityPoints + InitialAbilityCurrencyGrant
-        );
+                : abilityPoints + InitialAbilityCurrencyGrant);
         pawn.SetCurrency(
             ECurrencyType.EAbilityUnlocks,
             abilityUnlocks > int.MaxValue - InitialAbilityCurrencyGrant
                 ? int.MaxValue
-                : abilityUnlocks + InitialAbilityCurrencyGrant
-        );
-        initialAbilityCurrenciesGranted.Add(controllerHandle);
+                : abilityUnlocks + InitialAbilityCurrencyGrant);
+        this.initialAbilityCurrenciesGranted.Add(controllerHandle);
     }
 }

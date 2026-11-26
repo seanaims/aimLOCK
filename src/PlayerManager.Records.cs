@@ -1,4 +1,6 @@
-﻿using System;
+﻿namespace AimLOCK;
+
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -6,19 +8,17 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
-
 using DeadworksManaged.Api;
 using DeadworksManaged.Game;
 
-namespace aimLOCK;
-
 public partial class PlayerManager
 {
+    public const string RecordsFileName = "records.json";
+
     private static readonly JsonSerializerOptions PlayerRecordJsonOptions = new()
     {
-        WriteIndented = true
+        WriteIndented = true,
     };
-    public const string RecordsFileName = "records.json";
     private static readonly string RecordsFilePath = JsonStore.PathFor(RecordsFileName);
 
     private readonly Dictionary<string, TimeZoneInfo> resolvedTimeZones =
@@ -28,15 +28,15 @@ public partial class PlayerManager
     {
         ulong steamId = player.PlayerSteamId;
 
-        if (!server.PlayerRecords.TryGetValue(steamId, out var record))
+        if (!this.server.PlayerRecords.TryGetValue(steamId, out var record))
         {
             record = new PlayerRecord
             {
                 SteamId = steamId,
-                LastKnownName = player.PlayerName
+                LastKnownName = player.PlayerName,
             };
 
-            server.PlayerRecords[steamId] = record;
+            this.server.PlayerRecords[steamId] = record;
         }
 
         record.LastKnownName = player.PlayerName;
@@ -45,44 +45,49 @@ public partial class PlayerManager
 
     public bool IsPingBasedMatchmakingEnabled(CCitadelPlayerController player)
     {
-        return !server.PlayerRecords.TryGetValue(
+        return !this.server.PlayerRecords.TryGetValue(
                 player.PlayerSteamId,
-                out var record
-            )
+                out var record)
             || record.PingBasedMatchmakingEnabled;
     }
 
     public void SetPingBasedMatchmakingEnabled(
         CCitadelPlayerController player,
-        bool enabled
-    )
+        bool enabled)
     {
         ulong steamId = player.PlayerSteamId;
         if (steamId == 0 || steamId == ulong.MaxValue)
+        {
             throw new ArgumentOutOfRangeException(nameof(player));
+        }
 
-        bool hadRecord = server.PlayerRecords.TryGetValue(
+        bool hadRecord = this.server.PlayerRecords.TryGetValue(
             steamId,
-            out var record
-        );
+            out var record);
         if (!hadRecord && enabled)
+        {
             return;
+        }
 
         record ??= new PlayerRecord
         {
             SteamId = steamId,
-            LastKnownName = player.PlayerName
+            LastKnownName = player.PlayerName,
         };
         bool previousValue = record.PingBasedMatchmakingEnabled;
         if (hadRecord && previousValue == enabled)
+        {
             return;
+        }
 
         record.LastKnownName = player.PlayerName;
         record.PingBasedMatchmakingEnabled = enabled;
-        server.PlayerRecords[steamId] = record;
+        this.server.PlayerRecords[steamId] = record;
 
-        if (SaveRecords())
+        if (this.SaveRecords())
+        {
             return;
+        }
 
         if (hadRecord)
         {
@@ -90,48 +95,50 @@ public partial class PlayerManager
         }
         else
         {
-            server.PlayerRecords.Remove(steamId);
+            this.server.PlayerRecords.Remove(steamId);
         }
 
         throw new IOException(
-            "Could not save your ping-based matchmaking setting."
-        );
+            "Could not save your ping-based matchmaking setting.");
     }
 
     /// <summary>The player's saved /handicap lifesteal percent, or null when off.</summary>
     public float? GetHandicapLifestealPercent(CCitadelPlayerController player)
     {
         if (
-            !server.PlayerRecords.TryGetValue(player.PlayerSteamId, out var record) ||
-            !record.HandicapEnabled
-        )
+            !this.server.PlayerRecords.TryGetValue(player.PlayerSteamId, out var record) ||
+            !record.HandicapEnabled)
+        {
             return null;
+        }
 
         return record.HandicapLifestealPercent
-            ?? DuelLifestealPercent - LegacyHandicapLifestealReduction;
+            ?? this.DuelLifestealPercent - LegacyHandicapLifestealReduction;
     }
 
     /// <summary>Saves the player's /handicap lifesteal percent; null turns it off.</summary>
     public void SetHandicapLifestealPercent(
         CCitadelPlayerController player,
-        float? percent
-    )
+        float? percent)
     {
         ulong steamId = player.PlayerSteamId;
         if (steamId == 0 || steamId == ulong.MaxValue)
+        {
             throw new ArgumentOutOfRangeException(nameof(player));
+        }
 
-        bool hadRecord = server.PlayerRecords.TryGetValue(
+        bool hadRecord = this.server.PlayerRecords.TryGetValue(
             steamId,
-            out var record
-        );
+            out var record);
         if (!hadRecord && percent == null)
+        {
             return;
+        }
 
         record ??= new PlayerRecord
         {
             SteamId = steamId,
-            LastKnownName = player.PlayerName
+            LastKnownName = player.PlayerName,
         };
         bool previousEnabled = record.HandicapEnabled;
         float? previousPercent = record.HandicapLifestealPercent;
@@ -140,9 +147,9 @@ public partial class PlayerManager
         record.LastKnownName = player.PlayerName;
         record.HandicapEnabled = percent != null;
         record.HandicapLifestealPercent = percent;
-        server.PlayerRecords[steamId] = record;
+        this.server.PlayerRecords[steamId] = record;
 
-        if (!SaveRecords())
+        if (!this.SaveRecords())
         {
             if (hadRecord)
             {
@@ -151,7 +158,9 @@ public partial class PlayerManager
                 record.LastKnownName = previousName;
             }
             else
-                server.PlayerRecords.Remove(steamId);
+            {
+                this.server.PlayerRecords.Remove(steamId);
+            }
 
             throw new IOException("Could not save your handicap setting.");
         }
@@ -160,18 +169,22 @@ public partial class PlayerManager
     public void ResetUnrankedRecord(ulong steamId, string playerName)
     {
         if (steamId == 0 || steamId == ulong.MaxValue)
+        {
             throw new ArgumentOutOfRangeException(nameof(steamId));
-        if (string.IsNullOrWhiteSpace(playerName))
-            throw new ArgumentException("A player name is required.", nameof(playerName));
+        }
 
-        bool hadRecord = server.PlayerRecords.TryGetValue(
+        if (string.IsNullOrWhiteSpace(playerName))
+        {
+            throw new ArgumentException("A player name is required.", nameof(playerName));
+        }
+
+        bool hadRecord = this.server.PlayerRecords.TryGetValue(
             steamId,
-            out var record
-        );
+            out var record);
         record ??= new PlayerRecord
         {
             SteamId = steamId,
-            LastKnownName = playerName
+            LastKnownName = playerName,
         };
 
         string previousName = record.LastKnownName;
@@ -180,10 +193,12 @@ public partial class PlayerManager
         record.LastKnownName = playerName;
         record.Wins = 0;
         record.Losses = 0;
-        server.PlayerRecords[steamId] = record;
+        this.server.PlayerRecords[steamId] = record;
 
-        if (SaveRecords())
+        if (this.SaveRecords())
+        {
             return;
+        }
 
         if (hadRecord)
         {
@@ -193,7 +208,7 @@ public partial class PlayerManager
         }
         else
         {
-            server.PlayerRecords.Remove(steamId);
+            this.server.PlayerRecords.Remove(steamId);
         }
 
         throw new IOException("Could not save the unranked record reset.");
@@ -206,9 +221,8 @@ public partial class PlayerManager
     public string GetTimeZoneId(ulong steamId)
     {
         if (
-            !server.PlayerRecords.TryGetValue(steamId, out var record) ||
-            string.IsNullOrWhiteSpace(record.TimeZoneId)
-        )
+            !this.server.PlayerRecords.TryGetValue(steamId, out var record) ||
+            string.IsNullOrWhiteSpace(record.TimeZoneId))
         {
             return "UTC";
         }
@@ -218,12 +232,14 @@ public partial class PlayerManager
 
     public TimeZoneInfo GetTimeZone(ulong steamId)
     {
-        string timeZoneId = GetTimeZoneId(steamId);
-        if (resolvedTimeZones.TryGetValue(timeZoneId, out var timeZone))
+        string timeZoneId = this.GetTimeZoneId(steamId);
+        if (this.resolvedTimeZones.TryGetValue(timeZoneId, out var timeZone))
+        {
             return timeZone;
+        }
 
         timeZone = ResolveIanaTimeZone(timeZoneId);
-        resolvedTimeZones.Add(timeZoneId, timeZone);
+        this.resolvedTimeZones.Add(timeZoneId, timeZone);
         return timeZone;
     }
 
@@ -231,52 +247,101 @@ public partial class PlayerManager
     {
         _ = ResolveIanaTimeZone(ianaTimeZoneId);
 
-        var record = GetRecord(player);
+        var record = this.GetRecord(player);
         string previousTimeZoneId = record.TimeZoneId;
         record.TimeZoneId = ianaTimeZoneId;
 
-        if (!SaveRecords())
+        if (!this.SaveRecords())
         {
             record.TimeZoneId = previousTimeZoneId;
             throw new IOException("Could not save your timezone setting.");
         }
     }
 
+    public void StatsCommand(Caller caller, string? targetName = null)
+    {
+        if (string.IsNullOrWhiteSpace(targetName))
+        {
+            var player = caller.Player;
+
+            if (player == null)
+            {
+                return;
+            }
+
+            var record = GetRecord(player);
+            int games = record.Wins + record.Losses;
+            float winRate = games > 0
+                ? (float)record.Wins / games * 100f
+                : 0f;
+
+            caller.Reply(
+                $"[{record.LastKnownName}] " +
+                $"Unranked | Record: {record.Wins}-{record.Losses} | " +
+                $"WR: {winRate:F1}%");
+            return;
+        }
+
+        // Same lookup as the record admin commands: current names of online players,
+        // saved names, unique prefixes or a SteamID64, and never a guess between two
+        // players who share a name.
+        if (!this.server.TryResolvePlayerSteamId(
+            targetName,
+            out ulong targetSteamId,
+            out string resolvedName,
+            out string error))
+        {
+            caller.Reply(error);
+            return;
+        }
+
+        this.server.PlayerRecords.TryGetValue(targetSteamId, out var recordFound);
+        int targetWins = recordFound?.Wins ?? 0;
+        int targetLosses = recordFound?.Losses ?? 0;
+        int totalGames = targetWins + targetLosses;
+        float targetWinRate = totalGames > 0
+            ? (float)targetWins / totalGames * 100f
+            : 0f;
+
+        caller.Reply(
+            $"[{resolvedName}] " +
+            $"Unranked | Record: {targetWins}-{targetLosses} | " +
+            $"WR: {targetWinRate:F1}%");
+    }
+
     private static TimeZoneInfo ResolveIanaTimeZone(string ianaTimeZoneId)
     {
         string normalizedId = ianaTimeZoneId.Trim();
         if (string.Equals(normalizedId, "UTC", StringComparison.OrdinalIgnoreCase))
+        {
             return TimeZoneInfo.Utc;
+        }
 
         if (string.IsNullOrWhiteSpace(normalizedId))
+        {
             throw new TimeZoneNotFoundException("An IANA timezone ID is required.");
+        }
 
         if (
             !TimeZoneInfo.TryConvertIanaIdToWindowsId(
                 normalizedId,
-                out string? windowsTimeZoneId
-            )
-        )
+                out string? windowsTimeZoneId))
         {
             string canonicalId = NormalizeIanaTimeZoneId(normalizedId);
             if (
                 !TimeZoneInfo.TryConvertIanaIdToWindowsId(
                     canonicalId,
-                    out windowsTimeZoneId
-                )
-            )
+                    out windowsTimeZoneId))
             {
                 throw new TimeZoneNotFoundException(
-                    $"Unknown IANA timezone: {ianaTimeZoneId}"
-                );
+                    $"Unknown IANA timezone: {ianaTimeZoneId}");
             }
         }
 
         if (string.IsNullOrWhiteSpace(windowsTimeZoneId))
         {
             throw new TimeZoneNotFoundException(
-                $"Unknown IANA timezone: {ianaTimeZoneId}"
-            );
+                $"Unknown IANA timezone: {ianaTimeZoneId}");
         }
 
         return TimeZoneInfo.FindSystemTimeZoneById(windowsTimeZoneId);
@@ -294,7 +359,10 @@ public partial class PlayerManager
                 if (char.IsLetter(chars[j]))
                 {
                     if (capitalizeNext)
+                    {
                         chars[j] = char.ToUpperInvariant(chars[j]);
+                    }
+
                     capitalizeNext = false;
                 }
                 else
@@ -331,73 +399,18 @@ public partial class PlayerManager
                 "rok" => "ROK",
                 _ when normalizedSegment.StartsWith(
                     "Gmt+",
-                    StringComparison.OrdinalIgnoreCase
-                ) || normalizedSegment.StartsWith(
+                    StringComparison.OrdinalIgnoreCase) || normalizedSegment.StartsWith(
                     "Gmt-",
-                    StringComparison.OrdinalIgnoreCase
-                ) => "GMT" + normalizedSegment.Substring(3),
+                    StringComparison.OrdinalIgnoreCase) => "GMT" + normalizedSegment.Substring(3),
                 _ when normalizedSegment.StartsWith(
                     "Gmt",
-                    StringComparison.OrdinalIgnoreCase
-                ) && normalizedSegment.Length > 3 && char.IsDigit(normalizedSegment[3])
+                    StringComparison.OrdinalIgnoreCase) && normalizedSegment.Length > 3 && char.IsDigit(normalizedSegment[3])
                     => "GMT" + normalizedSegment.Substring(3),
-                _ => normalizedSegment
+                _ => normalizedSegment,
             };
         }
 
         return string.Join("/", segments);
-    }
-
-    public void StatsCommand(Caller caller, string? targetName = null)
-    {
-        if (string.IsNullOrWhiteSpace(targetName))
-        {
-            var player = caller.Player;
-
-            if (player == null)
-                return;
-
-            var record = GetRecord(player);
-            int games = record.Wins + record.Losses;
-            float winRate = games > 0
-                ? (float)record.Wins / games * 100f
-                : 0f;
-
-            caller.Reply(
-                $"[{record.LastKnownName}] " +
-                $"Unranked | Record: {record.Wins}-{record.Losses} | " +
-                $"WR: {winRate:F1}%"
-            );
-            return;
-        }
-
-        // Same lookup as the record admin commands: current names of online players,
-        // saved names, unique prefixes or a SteamID64, and never a guess between two
-        // players who share a name.
-        if (!server.TryResolvePlayerSteamId(
-            targetName,
-            out ulong targetSteamId,
-            out string resolvedName,
-            out string error
-        ))
-        {
-            caller.Reply(error);
-            return;
-        }
-
-        server.PlayerRecords.TryGetValue(targetSteamId, out var recordFound);
-        int targetWins = recordFound?.Wins ?? 0;
-        int targetLosses = recordFound?.Losses ?? 0;
-        int totalGames = targetWins + targetLosses;
-        float targetWinRate = totalGames > 0
-            ? (float)targetWins / totalGames * 100f
-            : 0f;
-
-        caller.Reply(
-            $"[{resolvedName}] " +
-            $"Unranked | Record: {targetWins}-{targetLosses} | " +
-            $"WR: {targetWinRate:F1}%"
-        );
     }
 
     public void LoadRecords()
@@ -407,14 +420,15 @@ public partial class PlayerManager
             var loaded = JsonStore.Load(
                 RecordsFilePath,
                 () => new Dictionary<ulong, PlayerRecord>(),
-                PlayerRecordJsonOptions
-            );
+                PlayerRecordJsonOptions);
 
-            server.PlayerRecords.Clear();
+            this.server.PlayerRecords.Clear();
             foreach (var pair in loaded)
-                server.PlayerRecords[pair.Key] = pair.Value;
+            {
+                this.server.PlayerRecords[pair.Key] = pair.Value;
+            }
 
-            Console.WriteLine($"Loaded {server.PlayerRecords.Count} player records.");
+            Console.WriteLine($"Loaded {this.server.PlayerRecords.Count} player records.");
         }
         catch (Exception ex)
         {
@@ -428,9 +442,8 @@ public partial class PlayerManager
         {
             JsonStore.Save(
                 RecordsFilePath,
-                server.PlayerRecords,
-                PlayerRecordJsonOptions
-            );
+                this.server.PlayerRecords,
+                PlayerRecordJsonOptions);
             return true;
         }
         catch (Exception ex)

@@ -1,10 +1,9 @@
+namespace AimLOCK;
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-
 using DeadworksManaged.Api;
-
-namespace aimLOCK;
 
 public sealed class PingManager
 {
@@ -14,17 +13,17 @@ public sealed class PingManager
     private const int PollIntervalSeconds = 5;
     private const int IdlePollIntervalSeconds = 10;
     private const int PollTimeoutSeconds = 2;
-    private static readonly TimeSpan ReadingLifetime = TimeSpan.FromSeconds(15);
     private const int SampleCount = 3;
+    private static readonly TimeSpan ReadingLifetime = TimeSpan.FromSeconds(15);
 
     private readonly aimLOCK server;
-    private readonly Dictionary<ulong, Queue<int>> _samples = new();
-    private readonly Dictionary<ulong, PingSnapshot> _latestReadings = new();
-    private bool _started;
-    private bool _pollInProgress;
-    private bool _warnedAboutMissingRows;
-    private int _pollGeneration;
-    private int _scheduledPollToken;
+    private readonly Dictionary<ulong, Queue<int>> samples = new();
+    private readonly Dictionary<ulong, PingSnapshot> latestReadings = new();
+    private bool started;
+    private bool pollInProgress;
+    private bool warnedAboutMissingRows;
+    private int pollGeneration;
+    private int scheduledPollToken;
 
     public PingManager(aimLOCK server)
     {
@@ -33,89 +32,135 @@ public sealed class PingManager
 
     public void Start()
     {
-        if (_started)
+        if (this.started)
+        {
             return;
+        }
 
-        _started = true;
-        server.ScheduleOnce(2.Seconds(), Poll);
+        this.started = true;
+        this.server.ScheduleOnce(2.Seconds(), Poll);
     }
 
     public void Refresh()
     {
-        if (_started && !_pollInProgress)
-            Poll();
+        if (this.started && !this.pollInProgress)
+        {
+            this.Poll();
+        }
     }
 
     public bool TryGetPing(CCitadelPlayerController player, out int pingMs)
     {
         pingMs = 0;
         if (player.IsBot || player.PlayerSteamId == 0)
+        {
             return false;
+        }
 
-        if (!_latestReadings.TryGetValue(player.PlayerSteamId, out var reading))
+        if (!this.latestReadings.TryGetValue(player.PlayerSteamId, out var reading))
+        {
             return false;
+        }
 
         if (DateTimeOffset.UtcNow - reading.CapturedAt > ReadingLifetime)
+        {
             return false;
+        }
 
         pingMs = reading.PingMs;
         return true;
     }
 
+    private static int Median(Queue<int> values)
+    {
+        using var enumerator = values.GetEnumerator();
+        enumerator.MoveNext();
+        int first = enumerator.Current;
+        if (!enumerator.MoveNext())
+        {
+            return first;
+        }
+
+        int second = enumerator.Current;
+        if (!enumerator.MoveNext())
+        {
+            return (int)Math.Round((first + second) / 2d);
+        }
+
+        int third = enumerator.Current;
+        if (first > second)
+        {
+            (first, second) = (second, first);
+        }
+
+        if (second > third)
+        {
+            (second, third) = (third, second);
+        }
+
+        if (first > second)
+        {
+            (first, second) = (second, first);
+        }
+
+        return second;
+    }
+
     private void Poll()
     {
-        if (!_started)
-            return;
-
-        if (_pollInProgress)
+        if (!this.started)
         {
-            ScheduleNextPoll();
             return;
         }
 
-        _pollInProgress = true;
-        int pollGeneration = ++_pollGeneration;
+        if (this.pollInProgress)
+        {
+            this.ScheduleNextPoll();
+            return;
+        }
+
+        this.pollInProgress = true;
+        int pollGeneration = ++this.pollGeneration;
         try
         {
             Server.ExecuteCommand(
                 "status",
-                output => ProcessStatusOutput(pollGeneration, output)
-            );
-            server.ScheduleOnce(
+                output => ProcessStatusOutput(pollGeneration, output));
+            this.server.ScheduleOnce(
                 PollTimeoutSeconds.Seconds(),
-                () => HandlePollTimeout(pollGeneration)
-            );
+                () => this.HandlePollTimeout(pollGeneration));
         }
         catch (Exception ex)
         {
-            _pollInProgress = false;
-            _pollGeneration++;
+            this.pollInProgress = false;
+            this.pollGeneration++;
             Console.WriteLine($"[PING] Failed to run server status: {ex}");
-            ScheduleNextPoll();
+            this.ScheduleNextPoll();
         }
     }
 
     private void ProcessStatusOutput(int pollGeneration, string output)
     {
-        if (!_pollInProgress || pollGeneration != _pollGeneration)
+        if (!this.pollInProgress || pollGeneration != this.pollGeneration)
+        {
             return;
+        }
 
         try
         {
             var rowsByName = new Dictionary<string, StatusRow>(
-                StringComparer.OrdinalIgnoreCase
-            );
+                StringComparer.OrdinalIgnoreCase);
             var ambiguousRowNames = new HashSet<string>(
-                StringComparer.OrdinalIgnoreCase
-            );
+                StringComparer.OrdinalIgnoreCase);
             foreach (string line in output.Split(
                 new[] { '\r', '\n' },
-                StringSplitOptions.RemoveEmptyEntries
-            ))
+                StringSplitOptions.RemoveEmptyEntries))
             {
                 var row = ParseStatusRow(line);
                 if (row == null || ambiguousRowNames.Contains(row.Name))
+                {
                     continue;
+                }
 
                 if (!rowsByName.TryAdd(row.Name, row))
                 {
@@ -126,22 +171,24 @@ public sealed class PingManager
 
             var controllersByName =
                 new Dictionary<string, CCitadelPlayerController>(
-                    StringComparer.OrdinalIgnoreCase
-                );
+                    StringComparer.OrdinalIgnoreCase);
             var ambiguousControllerNames = new HashSet<string>(
-                StringComparer.OrdinalIgnoreCase
-            );
+                StringComparer.OrdinalIgnoreCase);
             var connectedIds = new HashSet<ulong>();
             int playerCount = 0;
             foreach (var player in Players.GetAll())
             {
                 if (player.IsBot || player.PlayerSteamId == 0)
+                {
                     continue;
+                }
 
                 playerCount++;
                 connectedIds.Add(player.PlayerSteamId);
                 if (ambiguousControllerNames.Contains(player.PlayerName))
+                {
                     continue;
+                }
 
                 if (!controllersByName.TryAdd(player.PlayerName, player))
                 {
@@ -151,26 +198,30 @@ public sealed class PingManager
             }
 
             List<ulong>? staleSampleIds = null;
-            foreach (var sample in _samples)
+            foreach (var sample in this.samples)
             {
                 if (!connectedIds.Contains(sample.Key))
+                {
                     (staleSampleIds ??= new List<ulong>()).Add(sample.Key);
+                }
             }
+
             if (staleSampleIds != null)
             {
                 foreach (ulong steamId in staleSampleIds)
-                    _samples.Remove(steamId);
+                {
+                    this.samples.Remove(steamId);
+                }
             }
 
-            _latestReadings.Clear();
+            this.latestReadings.Clear();
             DateTimeOffset capturedAt = DateTimeOffset.UtcNow;
             foreach (var group in controllersByName)
             {
                 if (
                     ambiguousControllerNames.Contains(group.Key) ||
                     ambiguousRowNames.Contains(group.Key) ||
-                    !rowsByName.TryGetValue(group.Key, out var statusRow)
-                )
+                    !rowsByName.TryGetValue(group.Key, out var statusRow))
                 {
                     continue;
                 }
@@ -179,86 +230,66 @@ public sealed class PingManager
                 var samples = GetSamples(player.PlayerSteamId);
                 samples.Enqueue(statusRow.PingMs);
                 while (samples.Count > SampleCount)
+                {
                     samples.Dequeue();
+                }
 
-                _latestReadings[player.PlayerSteamId] = new PingSnapshot(
+                this.latestReadings[player.PlayerSteamId] = new PingSnapshot(
                     Median(samples),
-                    capturedAt
-                );
+                    capturedAt);
             }
 
-            if (playerCount > 0 && _latestReadings.Count == 0)
+            if (playerCount > 0 && this.latestReadings.Count == 0)
             {
-                if (!_warnedAboutMissingRows)
+                if (!this.warnedAboutMissingRows)
                 {
                     Console.WriteLine(
                         "[PING] No unambiguous player rows were parsed from server status; " +
-                        "ping matchmaking will wait for usable readings."
-                    );
-                    _warnedAboutMissingRows = true;
+                        "ping matchmaking will wait for usable readings.");
+                    this.warnedAboutMissingRows = true;
                 }
             }
             else
             {
-                _warnedAboutMissingRows = false;
+                this.warnedAboutMissingRows = false;
             }
 
-            server.Queue.TryStartMatches();
+            this.server.Queue.TryStartMatches();
         }
         catch (Exception ex)
         {
-            _latestReadings.Clear();
+            this.latestReadings.Clear();
             Console.WriteLine($"[PING] Failed to process server status output: {ex}");
         }
         finally
         {
-            _pollInProgress = false;
-            ScheduleNextPoll();
+            this.pollInProgress = false;
+            this.ScheduleNextPoll();
         }
     }
 
     private void HandlePollTimeout(int pollGeneration)
     {
-        if (!_pollInProgress || pollGeneration != _pollGeneration)
+        if (!this.pollInProgress || pollGeneration != this.pollGeneration)
+        {
             return;
+        }
 
-        _pollInProgress = false;
-        _pollGeneration++;
+        this.pollInProgress = false;
+        this.pollGeneration++;
         Console.WriteLine("[PING] Server status did not return output before the timeout.");
-        ScheduleNextPoll();
+        this.ScheduleNextPoll();
     }
 
     private Queue<int> GetSamples(ulong steamId)
     {
-        if (!_samples.TryGetValue(steamId, out var samples))
+        if (!this.samples.TryGetValue(steamId, out var samples))
         {
             samples = new Queue<int>();
-            _samples[steamId] = samples;
+            this.samples[steamId] = samples;
         }
 
         return samples;
-    }
-
-    private static int Median(Queue<int> values)
-    {
-        using var enumerator = values.GetEnumerator();
-        enumerator.MoveNext();
-        int first = enumerator.Current;
-        if (!enumerator.MoveNext())
-            return first;
-
-        int second = enumerator.Current;
-        if (!enumerator.MoveNext())
-            return (int)Math.Round((first + second) / 2d);
-
-        int third = enumerator.Current;
-        if (first > second)
-            (first, second) = (second, first);
-        if (second > third)
-            (second, third) = (third, second);
-        if (first > second)
-            (first, second) = (second, first);
-        return second;
     }
 
     private static StatusRow? ParseStatusRow(string line)
@@ -266,12 +297,13 @@ public sealed class PingManager
         int firstQuote = line.IndexOf('\'');
         int lastQuote = line.LastIndexOf('\'');
         if (firstQuote < 0 || lastQuote <= firstQuote)
+        {
             return null;
+        }
 
         string[] fields = line[..firstQuote].Split(
             (char[]?)null,
-            StringSplitOptions.RemoveEmptyEntries
-        );
+            StringSplitOptions.RemoveEmptyEntries);
         if (fields.Length < 3
             || !int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out _)
             || fields[1].Equals("BOT", StringComparison.OrdinalIgnoreCase)
@@ -279,8 +311,7 @@ public sealed class PingManager
                 fields[2],
                 NumberStyles.Integer,
                 CultureInfo.InvariantCulture,
-                out int pingMs
-            )
+                out int pingMs)
             || pingMs < 0)
         {
             return null;
@@ -294,23 +325,28 @@ public sealed class PingManager
 
     private void ScheduleNextPoll()
     {
-        if (!_started)
+        if (!this.started)
+        {
             return;
+        }
 
         // Only the most recently scheduled poll may run. Without this, every /ping
         // (Refresh) and every overlapping poll started an extra polling loop that never
         // ended, so `status` ran more and more often the longer the server was up.
-        int token = ++_scheduledPollToken;
+        int token = ++this.scheduledPollToken;
         bool anyoneQueued =
-            server.RankedQueue.Count > 0 || server.UnrankedQueue.Count > 0;
+            this.server.RankedQueue.Count > 0 || this.server.UnrankedQueue.Count > 0;
         int interval = anyoneQueued ? PollIntervalSeconds : IdlePollIntervalSeconds;
-        server.ScheduleOnce(interval.Seconds(), () =>
+        this.server.ScheduleOnce(interval.Seconds(), () =>
         {
-            if (token == _scheduledPollToken)
-                Poll();
+            if (token == this.scheduledPollToken)
+            {
+                this.Poll();
+            }
         });
     }
 
     private sealed record StatusRow(string Name, int PingMs);
+
     private sealed record PingSnapshot(int PingMs, DateTimeOffset CapturedAt);
 }
